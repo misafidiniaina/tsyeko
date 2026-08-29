@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#191919" />
+    <meta name="description" content="Tsyaiko — a fast, local-first interface design editor." />
+    <title>Tsyaiko — Design editor</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell" id="app">
+      <header class="topbar">
+        <div class="brand" aria-label="Tsyaiko home">
+          <span class="brand-mark" aria-hidden="true">
+            <i></i><i></i><i></i><i></i>
+          </span>
+          <span>Tsyaiko</span>
+        </div>
+
+        <button class="icon-button menu-trigger" id="mainMenuButton" aria-label="Main menu" title="Main menu">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5.5h14M3 10h14M3 14.5h14" /></svg>
+        </button>
+
+        <div class="document-title-wrap">
+          <input id="documentTitle" class="document-title" value="Untitled design" aria-label="Document name" maxlength="80" />
+          <span class="save-state" id="saveState">Saved locally</span>
+        </div>
+
+        <div class="topbar-actions">
+          <div class="presence" aria-label="One collaborator online">
+            <span class="avatar avatar-purple">T</span>
+            <span class="presence-dot"></span>
+          </div>
+          <button class="button button-quiet" id="playButton" title="Preview design">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 5 8 5-8 5V5Z" /></svg>
+            Preview
+          </button>
+          <button class="button button-primary" id="exportButton">Export</button>
+        </div>
+      </header>
+
+      <div class="editor-grid">
+        <aside class="left-sidebar">
+          <div class="sidebar-heading">
+            <div class="segmented-control" role="tablist" aria-label="Left panel">
+              <button class="segment active" data-panel="layers" role="tab">Layers</button>
+              <button class="segment" data-panel="assets" role="tab">Assets</button>
+            </div>
+            <button class="icon-button small" id="addPageButton" title="Add page" aria-label="Add page">
+              <svg viewBox="0 0 20 20"><path d="M10 4v12M4 10h12" /></svg>
+            </button>
+          </div>
+
+          <button class="page-row" id="pageSwitcher" aria-haspopup="true" aria-expanded="false">
+            <svg viewBox="0 0 20 20"><path d="M6 3.5h6l3 3v10H6zM12 3.5v3h3" /></svg>
+            <span id="currentPageName">Page 1</span>
+            <svg class="page-chevron" viewBox="0 0 20 20"><path d="m6.5 8 3.5 3.5L13.5 8" /></svg>
+          </button>
+
+          <div id="layersPanel" class="panel-content active-panel">
+            <div class="layers-list" id="layersList"></div>
+            <div class="empty-panel" id="emptyLayers">
+              <span class="empty-panel-icon">◇</span>
+              <p>Your layers will appear here.</p>
+            </div>
+          </div>
+
+          <div id="assetsPanel" class="panel-content">
+            <div class="assets-search">
+              <svg viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="4.5" /><path d="m12 12 4 4" /></svg>
+              <input placeholder="Search assets" aria-label="Search assets" />
+            </div>
+            <p class="panel-label">Local components</p>
+            <div class="empty-panel compact">
+              <span class="empty-panel-icon">▧</span>
+              <p>Bring raster assets onto the current page.</p>
+              <button class="button button-primary" id="importImageButton">Import image</button>
+              <p style="margin-top: 22px">Create reusable components from your selection.</p>
+              <button class="button button-quiet" id="createComponentButton">Create component</button>
+            </div>
+          </div>
+        </aside>
+
+        <main class="workspace" id="workspace">
+          <canvas id="designCanvas" tabindex="0" aria-label="Design canvas"></canvas>
+          <textarea id="textEditor" class="text-editor" spellcheck="false" aria-label="Edit text"></textarea>
+
+          <div class="floating-toolbar" role="toolbar" aria-label="Design tools">
+            <button class="tool-button active" data-tool="select" title="Move (V)" aria-label="Move tool">
+              <svg viewBox="0 0 24 24"><path d="m5 3 13 8-6 1.5-3.5 6.5L5 3Z" /></svg>
+              <span class="tool-key">V</span>
+            </button>
+            <button class="tool-button" data-tool="hand" title="Hand (H)" aria-label="Hand tool">
+              <svg viewBox="0 0 24 24"><path d="M8 11V6.5a1.5 1.5 0 0 1 3 0V10m0-4.5a1.5 1.5 0 0 1 3 0V10m0-3a1.5 1.5 0 0 1 3 0v4m0-2a1.5 1.5 0 0 1 3 0v4c0 5-3 8-8 8-3.5 0-5.5-2-7.5-5l-1.2-1.8A1.7 1.7 0 0 1 6 12.3L8 14" /></svg>
+              <span class="tool-key">H</span>
+            </button>
+            <span class="toolbar-divider"></span>
+            <button class="tool-button" data-tool="frame" title="Frame (F)" aria-label="Frame tool">
+              <svg viewBox="0 0 24 24"><path d="M5 3v18M19 3v18M3 5h18M3 19h18" /></svg>
+              <span class="tool-key">F</span>
+            </button>
+            <button class="tool-button" data-tool="rectangle" title="Rectangle (R)" aria-label="Rectangle tool">
+              <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="1" /></svg>
+              <span class="tool-key">R</span>
+            </button>
+            <button class="tool-button" data-tool="ellipse" title="Ellipse (O)" aria-label="Ellipse tool">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /></svg>
+              <span class="tool-key">O</span>
+            </button>
+            <button class="tool-button" data-tool="text" title="Text (T)" aria-label="Text tool">
+              <svg viewBox="0 0 24 24"><path d="M5 5h14M12 5v14M8 19h8" /></svg>
+              <span class="tool-key">T</span>
+            </button>
+            <button class="tool-button" data-tool="image" title="Place image (I)" aria-label="Place image">
+              <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2" /><circle cx="15.5" cy="9.5" r="1.5" /><path d="m6.5 17 4-4 2.5 2 2-2 2.5 4" /></svg>
+              <span class="tool-key">I</span>
+            </button>
+          </div>
+
+          <div class="canvas-help" id="canvasHelp">
+            <kbd>Space</kbd> + drag to pan <span>·</span> <kbd>⌘</kbd> + scroll to zoom
+          </div>
+
+          <div class="zoom-control">
+            <button class="icon-button small" id="zoomOutButton" title="Zoom out" aria-label="Zoom out">
+              <svg viewBox="0 0 20 20"><path d="M4 10h12" /></svg>
+            </button>
+            <button class="zoom-value" id="zoomValue" title="Fit to selection">100%</button>
+            <button class="icon-button small" id="zoomInButton" title="Zoom in" aria-label="Zoom in">
+              <svg viewBox="0 0 20 20"><path d="M10 4v12M4 10h12" /></svg>
+            </button>
+          </div>
+        </main>
+
+        <aside class="right-sidebar">
+          <div class="inspector-tabs" role="tablist">
+            <button class="inspector-tab active">Design</button>
+            <button class="inspector-tab">Prototype</button>
+          </div>
+          <div id="inspector" class="inspector"></div>
+        </aside>
+      </div>
+    </div>
+
+    <div class="popover menu-popover" id="mainMenu" hidden>
+      <button data-action="new"><span>New document</span><kbd>⌘N</kbd></button>
+      <button data-action="import"><span>Import JSON…</span><kbd>⇧⌘I</kbd></button>
+      <span class="menu-separator"></span>
+      <button data-action="undo"><span>Undo</span><kbd>⌘Z</kbd></button>
+      <button data-action="redo"><span>Redo</span><kbd>⇧⌘Z</kbd></button>
+      <span class="menu-separator"></span>
+      <button data-action="fit"><span>Zoom to fit</span><kbd>1</kbd></button>
+      <button data-action="shortcuts"><span>Keyboard shortcuts</span><kbd>?</kbd></button>
+    </div>
+
+    <div class="popover pages-popover" id="pagesPopover" hidden>
+      <div class="pages-popover-header">
+        <span>Pages</span>
+        <button class="icon-button small" data-add-page title="Add page" aria-label="Add page">
+          <svg viewBox="0 0 20 20"><path d="M10 4v12M4 10h12" /></svg>
+        </button>
+      </div>
+      <div class="pages-list" id="pagesList"></div>
+      <p class="pages-hint">Each page keeps its own canvas position and zoom.</p>
+    </div>
+
+    <div class="popover export-popover" id="exportMenu" hidden>
+      <p class="popover-title">Export document</p>
+      <button data-export="png"><span class="format-badge">PNG</span><span><strong>PNG image</strong><small>Current page at 2× resolution</small></span></button>
+      <button data-export="svg"><span class="format-badge">SVG</span><span><strong>SVG vector</strong><small>Current page as editable vectors</small></span></button>
+      <button data-export="json"><span class="format-badge">JSON</span><span><strong>Tsyaiko file</strong><small>All pages in one editable document</small></span></button>
+    </div>
+
+    <div class="modal-backdrop" id="previewModal" hidden>
+      <div class="preview-modal">
+        <div class="preview-header">
+          <span>Prototype preview</span>
+          <button class="icon-button" data-close-modal aria-label="Close preview">
+            <svg viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15" /></svg>
+          </button>
+        </div>
+        <div class="preview-stage" id="previewStage"></div>
+      </div>
+    </div>
+
+    <div class="toast-region" id="toastRegion" aria-live="polite"></div>
+    <input type="file" id="fileInput" accept="application/json,.json" hidden />
+    <input type="file" id="imageFileInput" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
+
+    <script type="module" src="/src/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,5 @@
+data/
+dist/
+.cache/
+*.log
+.DS_Store
