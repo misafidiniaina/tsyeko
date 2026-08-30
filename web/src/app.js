@@ -41,6 +41,17 @@ import {
   renderDocumentToCanvas,
   resizeCursorForHandle,
 } from "./renderer.js";
+import {
+  clearVectorHandles,
+  countCurvedSegments,
+  makeVectorPointSmooth,
+  reverseVectorPoints,
+  scaleVectorPoint,
+  setVectorHandle,
+  splitVectorSegment,
+  translateVectorAnchor,
+  VECTOR_HANDLE_MODES,
+} from "./vector.js";
 
 const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 16;
@@ -343,10 +354,11 @@ function bindInspector() {
     const previousValue = node[property];
     if (node.type === NODE_TYPES.VECTOR && ["width", "height"].includes(property)) {
       const scale = value / previousValue;
-      node.vectorPoints = node.vectorPoints.map((point) => ({
-        x: property === "width" ? point.x * scale : point.x,
-        y: property === "height" ? point.y * scale : point.y,
-      }));
+      node.vectorPoints = node.vectorPoints.map((point) => scaleVectorPoint(
+        point,
+        property === "width" ? scale : 1,
+        property === "height" ? scale : 1,
+      ));
     }
     node[property] = value;
     if (isContainerNode(node) && ["x", "y"].includes(property)) {
@@ -408,10 +420,20 @@ function bindInspector() {
     }
     if (action === "vector-fill-rule") node.vectorFillRule = button.dataset.value;
     if (action === "reverse-vector") {
-      node.vectorPoints.reverse();
+      node.vectorPoints = reverseVectorPoints(node.vectorPoints);
       if (vectorEdit?.nodeId === node.id && Number.isInteger(vectorEdit.pointIndex)) {
         vectorEdit.pointIndex = node.vectorPoints.length - 1 - vectorEdit.pointIndex;
       }
+    }
+    if (action === "vector-point-corner" && Number.isInteger(vectorEdit?.pointIndex)) {
+      clearVectorHandles(node.vectorPoints[vectorEdit.pointIndex]);
+      vectorEdit.handleKind = null;
+      normalizeVectorBounds(node);
+    }
+    if (action === "vector-point-smooth" && Number.isInteger(vectorEdit?.pointIndex)) {
+      makeVectorPointSmooth(node.vectorPoints, vectorEdit.pointIndex, node.vectorClosed);
+      vectorEdit.handleKind = null;
+      normalizeVectorBounds(node);
     }
     if (action === "edit-vector") {
       if (vectorEdit?.nodeId === node.id) exitVectorEdit();
@@ -474,7 +496,7 @@ function bindMenus() {
     if (action === "redo") redo();
     if (action === "fit") fitToContent();
     if (action === "shortcuts") {
-      showToast("V select · P pen · Enter edit path · F frame · R rectangle · T text · ⌘G group · ⌘D duplicate");
+      showToast("V select · P pen (drag for curves) · Enter edit path · Alt-drag disconnect handle · ⌘G group · ⌘D duplicate");
     }
   });
 
@@ -708,9 +730,34 @@ function onPointerDown(event) {
     if (!vector || vector.type !== NODE_TYPES.VECTOR || isNodeEffectivelyLocked(currentPage(), vector)) {
       exitVectorEdit(false);
     } else {
+      if (Number.isInteger(vectorEdit.pointIndex)) {
+        const handleKind = renderer.getVectorHandleAt(
+          screen,
+          vector,
+          camera,
+          vectorEdit.pointIndex,
+        );
+        if (handleKind) {
+          vectorEdit.handleKind = handleKind;
+          interaction = {
+            type: "vector-handle",
+            pointerId: event.pointerId,
+            nodeId: vector.id,
+            pointIndex: vectorEdit.pointIndex,
+            handleKind,
+            original: cloneNode(vector),
+            anchorWorld: localToWorld(vector, vector.vectorPoints[vectorEdit.pointIndex]),
+          };
+          capturePointer(event);
+          refreshUI();
+          return;
+        }
+      }
+
       const pointIndex = renderer.getVectorPointAt(screen, vector, camera);
       if (pointIndex !== null) {
         vectorEdit.pointIndex = pointIndex;
+        vectorEdit.handleKind = null;
         interaction = {
           type: "vector-point",
           pointerId: event.pointerId,
@@ -727,8 +774,13 @@ function onPointerDown(event) {
 
       const segment = renderer.getVectorSegmentAt(screen, vector, camera);
       if (event.altKey && segment) {
-        vector.vectorPoints.splice(segment.index + 1, 0, segment.local);
-        vectorEdit.pointIndex = segment.index + 1;
+        vectorEdit.pointIndex = splitVectorSegment(
+          vector.vectorPoints,
+          segment.index,
+          segment.t,
+          vector.vectorClosed,
+        );
+        vectorEdit.handleKind = null;
         commitDocument();
         return;
       }
@@ -736,6 +788,7 @@ function onPointerDown(event) {
       const editHit = renderer.hitTest(currentPage(), screen, camera);
       if (editHit?.id === vector.id) {
         vectorEdit.pointIndex = null;
+        vectorEdit.handleKind = null;
         refreshUI();
         return;
       }
@@ -826,6 +879,8 @@ function onPointerMove(event) {
   if (interaction.type === "resize") updateResize(world, event);
   if (interaction.type === "rotate") updateRotation(world, event);
   if (interaction.type === "vector-point") updateVectorPoint(world, event);
+  if (interaction.type === "vector-handle") updateVectorHandle(world, event);
+  if (interaction.type === "pen-anchor") updatePenAnchorHandles(world, event);
   if (interaction.type === "marquee") updateMarquee(screen);
   requestRender();
 }
@@ -849,11 +904,13 @@ function onPointerUp(event) {
     if (completedType === "move") reparentMovedRoots(interaction.rootIds);
     syncGroupBounds(currentPage());
     commitDocument();
-  } else if (completedType === "vector-point") {
+  } else if (["vector-point", "vector-handle"].includes(completedType)) {
     const node = getNode(currentPage(), interaction.nodeId);
     if (node?.type === NODE_TYPES.VECTOR) normalizeVectorBounds(node);
     syncGroupBounds(currentPage());
     commitDocument();
+  } else if (completedType === "pen-anchor") {
+    requestRender();
   } else if (completedType === "marquee") {
     refreshUI();
   }
@@ -889,7 +946,7 @@ function onPointerCancel(event) {
       if (node) Object.assign(node, original);
     }
   }
-  if (interaction.type === "vector-point") {
+  if (["vector-point", "vector-handle"].includes(interaction.type)) {
     const node = getNode(currentPage(), interaction.nodeId);
     if (node) Object.assign(node, interaction.original);
   }
@@ -910,11 +967,26 @@ function onDoubleClick(event) {
   const screen = eventPoint(event);
   const node = renderer.hitTest(currentPage(), screen, camera);
   if (vectorEdit && node?.id === vectorEdit.nodeId && node.type === NODE_TYPES.VECTOR) {
-    if (renderer.getVectorPointAt(screen, node, camera) !== null) return;
+    const pointIndex = renderer.getVectorPointAt(screen, node, camera);
+    if (pointIndex !== null) {
+      vectorEdit.pointIndex = pointIndex;
+      vectorEdit.handleKind = null;
+      const point = node.vectorPoints[pointIndex];
+      if (point.in || point.out) clearVectorHandles(point);
+      else makeVectorPointSmooth(node.vectorPoints, pointIndex, node.vectorClosed);
+      normalizeVectorBounds(node);
+      commitDocument();
+      return;
+    }
     const segment = renderer.getVectorSegmentAt(screen, node, camera);
     if (segment) {
-      node.vectorPoints.splice(segment.index + 1, 0, segment.local);
-      vectorEdit.pointIndex = segment.index + 1;
+      vectorEdit.pointIndex = splitVectorSegment(
+        node.vectorPoints,
+        segment.index,
+        segment.t,
+        node.vectorClosed,
+      );
+      vectorEdit.handleKind = null;
       commitDocument();
     }
     return;
@@ -947,7 +1019,8 @@ function onWheel(event) {
 function handlePenPointerDown(event, screen, world) {
   event.preventDefault();
   if (!penDraft) {
-    penDraft = { points: [world], hoverWorld: world };
+    penDraft = { points: [createDraftVectorPoint(world)], hoverWorld: world };
+    beginPenAnchorInteraction(event, 0);
     requestRender();
     return;
   }
@@ -967,10 +1040,46 @@ function handlePenPointerDown(event, screen, world) {
   }
 
   if (pointDistance(point, penDraft.points.at(-1)) > 0.5 / camera.zoom) {
-    penDraft.points.push(point);
+    penDraft.points.push(createDraftVectorPoint(point));
+    beginPenAnchorInteraction(event, penDraft.points.length - 1);
   }
   penDraft.hoverWorld = point;
   requestRender();
+}
+
+function createDraftVectorPoint(point) {
+  return {
+    x: point.x,
+    y: point.y,
+    in: null,
+    out: null,
+    handleMode: VECTOR_HANDLE_MODES.CORNER,
+  };
+}
+
+function beginPenAnchorInteraction(event, pointIndex) {
+  interaction = {
+    type: "pen-anchor",
+    pointerId: event.pointerId,
+    pointIndex,
+    anchorWorld: {
+      x: penDraft.points[pointIndex].x,
+      y: penDraft.points[pointIndex].y,
+    },
+  };
+  capturePointer(event);
+}
+
+function updatePenAnchorHandles(world, event) {
+  const point = penDraft?.points[interaction.pointIndex];
+  if (!point) return;
+  const target = constrainPenPoint(interaction.anchorWorld, world, event.shiftKey);
+  if (pointDistance(target, interaction.anchorWorld) < 3 / camera.zoom) {
+    clearVectorHandles(point);
+    return;
+  }
+  setVectorHandle(point, "out", target, true);
+  penDraft.hoverWorld = { x: point.x, y: point.y };
 }
 
 function finishPenPath(closed, switchToSelect = true) {
@@ -1023,7 +1132,7 @@ function enterVectorEdit(node, pointIndex = null) {
   if (node?.type !== NODE_TYPES.VECTOR || isNodeEffectivelyLocked(currentPage(), node)) return;
   if (activeTool !== "select") setTool("select");
   selectedIds = [node.id];
-  vectorEdit = { nodeId: node.id, pointIndex };
+  vectorEdit = { nodeId: node.id, pointIndex, handleKind: null };
   refreshUI();
 }
 
@@ -1037,7 +1146,26 @@ function updateVectorPoint(world, event) {
   const node = getNode(currentPage(), interaction.nodeId);
   if (node?.type !== NODE_TYPES.VECTOR) return;
   const target = constrainPenPoint(interaction.originalWorld, world, event.shiftKey);
-  node.vectorPoints[interaction.pointIndex] = worldToLocal(node, target);
+  const originalPoint = interaction.original.vectorPoints[interaction.pointIndex];
+  const originalLocal = { x: originalPoint.x, y: originalPoint.y };
+  const targetLocal = worldToLocal(node, target);
+  const point = cloneNode(originalPoint);
+  translateVectorAnchor(point, targetLocal.x - originalLocal.x, targetLocal.y - originalLocal.y);
+  node.vectorPoints[interaction.pointIndex] = point;
+}
+
+function updateVectorHandle(world, event) {
+  const node = getNode(currentPage(), interaction.nodeId);
+  if (node?.type !== NODE_TYPES.VECTOR) return;
+  const targetWorld = constrainPenPoint(interaction.anchorWorld, world, event.shiftKey);
+  const point = cloneNode(interaction.original.vectorPoints[interaction.pointIndex]);
+  setVectorHandle(
+    point,
+    interaction.handleKind,
+    worldToLocal(node, targetWorld),
+    !event.altKey,
+  );
+  node.vectorPoints[interaction.pointIndex] = point;
 }
 
 function deleteSelectedVectorPoint() {
@@ -1064,7 +1192,9 @@ function nudgeVectorPoint(key, amount) {
   if (key === "ArrowRight") world.x += amount;
   if (key === "ArrowUp") world.y -= amount;
   if (key === "ArrowDown") world.y += amount;
-  node.vectorPoints[index] = worldToLocal(node, world);
+  const target = worldToLocal(node, world);
+  const point = node.vectorPoints[index];
+  translateVectorAnchor(point, target.x - point.x, target.y - point.y);
   normalizeVectorBounds(node);
   commitDocument();
 }
@@ -1182,10 +1312,8 @@ function updateResize(world, event) {
   if (node.type === NODE_TYPES.VECTOR) {
     const scaleX = width / original.width;
     const scaleY = height / original.height;
-    node.vectorPoints = original.vectorPoints.map((point) => ({
-      x: point.x * scaleX,
-      y: point.y * scaleY,
-    }));
+    node.vectorPoints = original.vectorPoints.map((point) =>
+      scaleVectorPoint(point, scaleX, scaleY));
   }
 
   if (node.type === NODE_TYPES.GROUP) {
@@ -1200,10 +1328,8 @@ function updateResize(world, event) {
       child.width = Math.max(1, snapshot.width * scaleX);
       child.height = Math.max(1, snapshot.height * scaleY);
       if (child.type === NODE_TYPES.VECTOR) {
-        child.vectorPoints = snapshot.vectorPoints.map((point) => ({
-          x: point.x * scaleX,
-          y: point.y * scaleY,
-        }));
+        child.vectorPoints = snapshot.vectorPoints.map((point) =>
+          scaleVectorPoint(point, scaleX, scaleY));
       }
       if (child.type === NODE_TYPES.TEXT) {
         child.fontSize = Math.max(1, snapshot.fontSize * Math.min(scaleX, scaleY));
@@ -1335,9 +1461,12 @@ function updateHoverCursor(screen) {
   }
   const selected = selectedIds.length === 1 ? getNode(currentPage(), selectedIds[0]) : null;
   if (vectorEdit && selected?.id === vectorEdit.nodeId) {
+    const handleKind = Number.isInteger(vectorEdit.pointIndex)
+      ? renderer.getVectorHandleAt(screen, selected, camera, vectorEdit.pointIndex)
+      : null;
     const pointIndex = renderer.getVectorPointAt(screen, selected, camera);
     elements.canvas.style.cursor = "";
-    elements.canvas.dataset.cursor = pointIndex !== null ? "move" : "default";
+    elements.canvas.dataset.cursor = handleKind || pointIndex !== null ? "move" : "default";
     return;
   }
   const handle = selected ? renderer.getHandleAt(screen, selected, camera) : null;
@@ -1879,12 +2008,19 @@ function imageInspector(node) {
 
 function vectorInspector(node) {
   const editing = vectorEdit?.nodeId === node.id;
+  const selectedPoint = editing && Number.isInteger(vectorEdit.pointIndex)
+    ? node.vectorPoints[vectorEdit.pointIndex]
+    : null;
+  const curvedSegments = countCurvedSegments(node);
   return `
     <section class="inspector-section">
       <p class="inspector-section-title">Vector path</p>
       <div class="vector-summary">
         <span data-vector-point-count>${node.vectorPoints.length}</span>
         <span>anchor${node.vectorPoints.length === 1 ? "" : "s"}</span>
+        <span class="vector-summary-separator">·</span>
+        <span data-vector-curve-count>${curvedSegments}</span>
+        <span>curve${curvedSegments === 1 ? "" : "s"}</span>
       </div>
       <div class="icon-toggle-row" style="margin-top: 6px">
         <button class="icon-toggle ${node.vectorClosed ? "" : "active"}" data-inspector-action="vector-closed" data-value="false">Open</button>
@@ -1898,7 +2034,18 @@ function vectorInspector(node) {
         <button class="button ${editing ? "button-primary" : "button-quiet"}" data-inspector-action="edit-vector">${editing ? "Done editing points" : "Edit points"}</button>
         <button class="button button-quiet" data-inspector-action="reverse-vector">Reverse path direction</button>
       </div>
-      <p class="inspector-hint">Double-click a segment to add an anchor. Alt-click also inserts one; Delete removes the selected anchor.</p>
+      ${selectedPoint ? `
+        <div class="vector-point-editor">
+          <div class="vector-point-heading">
+            <span>Selected anchor</span>
+            <span data-vector-handle-mode>${capitalize(selectedPoint.handleMode)}</span>
+          </div>
+          <div class="icon-toggle-row">
+            <button class="icon-toggle ${selectedPoint.handleMode === VECTOR_HANDLE_MODES.CORNER ? "active" : ""}" data-inspector-action="vector-point-corner">Corner</button>
+            <button class="icon-toggle ${selectedPoint.handleMode !== VECTOR_HANDLE_MODES.CORNER ? "active" : ""}" data-inspector-action="vector-point-smooth">Smooth</button>
+          </div>
+        </div>` : ""}
+      <p class="inspector-hint">Drag while placing an anchor to create a curve. Double-click a segment to split it without changing its shape. Double-click an anchor to toggle corner/smooth; Alt-drag a handle to disconnect it.</p>
     </section>`;
 }
 

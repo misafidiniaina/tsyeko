@@ -67,8 +67,8 @@ try {
         shadow: { enabled: true, color: "#000000", opacity: 0.35, offsetX: 6, offsetY: 14, blur: 22 }
       }));
       page.nodes.push(createVectorNodeFromWorldPoints([
-        { x: 180, y: 10 },
-        { x: 250, y: 40 },
+        { x: 180, y: 10, out: { x: 205, y: -10 }, handleMode: "free" },
+        { x: 250, y: 40, in: { x: 225, y: 70 }, handleMode: "free" },
         { x: 200, y: 100 }
       ], true));
       const svg = documentToSVG(page);
@@ -77,11 +77,12 @@ try {
         valid: !parsed.querySelector("parsererror"),
         gradient: Boolean(parsed.querySelector("linearGradient")),
         shadow: Boolean(parsed.querySelector("feDropShadow")),
-        vector: Boolean(parsed.querySelector("path"))
+        vector: Boolean(parsed.querySelector("path")),
+        curve: parsed.querySelector("path")?.getAttribute("d").includes("C ")
       };
     })()
   `);
-  if (!svgPaintExport.valid || !svgPaintExport.gradient || !svgPaintExport.shadow || !svgPaintExport.vector) {
+  if (!svgPaintExport.valid || !svgPaintExport.gradient || !svgPaintExport.shadow || !svgPaintExport.vector || !svgPaintExport.curve) {
     throw new Error(`SVG paint export validation failed: ${JSON.stringify(svgPaintExport)}`);
   }
 
@@ -197,15 +198,40 @@ try {
     { x: canvas.left + canvas.width * 0.72, y: canvas.top + canvas.height * 0.42 },
     { x: canvas.left + canvas.width * 0.58, y: canvas.top + canvas.height * 0.55 },
   ];
-  for (const point of [...pathPoints, pathPoints[0]]) {
-    await dispatchClick(command, point);
-  }
+  await dispatchClick(command, pathPoints[0]);
+  const penHandle = { x: pathPoints[1].x + 45, y: pathPoints[1].y - 26 };
+  await command("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: pathPoints[1].x,
+    y: pathPoints[1].y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
+  await command("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: penHandle.x,
+    y: penHandle.y,
+    button: "left",
+    buttons: 1,
+  });
+  await command("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: penHandle.x,
+    y: penHandle.y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+  await dispatchClick(command, pathPoints[2]);
+  await dispatchClick(command, pathPoints[0]);
   await waitFor(
     `document.querySelectorAll(".layer-row").length === 2 &&
      document.querySelector(".selection-summary input")?.value === "Vector path" &&
      document.querySelector("[data-vector-point-count]")?.textContent === "3" &&
+     document.querySelector("[data-vector-curve-count]")?.textContent === "2" &&
      document.querySelector('[data-inspector-action="vector-closed"][data-value="true"]')?.classList.contains("active")`,
-    "closed path creation with the pen tool",
+    "closed Bézier path creation with pen-drag handles",
   );
 
   await evaluate(`
@@ -243,13 +269,51 @@ try {
   });
   await waitFor(
     `document.querySelector("[data-vector-point-count]")?.textContent === "3" &&
+     document.querySelector("[data-vector-handle-mode]")?.textContent === "Mirrored" &&
      document.querySelector("#saveState").textContent === "Saved locally"`,
     "vector anchor dragging",
   );
 
+  const movedHandle = { x: penHandle.x + 34, y: penHandle.y - 18 };
+  const mirroredHandleTarget = { x: movedHandle.x + 20, y: movedHandle.y + 28 };
+  await dragPointer(command, movedHandle, mirroredHandleTarget);
+  await waitFor(
+    `document.querySelector("[data-vector-handle-mode]")?.textContent === "Mirrored" &&
+     document.querySelector("[data-vector-curve-count]")?.textContent === "2" &&
+     document.querySelector("#saveState").textContent === "Saved locally"`,
+    "mirrored Bézier handle editing",
+  );
+
+  const freeHandleTarget = {
+    x: mirroredHandleTarget.x + 16,
+    y: mirroredHandleTarget.y - 22,
+  };
+  await dragPointer(command, mirroredHandleTarget, freeHandleTarget, 1);
+  await waitFor(
+    `document.querySelector("[data-vector-handle-mode]")?.textContent === "Free"`,
+    "Alt-drag disconnected handle editing",
+  );
+
+  await evaluate(`document.querySelector('[data-inspector-action="vector-point-corner"]').click(); true`);
+  await waitFor(
+    `document.querySelector("[data-vector-handle-mode]")?.textContent === "Corner" &&
+     document.querySelector("[data-vector-curve-count]")?.textContent === "0"`,
+    "corner anchor conversion",
+  );
+  await evaluate(`document.querySelector('[data-inspector-action="vector-point-smooth"]').click(); true`);
+  await waitFor(
+    `document.querySelector("[data-vector-handle-mode]")?.textContent === "Mirrored" &&
+     document.querySelector("[data-vector-curve-count]")?.textContent === "2"`,
+    "smooth anchor conversion",
+  );
+  if (process.env.TSYAIKO_CURVE_SCREENSHOT) {
+    const screenshot = await command("Page.captureScreenshot", { format: "png" });
+    writeFileSync(process.env.TSYAIKO_CURVE_SCREENSHOT, Buffer.from(screenshot.data, "base64"));
+  }
+
   const segmentMidpoint = {
-    x: (movedPoint.x + pathPoints[2].x) / 2,
-    y: (movedPoint.y + pathPoints[2].y) / 2,
+    x: (pathPoints[2].x + pathPoints[0].x) / 2,
+    y: (pathPoints[2].y + pathPoints[0].y) / 2,
   };
   await dispatchClick(command, segmentMidpoint, 1);
   await waitFor(
@@ -370,8 +434,12 @@ try {
   `);
   await waitFor(
     `document.querySelector("[data-vector-point-count]")?.textContent === "3" &&
+     document.querySelector("[data-vector-curve-count]")?.textContent === "2" &&
      document.querySelector('[data-inspector-action="vector-closed"][data-value="true"]')?.classList.contains("active")`,
-    "vector path reload persistence",
+    "Bézier path reload persistence",
+  );
+  const reloadedCurveCount = await evaluate(
+    `document.querySelector("[data-vector-curve-count]")?.textContent`,
   );
 
   await evaluate(`
@@ -398,6 +466,7 @@ try {
     gradient: document.querySelector('[data-gradient-property="angle"]')?.value,
     shadowBlur: document.querySelector('[data-shadow-property="blur"]')?.value
   })`);
+  result.curves = reloadedCurveCount;
   if (process.env.TSYAIKO_SCREENSHOT) {
     const screenshot = await command("Page.captureScreenshot", { format: "png" });
     writeFileSync(process.env.TSYAIKO_SCREENSHOT, Buffer.from(screenshot.data, "base64"));
@@ -519,6 +588,35 @@ async function dispatchClick(command, point, modifiers = 0, clickCount = 1) {
     buttons: 0,
     modifiers,
     clickCount,
+  });
+}
+
+async function dragPointer(command, start, end, modifiers = 0) {
+  await command("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: start.x,
+    y: start.y,
+    button: "left",
+    buttons: 1,
+    modifiers,
+    clickCount: 1,
+  });
+  await command("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: end.x,
+    y: end.y,
+    button: "left",
+    buttons: 1,
+    modifiers,
+  });
+  await command("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: end.x,
+    y: end.y,
+    button: "left",
+    buttons: 0,
+    modifiers,
+    clickCount: 1,
   });
 }
 

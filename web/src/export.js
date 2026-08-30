@@ -6,6 +6,7 @@ import {
   isNodeEffectivelyVisible,
   NODE_TYPES,
 } from "./model.js";
+import { getVectorSegments } from "./vector.js";
 
 export function documentToSVG(document, ids = null) {
   const bounds = getDocumentBounds(document, ids);
@@ -90,9 +91,21 @@ function nodeToSVG(node, opacity = node.opacity) {
   }
 
   if (node.type === NODE_TYPES.VECTOR) {
-    const path = node.vectorPoints.map((point, index) =>
-      `${index === 0 ? "M" : "L"} ${round(node.x + point.x)} ${round(node.y + point.y)}`,
-    ).join(" ");
+    const first = node.vectorPoints[0];
+    const commands = [`M ${round(node.x + first.x)} ${round(node.y + first.y)}`];
+    for (const segment of getVectorSegments(node)) {
+      if (node.vectorClosed && segment.endIndex === 0 && !segment.curved) continue;
+      if (segment.curved) {
+        commands.push(
+          `C ${round(node.x + segment.c1.x)} ${round(node.y + segment.c1.y)} ` +
+          `${round(node.x + segment.c2.x)} ${round(node.y + segment.c2.y)} ` +
+          `${round(node.x + segment.p3.x)} ${round(node.y + segment.p3.y)}`,
+        );
+      } else {
+        commands.push(`L ${round(node.x + segment.p3.x)} ${round(node.y + segment.p3.y)}`);
+      }
+    }
+    const path = commands.join(" ");
     const fillPaint = node.vectorClosed ? fill : "none";
     const close = node.vectorClosed ? " Z" : "";
     return `<path d="${path}${close}" fill="${escapeXML(fillPaint)}" fill-rule="${node.vectorFillRule}" stroke="${escapeXML(node.stroke)}" stroke-width="${round(node.strokeWidth)}" stroke-linecap="round" stroke-linejoin="round" ${common} />`;

@@ -1,4 +1,9 @@
-export const DOCUMENT_VERSION = 5;
+import {
+  getVectorControlBounds,
+  VECTOR_HANDLE_MODES,
+} from "./vector.js";
+
+export const DOCUMENT_VERSION = 6;
 const MAX_HIERARCHY_DEPTH = 256;
 
 const DEFAULT_SHADOW = Object.freeze({
@@ -237,8 +242,8 @@ export function createStarterDocument() {
       stroke: "#ffffff",
       strokeWidth: 0,
       vectorPoints: [
-        { x: 32, y: 0 },
-        { x: 4, y: 43 },
+        { x: 32, y: 0, out: { x: 25, y: 12 }, handleMode: "free" },
+        { x: 4, y: 43, in: { x: 12, y: 26 }, handleMode: "free" },
         { x: 25, y: 43 },
         { x: 16, y: 78 },
         { x: 50, y: 31 },
@@ -404,12 +409,28 @@ export function createVectorNodeFromWorldPoints(points, closed = false, override
     ? points
         .filter((point) => point && Number.isFinite(point.x) && Number.isFinite(point.y))
         .slice(0, 5_000)
+        .map((point) => ({
+          x: point.x,
+          y: point.y,
+          in: isFinitePoint(point.in) ? { ...point.in } : null,
+          out: isFinitePoint(point.out) ? { ...point.out } : null,
+          handleMode: Object.values(VECTOR_HANDLE_MODES).includes(point.handleMode)
+            ? point.handleMode
+            : point.in || point.out
+              ? VECTOR_HANDLE_MODES.FREE
+              : VECTOR_HANDLE_MODES.CORNER,
+        }))
     : [];
   if (cleanPoints.length < 2) throw new Error("A vector path needs at least two points.");
-  const minX = Math.min(...cleanPoints.map((point) => point.x));
-  const minY = Math.min(...cleanPoints.map((point) => point.y));
-  const maxX = Math.max(...cleanPoints.map((point) => point.x));
-  const maxY = Math.max(...cleanPoints.map((point) => point.y));
+  const controls = cleanPoints.flatMap((point) => [
+    point,
+    ...(point.in ? [point.in] : []),
+    ...(point.out ? [point.out] : []),
+  ]);
+  const minX = Math.min(...controls.map((point) => point.x));
+  const minY = Math.min(...controls.map((point) => point.y));
+  const maxX = Math.max(...controls.map((point) => point.x));
+  const maxY = Math.max(...controls.map((point) => point.y));
   const rawWidth = maxX - minX;
   const rawHeight = maxY - minY;
   const width = Math.max(1, rawWidth);
@@ -420,7 +441,13 @@ export function createVectorNodeFromWorldPoints(points, closed = false, override
     ...overrides,
     width,
     height,
-    vectorPoints: cleanPoints.map((point) => ({ x: point.x - x, y: point.y - y })),
+    vectorPoints: cleanPoints.map((point) => ({
+      x: point.x - x,
+      y: point.y - y,
+      in: point.in ? { x: point.in.x - x, y: point.in.y - y } : null,
+      out: point.out ? { x: point.out.x - x, y: point.out.y - y } : null,
+      handleMode: point.handleMode,
+    })),
     vectorClosed: closed && cleanPoints.length >= 3,
   });
 }
@@ -430,12 +457,16 @@ export function getVectorWorldPoints(node) {
   return node.vectorPoints.map((point) => localToWorld(node, point));
 }
 
+export function getVectorWorldHandle(node, pointIndex, kind) {
+  if (node?.type !== NODE_TYPES.VECTOR || !["in", "out"].includes(kind)) return null;
+  const handle = node.vectorPoints[pointIndex]?.[kind];
+  return handle ? localToWorld(node, handle) : null;
+}
+
 export function normalizeVectorBounds(node) {
   if (node?.type !== NODE_TYPES.VECTOR || node.vectorPoints.length < 2) return node;
-  const minX = Math.min(...node.vectorPoints.map((point) => point.x));
-  const minY = Math.min(...node.vectorPoints.map((point) => point.y));
-  const maxX = Math.max(...node.vectorPoints.map((point) => point.x));
-  const maxY = Math.max(...node.vectorPoints.map((point) => point.y));
+  const bounds = getVectorControlBounds(node.vectorPoints);
+  const { minX, minY, maxX, maxY } = bounds;
   const rawWidth = maxX - minX;
   const rawHeight = maxY - minY;
   const width = Math.max(1, rawWidth);
@@ -447,6 +478,17 @@ export function normalizeVectorBounds(node) {
   node.vectorPoints = node.vectorPoints.map((point) => ({
     x: point.x - minX + paddingX,
     y: point.y - minY + paddingY,
+    in: point.in ? {
+      x: point.in.x - minX + paddingX,
+      y: point.in.y - minY + paddingY,
+    } : null,
+    out: point.out ? {
+      x: point.out.x - minX + paddingX,
+      y: point.out.y - minY + paddingY,
+    } : null,
+    handleMode: point.handleMode ?? (point.in || point.out
+      ? VECTOR_HANDLE_MODES.FREE
+      : VECTOR_HANDLE_MODES.CORNER),
   }));
   node.width = width;
   node.height = height;
@@ -886,12 +928,52 @@ function normalizeVectorPoints(input, fallback) {
     .slice(0, 5_000)
     .map((point, index) => {
       const fallbackPoint = fallbackPoints[index % fallbackPoints.length];
-      return {
+      const normalized = {
         x: finiteNumber(point.x, fallbackPoint.x, -1_000_000, 1_000_000),
         y: finiteNumber(point.y, fallbackPoint.y, -1_000_000, 1_000_000),
+        in: normalizeVectorHandle(point.in),
+        out: normalizeVectorHandle(point.out),
+        handleMode: Object.values(VECTOR_HANDLE_MODES).includes(point.handleMode)
+          ? point.handleMode
+          : point.in || point.out
+            ? VECTOR_HANDLE_MODES.FREE
+            : VECTOR_HANDLE_MODES.CORNER,
       };
+      if (!normalized.in && !normalized.out) normalized.handleMode = VECTOR_HANDLE_MODES.CORNER;
+      if ((normalized.in || normalized.out) && normalized.handleMode === VECTOR_HANDLE_MODES.CORNER) {
+        normalized.handleMode = VECTOR_HANDLE_MODES.FREE;
+      }
+      if (normalized.handleMode === VECTOR_HANDLE_MODES.MIRRORED) {
+        const sourceHandle = normalized.out ?? normalized.in;
+        const opposite = {
+          x: normalized.x * 2 - sourceHandle.x,
+          y: normalized.y * 2 - sourceHandle.y,
+        };
+        if (normalized.out) normalized.in = opposite;
+        else normalized.out = opposite;
+      }
+      return normalized;
     });
-  return (points.length >= 2 ? points : fallbackPoints).map((point) => ({ ...point }));
+  return points.length >= 2
+    ? points
+    : fallbackPoints.map((point) => ({
+        x: point.x,
+        y: point.y,
+        in: null,
+        out: null,
+        handleMode: VECTOR_HANDLE_MODES.CORNER,
+      }));
+}
+
+function normalizeVectorHandle(input) {
+  if (!input || typeof input !== "object") return null;
+  const x = finiteNumber(input.x, NaN, -1_000_000, 1_000_000);
+  const y = finiteNumber(input.y, NaN, -1_000_000, 1_000_000);
+  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+}
+
+function isFinitePoint(point) {
+  return point && Number.isFinite(point.x) && Number.isFinite(point.y);
 }
 
 function normalizeShadow(input, defaults) {

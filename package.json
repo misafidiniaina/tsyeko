@@ -7,6 +7,6 @@
     "dev": "GOCACHE=$PWD/.cache/go-build go run .",
     "test": "node --test && GOCACHE=$PWD/.cache/go-build go test ./...",
     "test:browser": "node scripts/browser-smoke.mjs",
-    "check": "node --check web/src/app.js && node --check web/src/model.js && node --check web/src/renderer.js && node --check web/src/export.js && node --check web/src/persistence.js && node --check scripts/browser-smoke.mjs && GOCACHE=$PWD/.cache/go-build go test ./..."
+    "check": "node --check web/src/app.js && node --check web/src/model.js && node --check web/src/vector.js && node --check web/src/renderer.js && node --check web/src/export.js && node --check web/src/persistence.js && node --check scripts/browser-smoke.mjs && GOCACHE=$PWD/.cache/go-build go test ./..."
   }
 }

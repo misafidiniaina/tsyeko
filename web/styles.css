@@ -844,10 +844,34 @@ svg {
   font-size: 11px;
 }
 
-.vector-summary span:first-child {
+.vector-summary span:first-child,
+.vector-summary [data-vector-curve-count] {
   color: var(--accent-bright);
   font-size: 18px;
   font-weight: 700;
+}
+
+.vector-summary-separator {
+  margin: 0 3px;
+  color: var(--text-faint);
+}
+
+.vector-point-editor {
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.vector-point-heading {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.vector-point-heading span:last-child {
+  color: var(--accent-bright);
 }
 
 .inspector-hint {

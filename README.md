@@ -28,9 +28,9 @@ GOCACHE=$PWD/.cache/go-build go run .
 - Infinite dotted canvas with smooth pan and cursor-centered zoom
 - Multiple pages with creation, switching, renaming, duplication, and deletion
 - Independent pan/zoom state and canvas background for every page
-- Frames, groups, rectangles, ellipses, straight-segment vector paths, and editable text
-- Pen tool for open/closed paths with 45-degree Shift constraints and click-first-point closure
-- Direct vector editing with draggable anchors, segment insertion, anchor deletion, path reversal, and fill rules
+- Frames, groups, rectangles, ellipses, cubic Bézier vector paths, and editable text
+- Pen tool for open/closed paths, click-drag curve handles, 45-degree Shift constraints, and click-first-point closure
+- Direct vector editing with draggable anchors and handles, mirrored/free controls, corner/smooth conversion, curve-preserving segment insertion, anchor deletion, path reversal, and fill rules
 - Hierarchical frame/group parenting with nested clipping and inherited visibility, locking, and opacity
 - Embedded PNG, JPEG, WebP, and GIF image layers with cover/contain fitting
 - Solid and editable linear-gradient fills with angle and color stops
@@ -47,7 +47,7 @@ GOCACHE=$PWD/.cache/go-build go run .
 - JSON import/export, SVG export, and high-resolution PNG export
 - Prototype preview surface
 - Responsive editor shell
-- Sanitized, cycle-safe v5 document imports with automatic v1/v2/v3/v4 migration
+- Sanitized, cycle-safe v6 document imports with automatic v1/v2/v3/v4/v5 migration
 - Embedded Go server with a health endpoint and security headers
 
 ## Useful shortcuts
@@ -74,8 +74,11 @@ GOCACHE=$PWD/.cache/go-build go run .
 | Actual size | `0` |
 | Finish an open pen path | `Enter` or double-click |
 | Close a pen path | Click its first anchor |
+| Create Bézier handles | Drag while placing a pen anchor |
 | Edit selected text or vector | `Enter` |
 | Insert vector anchor | Double-click or `Alt`-click a segment |
+| Toggle corner/smooth anchor | Double-click an anchor |
+| Disconnect a Bézier handle | `Alt`-drag the handle |
 | Delete selected vector anchor | `Backspace` or `Delete` |
 
 ## Test it
@@ -86,7 +89,7 @@ npm run check
 npm run test:browser
 ```
 
-The unit suite covers document migration and sanitization, vector geometry and SVG paths, gradient/effect bounds, cycle-safe hierarchy, subtree operations, multi-page identity, rotated hit testing, history, SVG paint/clipping export, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies page creation, shape and pen drawing, direct anchor editing, gradient and shadow editing, image import, grouping, nested layer collapse/expand, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
+The unit suite covers document migration and sanitization, cubic evaluation, curve-preserving splitting and reversal, vector bounds, SVG paths, gradient/effect bounds, cycle-safe hierarchy, subtree operations, multi-page identity, rotated hit testing, history, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies pen-drag curves, mirrored and disconnected handle editing, corner/smooth conversion, anchor insertion/deletion, paint editing, image import, grouping, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
 
 ## Project structure
 
@@ -100,11 +103,13 @@ The unit suite covers document migration and sanitization, vector geometry and S
 │   └── src/
 │       ├── app.js           Editor controller and interactions
 │       ├── model.js         Document schema and geometry
+│       ├── vector.js        Cubic path geometry and transformations
 │       ├── history.js       Undo/redo snapshots
 │       ├── renderer.js      Canvas renderer and hit testing
 │       ├── export.js        SVG/JSON/download support
 │       ├── persistence.js   IndexedDB storage and migration fallback
-│       └── model.test.js    JavaScript unit tests
+│       ├── model.test.js    Document and export unit tests
+│       └── vector.test.js   Bézier geometry unit tests
 ├── scripts/
 │   └── browser-smoke.mjs    Dependency-free Chromium integration test
 └── docs/
@@ -113,7 +118,7 @@ The unit suite covers document migration and sanitization, vector geometry and S
 
 ## Current product boundary
 
-The MVP stores one hierarchical, multi-page document and embedded raster assets in the browser. Its vector paths currently use straight anchors; Bézier handles, compound paths, and boolean operations are not implemented. It also has no account system, remote database, true component instances, font asset pipeline, auto layout, or multiplayer synchronization yet. These are explicit follow-on milestones described in [the architecture document](docs/ARCHITECTURE.md).
+The MVP stores one hierarchical, multi-page document and embedded raster assets in the browser. Cubic paths are implemented, while compound contours, boolean operations, and masks remain future graphics work. It also has no account system, remote database, true component instances, font asset pipeline, auto layout, or multiplayer synchronization yet. These are explicit follow-on milestones described in [the architecture document](docs/ARCHITECTURE.md).
 
 ## Core design decision
 

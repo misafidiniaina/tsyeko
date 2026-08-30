@@ -13,6 +13,7 @@ import {
   getFirstPage,
   getNodesWithDescendants,
   getNodeVisualBounds,
+  getVectorWorldHandle,
   getVectorWorldPoints,
   groupNodes,
   isNodeEffectivelyVisible,
@@ -42,7 +43,7 @@ test("migrates v1 documents and clamps untrusted geometry", () => {
   });
 
   assert.equal(document.name, "Imported");
-  assert.equal(document.version, 5);
+  assert.equal(document.version, 6);
   assert.equal(document.pages.length, 1);
   assert.equal(document.pages[0].nodes[0].x, 12);
   assert.equal(document.pages[0].nodes[0].width, 1);
@@ -252,7 +253,7 @@ test("normalizes gradient paints and bounded shadow effects", () => {
   assert.deepEqual(getNodeVisualBounds(node), { x: -5, y: 8, width: 140, height: 90 });
 });
 
-test("migrates implicit frame shadows into explicit v5 effects", () => {
+test("migrates implicit frame shadows into explicit v6 effects", () => {
   const document = normalizeDocument({
     version: 3,
     name: "Legacy frame",
@@ -260,7 +261,7 @@ test("migrates implicit frame shadows into explicit v5 effects", () => {
   });
   const frame = getFirstPage(document).nodes[0];
 
-  assert.equal(document.version, 5);
+  assert.equal(document.version, 6);
   assert.equal(frame.fillType, "solid");
   assert.equal(frame.shadow.enabled, true);
   assert.equal(frame.shadow.blur, 16);
@@ -363,7 +364,7 @@ test("normalizes vector paths and rejects invalid point data", () => {
   });
   const vector = getFirstPage(document).nodes[0];
 
-  assert.equal(document.version, 5);
+  assert.equal(document.version, 6);
   assert.equal(vector.type, NODE_TYPES.VECTOR);
   assert.equal(vector.vectorPoints.length, 2);
   assert.equal(vector.vectorClosed, false);
@@ -419,4 +420,105 @@ test("exports open and closed vectors as editable SVG paths", () => {
   assert.match(svg, /fill-rule="evenodd"/);
   assert.match(svg, /<path d="M 100 10 L 180 70" fill="none"/);
   assert.match(svg, /stroke-linecap="round"/);
+});
+
+test("migrates v5 corner anchors and sanitizes Bézier handles", () => {
+  const document = normalizeDocument({
+    version: 5,
+    name: "Curves",
+    pages: [{
+      name: "Page",
+      nodes: [{
+        id: "curve",
+        type: "vector",
+        width: 100,
+        height: 50,
+        vectorClosed: false,
+        vectorPoints: [
+          {
+            x: 0,
+            y: 20,
+            out: { x: 30, y: "40" },
+            handleMode: "mirrored",
+          },
+          {
+            x: 100,
+            y: 20,
+            in: { x: "bad", y: 40 },
+            handleMode: "free",
+          },
+        ],
+      }],
+    }],
+  });
+  const vector = getFirstPage(document).nodes[0];
+  const first = vector.vectorPoints[0];
+  const second = vector.vectorPoints[1];
+
+  assert.equal(document.version, 6);
+  assert.equal(first.handleMode, "mirrored");
+  assert.ok(first.in && first.out);
+  assert.equal(first.in.x - first.x, -(first.out.x - first.x));
+  assert.equal(first.in.y - first.y, -(first.out.y - first.y));
+  assert.equal(second.in, null);
+  assert.equal(second.handleMode, "corner");
+});
+
+test("normalizing curved vector bounds preserves anchors and controls in world space", () => {
+  const vector = createVectorNodeFromWorldPoints([
+    {
+      x: 30,
+      y: 30,
+      out: { x: 70, y: -10 },
+      handleMode: "free",
+    },
+    {
+      x: 150,
+      y: 50,
+      in: { x: 110, y: 100 },
+      handleMode: "free",
+    },
+  ], false, { rotation: 27 });
+  const anchorsBefore = getVectorWorldPoints(vector);
+  const outgoingBefore = getVectorWorldHandle(vector, 0, "out");
+  const incomingBefore = getVectorWorldHandle(vector, 1, "in");
+
+  vector.vectorPoints[0].out.x -= 25;
+  const changedOutgoing = getVectorWorldHandle(vector, 0, "out");
+  normalizeVectorBounds(vector);
+
+  const anchorsAfter = getVectorWorldPoints(vector);
+  const outgoingAfter = getVectorWorldHandle(vector, 0, "out");
+  const incomingAfter = getVectorWorldHandle(vector, 1, "in");
+  anchorsAfter.forEach((point, index) => {
+    assert.ok(Math.abs(point.x - anchorsBefore[index].x) < 1e-9);
+    assert.ok(Math.abs(point.y - anchorsBefore[index].y) < 1e-9);
+  });
+  assert.ok(Math.abs(outgoingAfter.x - changedOutgoing.x) < 1e-9);
+  assert.ok(Math.abs(outgoingAfter.y - changedOutgoing.y) < 1e-9);
+  assert.ok(Math.abs(incomingAfter.x - incomingBefore.x) < 1e-9);
+  assert.ok(Math.abs(incomingAfter.y - incomingBefore.y) < 1e-9);
+  assert.notDeepEqual(outgoingBefore, outgoingAfter);
+});
+
+test("exports cubic Bézier controls as SVG path commands", () => {
+  const page = createPage("Curves");
+  page.nodes.push(createVectorNodeFromWorldPoints([
+    {
+      x: 0,
+      y: 40,
+      out: { x: 30, y: 0 },
+      handleMode: "free",
+    },
+    {
+      x: 100,
+      y: 40,
+      in: { x: 70, y: 80 },
+      handleMode: "free",
+    },
+  ], false));
+  const svg = documentToSVG(page);
+
+  assert.match(svg, /d="M 0 40 C 30 0 70 80 100 40"/);
+  assert.doesNotMatch(svg, /d="M 0 40 L 100 40"/);
 });

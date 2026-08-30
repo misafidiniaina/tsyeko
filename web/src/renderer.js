@@ -10,6 +10,11 @@ import {
   pointInNode,
   worldToLocal,
 } from "./model.js";
+import {
+  flattenVectorPath,
+  getVectorSegments,
+  nearestPointOnCubic,
+} from "./vector.js";
 
 const HANDLE_SIZE = 8;
 const HANDLE_HIT_RADIUS = 8;
@@ -382,10 +387,30 @@ export class CanvasRenderer {
     context.lineJoin = "round";
     context.lineCap = "round";
     context.beginPath();
-    context.moveTo(points[0].x, points[0].y);
-    for (const point of points.slice(1)) context.lineTo(point.x, point.y);
-    if (node.vectorClosed) context.closePath();
+    traceVectorPathOnScreen(context, node, camera, this);
     context.stroke();
+
+    const selectedPoint = node.vectorPoints[editState.pointIndex];
+    if (selectedPoint) {
+      const anchorScreen = points[editState.pointIndex];
+      for (const kind of ["in", "out"]) {
+        if (!selectedPoint[kind]) continue;
+        const handleScreen = this.worldToScreen(localToWorld(node, selectedPoint[kind]), camera);
+        context.strokeStyle = "rgba(196, 181, 253, 0.9)";
+        context.lineWidth = 1;
+        context.beginPath();
+        context.moveTo(anchorScreen.x, anchorScreen.y);
+        context.lineTo(handleScreen.x, handleScreen.y);
+        context.stroke();
+        context.fillStyle = editState.handleKind === kind ? "#ec4899" : "#ffffff";
+        context.strokeStyle = "#7c3aed";
+        context.lineWidth = 1.5;
+        context.beginPath();
+        context.arc(handleScreen.x, handleScreen.y, editState.handleKind === kind ? 5 : 4, 0, Math.PI * 2);
+        context.fill();
+        context.stroke();
+      }
+    }
 
     points.forEach((point, index) => {
       const selected = editState.pointIndex === index;
@@ -412,17 +437,39 @@ export class CanvasRenderer {
     context.strokeStyle = "#c4b5fd";
     context.lineWidth = 2;
     context.beginPath();
-    context.moveTo(points[0].x, points[0].y);
-    for (const point of points.slice(1)) context.lineTo(point.x, point.y);
+    traceWorldVectorPathOnScreen(context, draft.points, camera, this);
     context.stroke();
     if (hover && distance(points.at(-1), hover) > 0.5) {
       context.setLineDash([5, 4]);
       context.beginPath();
       context.moveTo(points.at(-1).x, points.at(-1).y);
-      context.lineTo(hover.x, hover.y);
+      const outgoing = draft.points.at(-1).out;
+      if (outgoing) {
+        const control = this.worldToScreen(outgoing, camera);
+        context.bezierCurveTo(control.x, control.y, hover.x, hover.y, hover.x, hover.y);
+      } else {
+        context.lineTo(hover.x, hover.y);
+      }
       context.stroke();
       context.setLineDash([]);
     }
+    draft.points.forEach((point, index) => {
+      const anchor = points[index];
+      for (const kind of ["in", "out"]) {
+        if (!point[kind]) continue;
+        const handle = this.worldToScreen(point[kind], camera);
+        context.strokeStyle = "rgba(196, 181, 253, 0.7)";
+        context.lineWidth = 1;
+        context.beginPath();
+        context.moveTo(anchor.x, anchor.y);
+        context.lineTo(handle.x, handle.y);
+        context.stroke();
+        context.fillStyle = "#ffffff";
+        context.beginPath();
+        context.arc(handle.x, handle.y, 3, 0, Math.PI * 2);
+        context.fill();
+      }
+    });
     points.forEach((point, index) => {
       context.fillStyle = index === 0 ? "#ec4899" : "#ffffff";
       context.strokeStyle = "#7c3aed";
@@ -558,14 +605,15 @@ export class CanvasRenderer {
       }
       if (node.type === NODE_TYPES.VECTOR) {
         const local = worldToLocal(node, worldPoint);
+        const flattened = flattenVectorPath(node);
         const inside = node.vectorClosed && (
           node.vectorFillRule === "evenodd"
-            ? pointInPolygon(local, node.vectorPoints)
-            : pointInPolygonNonZero(local, node.vectorPoints)
+            ? pointInPolygon(local, flattened)
+            : pointInPolygonNonZero(local, flattened)
         );
         const pathPadding = Math.max(padding, node.strokeWidth / 2 + padding);
-        const nearPath = vectorSegments(node).some(([start, end]) =>
-          distanceToSegment(local, start, end) <= pathPadding);
+        const nearPath = flattened.slice(1).some((end, flattenedIndex) =>
+          distanceToSegment(local, flattened[flattenedIndex], end) <= pathPadding);
         if (!inside && !nearPath) continue;
       }
       return node;
@@ -589,22 +637,39 @@ export class CanvasRenderer {
   getVectorSegmentAt(screenPoint, node, camera, radius = 8) {
     if (node?.type !== NODE_TYPES.VECTOR) return null;
     let best = null;
-    for (const [start, end, index] of vectorSegments(node, true)) {
-      const screenStart = this.worldToScreen(localToWorld(node, start), camera);
-      const screenEnd = this.worldToScreen(localToWorld(node, end), camera);
-      const projection = projectPointToSegment(screenPoint, screenStart, screenEnd);
-      const pointDistance = distance(screenPoint, projection);
-      if (pointDistance <= radius && (!best || pointDistance < best.distance)) {
-        const world = this.screenToWorld(projection, camera);
+    for (const segment of getVectorSegments(node)) {
+      const screenSegment = mapSegment(segment, (point) =>
+        this.worldToScreen(localToWorld(node, point), camera));
+      const nearest = nearestPointOnCubic(screenSegment, screenPoint);
+      if (nearest.distance <= radius && (!best || nearest.distance < best.distance)) {
+        const world = this.screenToWorld(nearest.point, camera);
         best = {
-          index,
-          distance: pointDistance,
+          index: segment.index,
+          endIndex: segment.endIndex,
+          t: nearest.t,
+          distance: nearest.distance,
           world,
           local: worldToLocal(node, world),
         };
       }
     }
     return best;
+  }
+
+  getVectorHandleAt(screenPoint, node, camera, pointIndex, radius = 9) {
+    if (node?.type !== NODE_TYPES.VECTOR) return null;
+    const point = node.vectorPoints[pointIndex];
+    if (!point) return null;
+    let best = null;
+    for (const kind of ["in", "out"]) {
+      if (!point[kind]) continue;
+      const screen = this.worldToScreen(localToWorld(node, point[kind]), camera);
+      const handleDistance = distance(screenPoint, screen);
+      if (handleDistance <= radius && (!best || handleDistance < best.distance)) {
+        best = { kind, distance: handleDistance };
+      }
+    }
+    return best?.kind ?? null;
   }
 
   getHandleAt(screenPoint, node, camera) {
@@ -755,30 +820,87 @@ function roundedRect(context, x, y, width, height, radius) {
 }
 
 function buildVectorPath(context, node, zoom) {
-  const [first, ...rest] = node.vectorPoints;
+  const [first] = node.vectorPoints;
   if (!first) return;
   const offsetX = (node.width * zoom) / 2;
   const offsetY = (node.height * zoom) / 2;
-  context.moveTo(first.x * zoom - offsetX, first.y * zoom - offsetY);
-  for (const point of rest) {
-    context.lineTo(point.x * zoom - offsetX, point.y * zoom - offsetY);
+  const project = (point) => ({
+    x: point.x * zoom - offsetX,
+    y: point.y * zoom - offsetY,
+  });
+  const start = project(first);
+  context.moveTo(start.x, start.y);
+  for (const segment of getVectorSegments(node)) {
+    const mapped = mapSegment(segment, project);
+    if (segment.curved) {
+      context.bezierCurveTo(
+        mapped.c1.x,
+        mapped.c1.y,
+        mapped.c2.x,
+        mapped.c2.y,
+        mapped.p3.x,
+        mapped.p3.y,
+      );
+    } else {
+      context.lineTo(mapped.p3.x, mapped.p3.y);
+    }
   }
   if (node.vectorClosed) context.closePath();
 }
 
-function vectorSegments(node) {
-  const output = [];
-  for (let index = 0; index < node.vectorPoints.length - 1; index += 1) {
-    output.push([node.vectorPoints[index], node.vectorPoints[index + 1], index]);
+function traceVectorPathOnScreen(context, node, camera, renderer) {
+  const first = node.vectorPoints[0];
+  if (!first) return;
+  const start = renderer.worldToScreen(localToWorld(node, first), camera);
+  context.moveTo(start.x, start.y);
+  for (const segment of getVectorSegments(node)) {
+    const mapped = mapSegment(segment, (point) =>
+      renderer.worldToScreen(localToWorld(node, point), camera));
+    if (segment.curved) {
+      context.bezierCurveTo(
+        mapped.c1.x,
+        mapped.c1.y,
+        mapped.c2.x,
+        mapped.c2.y,
+        mapped.p3.x,
+        mapped.p3.y,
+      );
+    } else {
+      context.lineTo(mapped.p3.x, mapped.p3.y);
+    }
   }
-  if (node.vectorClosed && node.vectorPoints.length > 2) {
-    output.push([
-      node.vectorPoints[node.vectorPoints.length - 1],
-      node.vectorPoints[0],
-      node.vectorPoints.length - 1,
-    ]);
+  if (node.vectorClosed) context.closePath();
+}
+
+function traceWorldVectorPathOnScreen(context, points, camera, renderer) {
+  if (!points.length) return;
+  const start = renderer.worldToScreen(points[0], camera);
+  context.moveTo(start.x, start.y);
+  for (const segment of getVectorSegments(points, false)) {
+    const mapped = mapSegment(segment, (point) => renderer.worldToScreen(point, camera));
+    if (segment.curved) {
+      context.bezierCurveTo(
+        mapped.c1.x,
+        mapped.c1.y,
+        mapped.c2.x,
+        mapped.c2.y,
+        mapped.p3.x,
+        mapped.p3.y,
+      );
+    } else {
+      context.lineTo(mapped.p3.x, mapped.p3.y);
+    }
   }
-  return output;
+}
+
+function mapSegment(segment, mapper) {
+  return {
+    ...segment,
+    p0: mapper(segment.p0),
+    c1: mapper(segment.c1),
+    c2: mapper(segment.c2),
+    p3: mapper(segment.p3),
+  };
 }
 
 function pointInPolygon(point, polygon) {

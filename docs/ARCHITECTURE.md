@@ -83,11 +83,11 @@ Avoid introducing every distributed component on day one. PostgreSQL, Redis, obj
 
 ## 5. Document model
 
-The current v5 file format is a versioned, multi-page JSON document with flat storage, explicit parent relationships, paint definitions, effects, and straight-segment vector paths. Version 1 root-node files, version 2 multi-page files, version 3 hierarchical files, and version 4 paint/effect files migrate automatically. Imports repair dangling parents, reject non-container parents, break cycles, sanitize path/paint/effect values, and restore parent-before-child ordering:
+The current v6 file format is a versioned, multi-page JSON document with flat storage, explicit parent relationships, paint definitions, effects, and cubic Bézier vector paths. Versions 1–5 migrate automatically. Imports repair dangling parents, reject non-container parents, break cycles, sanitize anchor/control/paint/effect values, and restore parent-before-child ordering:
 
 ```json
 {
-  "version": 5,
+  "version": 6,
   "id": "document_…",
   "name": "Untitled design",
   "background": "#101114",
@@ -166,9 +166,27 @@ The current v5 file format is a versioned, multi-page JSON document with flat st
           "stroke": "#5b21b6",
           "strokeWidth": 2,
           "vectorPoints": [
-            { "x": 0, "y": 0 },
-            { "x": 80, "y": 24 },
-            { "x": 18, "y": 72 }
+            {
+              "x": 0,
+              "y": 24,
+              "in": null,
+              "out": { "x": 30, "y": 0 },
+              "handleMode": "free"
+            },
+            {
+              "x": 80,
+              "y": 24,
+              "in": { "x": 54, "y": 46 },
+              "out": null,
+              "handleMode": "free"
+            },
+            {
+              "x": 18,
+              "y": 72,
+              "in": null,
+              "out": null,
+              "handleMode": "corner"
+            }
           ],
           "vectorClosed": true,
           "vectorFillRule": "nonzero"
@@ -183,7 +201,7 @@ Production evolution:
 
 - Move from world-space child geometry to consistently decomposed local transforms or matrices
 - Add explicit sibling ordering when collaboration requires ordering independent of array position
-- Extend vectors with cubic Bézier handles, compound contours, boolean operations, and masks
+- Extend vectors with compound contours, boolean operations, stroke expansion, and masks
 - Add multiple paint stacks, radial/angular gradients, and blur effects
 - Add rich-text ranges and font references
 - Add component definitions, instances, override maps, and variant properties
@@ -460,11 +478,11 @@ Every document schema change needs forward-migration tests and fixtures from old
 ### Milestone 0 — implemented foundation
 
 - Canvas editor and basic nodes
-- Multi-page documents, page operations, and v1/v2/v3 schema migration
+- Multi-page documents, page operations, and v1–v5 schema migration
 - Hierarchical frames and groups with recursive editing and cycle-safe imports
 - Nested layers, frame clipping, and inherited visibility, locking, and opacity
 - Linear-gradient fills and explicit drop-shadow effects with Canvas/SVG parity
-- Open/closed vector paths, pen creation, direct anchor editing, fill rules, and SVG path export
+- Open/closed cubic Bézier paths, pen-drag controls, direct anchor/handle editing, curve-preserving splits, fill rules, and SVG path export
 - Per-page canvas appearance and view state
 - Embedded raster image layers with cover/contain fitting
 - IndexedDB persistence and compact localStorage recovery copies
@@ -476,7 +494,7 @@ Every document schema change needs forward-migration tests and fixtures from old
 
 ### Milestone 1 — structured editor
 
-- Cubic Bézier handles, compound paths, boolean geometry, and masks
+- Compound paths, boolean geometry, stroke expansion, and masks
 - Multiple paint stacks, radial/angular gradients, and blur effects
 - Better text shaping and rich-text ranges
 - Command-based history
