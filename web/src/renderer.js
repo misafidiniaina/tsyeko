@@ -3,7 +3,7 @@ import {
   getChildNodes,
   getDocumentBounds,
   getEffectiveOpacity,
-  getNodesWithDescendants,
+  getRenderableNodeIds,
   isCompositeNode,
   isNodeEffectivelyLocked,
   isNodeEffectivelyVisible,
@@ -77,7 +77,7 @@ export class CanvasRenderer {
     }
 
     const idSet = options.ids
-      ? new Set(getNodesWithDescendants(document, options.ids).map((node) => node.id))
+      ? getRenderableNodeIds(document, options.ids)
       : null;
     const sceneOptions = { ...options, idSet };
     for (const node of getChildNodes(document)) {
@@ -968,7 +968,7 @@ export function renderDocumentToCanvas(document, ids = null, requestedScale = 2)
 
 export async function preloadDocumentImages(document, ids = null) {
   const idSet = ids
-    ? new Set(getNodesWithDescendants(document, ids).map((node) => node.id))
+    ? getRenderableNodeIds(document, ids)
     : null;
   const sources = document.nodes
     .filter((node) => isNodeEffectivelyVisible(document, node) && node.type === NODE_TYPES.IMAGE && node.imageData && (!idSet || idSet.has(node.id)))
@@ -1163,7 +1163,8 @@ function mapSegment(segment, mapper) {
 
 export function pointInSceneNode(document, node, worldPoint, padding = 0) {
   if (!node || !isNodeEffectivelyVisible(document, node)) return false;
-  const children = getChildNodes(document, node.id)
+  const allChildren = getChildNodes(document, node.id);
+  const children = allChildren
     .filter((child) => isNodeEffectivelyVisible(document, child));
 
   if (node.type === NODE_TYPES.GROUP) {
@@ -1185,9 +1186,10 @@ export function pointInSceneNode(document, node, worldPoint, padding = 0) {
   }
 
   if (node.type === NODE_TYPES.MASK) {
-    if (children.length < 2) return false;
-    return pointInSceneNode(document, children[0], worldPoint, padding) &&
-      children.slice(1).some((child) =>
+    const source = allChildren[0];
+    if (allChildren.length < 2 || !isNodeEffectivelyVisible(document, source)) return false;
+    return pointInSceneNode(document, source, worldPoint, padding) &&
+      allChildren.slice(1).some((child) =>
         pointInSceneNode(document, child, worldPoint, padding));
   }
 

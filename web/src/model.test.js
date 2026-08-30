@@ -25,10 +25,12 @@ import {
   normalizeDocument,
   normalizeVectorBounds,
   pointInNode,
+  reorderNode,
   ungroupNodes,
 } from "./model.js";
 import { DocumentHistory } from "./history.js";
 import { documentToSVG } from "./export.js";
+import { pointInSceneNode } from "./renderer.js";
 
 test("migrates v1 documents and clamps untrusted geometry", () => {
   const document = normalizeDocument({
@@ -192,7 +194,7 @@ test("groups, duplicates, ungroups, and recursively deletes subtrees", () => {
 
 test("creates editable Boolean containers with deterministic source order", () => {
   const page = createPage("Boolean");
-  const base = createNode(NODE_TYPES.RECTANGLE, 0, 0, { width: 100, height: 80 });
+  const base = createNode(NODE_TYPES.RECTANGLE, 0, 0, { width: 100, height: 80, opacity: 0.42 });
   const cutter = createNode(NODE_TYPES.ELLIPSE, 40, 20, { width: 80, height: 80 });
   page.nodes.push(base, cutter);
 
@@ -200,6 +202,7 @@ test("creates editable Boolean containers with deterministic source order", () =
   assert.equal(boolean.type, NODE_TYPES.BOOLEAN);
   assert.equal(boolean.booleanOperation, BOOLEAN_OPERATIONS.SUBTRACT);
   assert.equal(boolean.name, "Subtract");
+  assert.equal(boolean.opacity, 0.42);
   assert.deepEqual(
     page.nodes.filter((node) => node.parentId === boolean.id).map((node) => node.id),
     [base.id, cutter.id],
@@ -253,6 +256,39 @@ test("migrates and sanitizes v7 Boolean and mask containers", () => {
   assert.equal(page.nodes.find((node) => node.id === "boolean").booleanOperation, "union");
   assert.equal(page.nodes.find((node) => node.id === "shape").parentId, "boolean");
   assert.equal(page.nodes.find((node) => node.id === "content").parentId, "mask");
+});
+
+test("evaluates Boolean and mask geometry for composite hit testing", () => {
+  const page = createPage("Composite hits");
+  const base = createNode(NODE_TYPES.RECTANGLE, 0, 0, { width: 100, height: 100 });
+  const operand = createNode(NODE_TYPES.RECTANGLE, 50, 0, { width: 100, height: 100 });
+  page.nodes.push(base, operand);
+  const boolean = booleanGroupNodes(page, [base.id, operand.id], BOOLEAN_OPERATIONS.UNION);
+
+  assert.equal(pointInSceneNode(page, boolean, { x: 25, y: 50 }), true);
+  assert.equal(pointInSceneNode(page, boolean, { x: 125, y: 50 }), true);
+  boolean.booleanOperation = BOOLEAN_OPERATIONS.SUBTRACT;
+  assert.equal(pointInSceneNode(page, boolean, { x: 25, y: 50 }), true);
+  assert.equal(pointInSceneNode(page, boolean, { x: 75, y: 50 }), false);
+  boolean.booleanOperation = BOOLEAN_OPERATIONS.INTERSECT;
+  assert.equal(pointInSceneNode(page, boolean, { x: 75, y: 50 }), true);
+  assert.equal(pointInSceneNode(page, boolean, { x: 25, y: 50 }), false);
+  boolean.booleanOperation = BOOLEAN_OPERATIONS.EXCLUDE;
+  assert.equal(pointInSceneNode(page, boolean, { x: 25, y: 50 }), true);
+  assert.equal(pointInSceneNode(page, boolean, { x: 75, y: 50 }), false);
+
+  boolean.booleanOperation = BOOLEAN_OPERATIONS.SUBTRACT;
+  assert.equal(reorderNode(page, operand.id, "back"), true);
+  assert.equal(pointInSceneNode(page, boolean, { x: 125, y: 50 }), true);
+  assert.equal(pointInSceneNode(page, boolean, { x: 25, y: 50 }), false);
+
+  ungroupNodes(page, [boolean.id]);
+  const mask = maskNodes(page, [base.id, operand.id]);
+  assert.equal(pointInSceneNode(page, mask, { x: 75, y: 50 }), true);
+  assert.equal(pointInSceneNode(page, mask, { x: 25, y: 50 }), false);
+  assert.equal(pointInSceneNode(page, mask, { x: 125, y: 50 }), false);
+  base.visible = false;
+  assert.equal(pointInSceneNode(page, mask, { x: 75, y: 50 }), false);
 });
 
 test("inherits visibility through frame and group ancestors", () => {
@@ -409,6 +445,42 @@ test("SVG export includes gradient and shadow definitions", () => {
   assert.match(svg, /fill="url\(#gradient-/);
   assert.match(svg, /filter="url\(#shadow-/);
   assert.match(svg, /<feDropShadow/);
+});
+
+test("exports non-destructive Booleans with SVG masks and expanded strokes", () => {
+  const page = createPage("Boolean SVG");
+  const base = createNode(NODE_TYPES.RECTANGLE, 0, 0, { width: 120, height: 100 });
+  const cutter = createNode(NODE_TYPES.ELLIPSE, 50, 10, { width: 90, height: 80 });
+  page.nodes.push(base, cutter);
+  const boolean = booleanGroupNodes(page, [base.id, cutter.id], BOOLEAN_OPERATIONS.SUBTRACT);
+  boolean.fill = "#7c3aed";
+  boolean.stroke = "#f8fafc";
+  boolean.strokeWidth = 6;
+  const svg = documentToSVG(page);
+  const selectedSourceSVG = documentToSVG(page, [base.id]);
+  const selectedSourceBounds = getDocumentBounds(page, [base.id]);
+
+  assert.match(svg, /id="boolean-mask-/);
+  assert.match(svg, /id="boolean-stroke-mask-/);
+  assert.match(svg, /<feMorphology[^>]+operator="dilate"/);
+  assert.match(svg, /mask="url\(#boolean-mask-/);
+  assert.match(svg, /fill="#000000"/);
+  assert.match(selectedSourceSVG, /id="boolean-mask-/);
+  assert.equal(selectedSourceBounds.width, boolean.width + boolean.strokeWidth * 2);
+});
+
+test("exports mask groups with their first child as the reusable mask source", () => {
+  const page = createPage("Mask SVG");
+  const source = createNode(NODE_TYPES.ELLIPSE, 0, 0, { width: 100, height: 100 });
+  const content = createNode(NODE_TYPES.RECTANGLE, 30, 10, { width: 120, height: 80 });
+  page.nodes.push(source, content);
+  const mask = maskNodes(page, [source.id, content.id]);
+  const svg = documentToSVG(page);
+
+  assert.match(svg, new RegExp(`id="mask-${mask.id.replace(/[^a-z0-9_-]/gi, "-")}"`));
+  assert.match(svg, /<g opacity="1" mask="url\(#mask-/);
+  assert.match(svg, /<ellipse[^>]+fill="#ffffff"/);
+  assert.match(svg, /<rect[^>]+fill="#8b5cf6"/);
 });
 
 test("normalizes vector paths and rejects invalid point data", () => {

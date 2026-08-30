@@ -381,7 +381,7 @@ svg {
   height: 30px;
   padding: 0 8px 0 calc(4px + var(--layer-depth, 0) * 12px);
   display: grid;
-  grid-template-columns: 14px 18px minmax(0, 1fr) 24px 24px;
+  grid-template-columns: 14px 18px minmax(0, 1fr) auto 24px 24px;
   gap: 3px;
   align-items: center;
   color: #c9c9c9;
@@ -450,6 +450,17 @@ svg {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.layer-composite-role {
+  color: var(--text-faint);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.layer-composite-role:empty {
+  display: none;
 }
 
 .layer-action {
@@ -808,6 +819,30 @@ svg {
 .icon-toggle-row {
   display: flex;
   gap: 4px;
+}
+
+.boolean-operation-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.composite-summary {
+  min-height: 27px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.composite-summary span:last-child {
+  color: var(--accent-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .icon-toggle {

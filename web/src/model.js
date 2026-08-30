@@ -631,6 +631,20 @@ export function getNodesWithDescendants(document, ids) {
   return document.nodes.filter((node) => included.has(node.id));
 }
 
+export function getRenderableNodeIds(document, ids) {
+  const included = new Set(getNodesWithDescendants(document, ids).map((node) => node.id));
+  for (const id of [...included]) {
+    const compositeAncestors = getAncestors(document, id).filter(isCompositeNode);
+    for (const composite of compositeAncestors) {
+      included.add(composite.id);
+      for (const descendantId of getDescendantIds(document, [composite.id])) {
+        included.add(descendantId);
+      }
+    }
+  }
+  return included;
+}
+
 export function isNodeEffectivelyVisible(document, id) {
   const node = typeof id === "string" ? getNode(document, id) : id;
   return Boolean(node?.visible && getAncestors(document, node).every((ancestor) => ancestor.visible));
@@ -705,7 +719,16 @@ export function getNodeAABB(node) {
 }
 
 export function getNodeVisualBounds(node) {
-  const bounds = getNodeAABB(node);
+  const geometryBounds = getNodeAABB(node);
+  const strokeExtent = node.strokeWidth > 0 && node.stroke !== "transparent"
+    ? node.type === NODE_TYPES.BOOLEAN ? node.strokeWidth : node.strokeWidth / 2
+    : 0;
+  const bounds = {
+    x: geometryBounds.x - strokeExtent,
+    y: geometryBounds.y - strokeExtent,
+    width: geometryBounds.width + strokeExtent * 2,
+    height: geometryBounds.height + strokeExtent * 2,
+  };
   if (!node.shadow?.enabled || node.shadow.opacity <= 0) return bounds;
   const extent = node.shadow.blur * 2;
   const shadowLeft = bounds.x + node.shadow.offsetX - extent;
@@ -720,7 +743,7 @@ export function getNodeVisualBounds(node) {
 }
 
 export function getDocumentBounds(document, ids = null) {
-  const idSet = ids ? new Set(getNodesWithDescendants(document, ids).map((node) => node.id)) : null;
+  const idSet = ids ? getRenderableNodeIds(document, ids) : null;
   const nodes = document.nodes.filter(
     (node) => node.type !== NODE_TYPES.GROUP &&
       !getAncestors(document, node).some(isCompositeNode) &&
@@ -809,6 +832,7 @@ export function booleanGroupNodes(document, ids, operation = BOOLEAN_OPERATIONS.
     boolean.stroke = source.stroke;
     boolean.strokeWidth = source.strokeWidth;
     boolean.shadow = cloneValue(source.shadow);
+    boolean.opacity = source.opacity;
   }
   return boolean;
 }

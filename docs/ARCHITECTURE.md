@@ -34,7 +34,9 @@ Browser
 │   └── IndexedDB autosave with localStorage migration/fallback
 ├── Versioned hierarchical document model
 ├── Snapshot history
-├── Canvas 2D renderer
+├── Hierarchy-aware Canvas 2D renderer
+│   ├── Porter–Duff Boolean composition
+│   └── nested mask/effect surfaces
 └── SVG/PNG/JSON exporters
           │
           ▼
@@ -83,11 +85,11 @@ Avoid introducing every distributed component on day one. PostgreSQL, Redis, obj
 
 ## 5. Document model
 
-The current v6 file format is a versioned, multi-page JSON document with flat storage, explicit parent relationships, paint definitions, effects, and cubic Bézier vector paths. Versions 1–5 migrate automatically. Imports repair dangling parents, reject non-container parents, break cycles, sanitize anchor/control/paint/effect values, and restore parent-before-child ordering:
+The current v7 file format is a versioned, multi-page JSON document with flat storage, explicit parent relationships, paint definitions, effects, cubic Bézier vector paths, and ordered Boolean/mask containers. Versions 1–6 migrate automatically. Imports repair dangling parents, reject non-container parents, break cycles, sanitize anchor/control/paint/effect/composite values, and restore parent-before-child ordering:
 
 ```json
 {
-  "version": 6,
+  "version": 7,
   "id": "document_…",
   "name": "Untitled design",
   "background": "#101114",
@@ -197,11 +199,40 @@ The current v6 file format is a versioned, multi-page JSON document with flat st
 }
 ```
 
+### 5.1 Composite node semantics
+
+Boolean and mask results are saved as scene structure, never flattened pixels:
+
+```json
+{
+  "id": "boolean_…",
+  "type": "boolean",
+  "booleanOperation": "subtract",
+  "parentId": "group_…",
+  "fill": "#7c3aed",
+  "stroke": "#111111",
+  "strokeWidth": 8
+}
+```
+
+Direct children retain their own IDs, geometry, paints, and effects. Array/sibling order is bottom-to-top and has semantic meaning:
+
+- Union combines every visible source.
+- Subtract keeps the first source and removes every later source.
+- Intersect keeps regions present in every source.
+- Exclude keeps regions covered by an odd number of sources.
+- A mask uses its first direct child as the silhouette and clips all later children.
+- Releasing a Boolean or mask removes only the container and restores its direct children to the container's parent.
+
+The composite owns the result paint, stroke, opacity, and effect. Source paint remains available for later editing or release but does not color Boolean geometry. Moving, resizing, rotating, duplicating, locking, hiding, deleting, and reordering a composite operate recursively without changing source IDs.
+
+Canvas rendering creates alpha surfaces for each source and combines them with `source-over`, `destination-out`, `destination-in`, or `xor`. Result strokes are expanded from the combined alpha boundary, then the fill and effect are projected once. SVG export retains structure with `<mask>` definitions and uses `<feMorphology operator="dilate">` for the expanded stroke. Hit testing evaluates the same Boolean algebra, so transparent Subtract/Exclude holes do not select the composite.
+
 Production evolution:
 
 - Move from world-space child geometry to consistently decomposed local transforms or matrices
 - Add explicit sibling ordering when collaboration requires ordering independent of array position
-- Extend vectors with compound contours, boolean operations, stroke expansion, and masks
+- Extend vectors with editable compound contours, destructive flattening, and precision offset/outline geometry
 - Add multiple paint stacks, radial/angular gradients, and blur effects
 - Add rich-text ranges and font references
 - Add component definitions, instances, override maps, and variant properties
@@ -267,6 +298,8 @@ Initial performance budgets:
 - Less than 1 second to open a 50,000-node document after download
 - Selection hit testing below 8 ms p95
 - Memory below 500 MB for a representative large document
+
+The current Canvas compositor intentionally uses viewport-sized temporary surfaces for correctness and simple nesting. Before large-document work, replace repeated allocation with pooled, bounds-local surfaces and dirty-region caches. Promote the same scene-composition contract to GPU render targets only after profiling shows that Canvas misses the stated budgets.
 
 ## 8. Text architecture
 
@@ -478,11 +511,14 @@ Every document schema change needs forward-migration tests and fixtures from old
 ### Milestone 0 — implemented foundation
 
 - Canvas editor and basic nodes
-- Multi-page documents, page operations, and v1–v5 schema migration
+- Multi-page documents, page operations, and v1–v6 schema migration into v7
 - Hierarchical frames and groups with recursive editing and cycle-safe imports
 - Nested layers, frame clipping, and inherited visibility, locking, and opacity
 - Linear-gradient fills and explicit drop-shadow effects with Canvas/SVG parity
 - Open/closed cubic Bézier paths, pen-drag controls, direct anchor/handle editing, curve-preserving splits, fill rules, and SVG path export
+- Non-destructive Union/Subtract/Intersect/Exclude containers with ordered editable sources and composite hit testing
+- Nested silhouette mask groups, result effects, expanded Boolean strokes, and Canvas/PNG/SVG export parity
+- Composite creation, operation switching, source-order labels, release workflows, keyboard commands, persistence, and browser pixel tests
 - Per-page canvas appearance and view state
 - Embedded raster image layers with cover/contain fitting
 - IndexedDB persistence and compact localStorage recovery copies
@@ -494,7 +530,8 @@ Every document schema change needs forward-migration tests and fixtures from old
 
 ### Milestone 1 — structured editor
 
-- Compound paths, boolean geometry, stroke expansion, and masks
+- Editable compound contours, destructive Boolean flattening, precision stroke outlining, and geometry-kernel fuzz tests
+- Bounds-local composite caches, dirty-region rendering, and large-scene profiling
 - Multiple paint stacks, radial/angular gradients, and blur effects
 - Better text shaping and rich-text ranges
 - Command-based history

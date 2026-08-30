@@ -55,8 +55,17 @@ try {
 
   const svgPaintExport = await evaluate(`
     (async () => {
-      const { createNode, createPage, createVectorNodeFromWorldPoints, NODE_TYPES } = await import("/src/model.js");
+      const {
+        BOOLEAN_OPERATIONS,
+        booleanGroupNodes,
+        createNode,
+        createPage,
+        createVectorNodeFromWorldPoints,
+        maskNodes,
+        NODE_TYPES
+      } = await import("/src/model.js");
       const { documentToSVG } = await import("/src/export.js");
+      const { CanvasRenderer } = await import("/src/renderer.js");
       const page = createPage("Paint export");
       page.nodes.push(createNode(NODE_TYPES.RECTANGLE, 0, 0, {
         fillType: "linear-gradient",
@@ -73,17 +82,157 @@ try {
       ], true));
       const svg = documentToSVG(page);
       const parsed = new DOMParser().parseFromString(svg, "image/svg+xml");
+      const compositePage = createPage("Composite export");
+      const base = createNode(NODE_TYPES.RECTANGLE, 0, 0, { width: 120, height: 100 });
+      const cutter = createNode(NODE_TYPES.ELLIPSE, 45, 10, { width: 90, height: 80 });
+      const content = createNode(NODE_TYPES.RECTANGLE, 10, 5, { width: 150, height: 90, fill: "#22c55e" });
+      compositePage.nodes.push(base, cutter, content);
+      const boolean = booleanGroupNodes(compositePage, [base.id, cutter.id], BOOLEAN_OPERATIONS.SUBTRACT);
+      boolean.stroke = "#ffffff";
+      boolean.strokeWidth = 5;
+      maskNodes(compositePage, [boolean.id, content.id]);
+      const compositeSVG = documentToSVG(compositePage);
+      const compositeParsed = new DOMParser().parseFromString(compositeSVG, "image/svg+xml");
+
+      const renderSamples = (samplePage, sampleNode, operations) => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 160;
+        canvas.height = 110;
+        const renderer = new CanvasRenderer(canvas);
+        renderer.width = 160;
+        renderer.height = 110;
+        renderer.pixelRatio = 1;
+        const sample = (x, y) => [...renderer.context.getImageData(x, y, 1, 1).data];
+        const isPainted = (pixel, channel) => pixel[channel] > 180 && pixel[(channel + 1) % 3] < 80;
+        const results = {};
+        for (const operation of operations) {
+          sampleNode.booleanOperation = operation;
+          renderer.render(samplePage, [], { x: 0, y: 0, zoom: 1 }, {
+            background: "#ffffff", grid: false, selection: false, frameLabels: false
+          });
+          results[operation] = {
+            base: isPainted(sample(30, 50), 0),
+            overlap: isPainted(sample(65, 50), 0),
+            operand: isPainted(sample(105, 50), 0)
+          };
+        }
+        return results;
+      };
+      const canvasPage = createPage("Canvas Boolean");
+      const canvasBase = createNode(NODE_TYPES.RECTANGLE, 10, 10, { width: 70, height: 80, fill: "#ff0000" });
+      const canvasOperand = createNode(NODE_TYPES.RECTANGLE, 50, 10, { width: 70, height: 80 });
+      canvasPage.nodes.push(canvasBase, canvasOperand);
+      const canvasBoolean = booleanGroupNodes(canvasPage, [canvasBase.id, canvasOperand.id]);
+      canvasBoolean.fill = "#ff0000";
+      canvasBoolean.strokeWidth = 0;
+      const canvasBooleanSamples = renderSamples(
+        canvasPage,
+        canvasBoolean,
+        Object.values(BOOLEAN_OPERATIONS)
+      );
+
+      const maskPage = createPage("Canvas mask");
+      const maskSource = createNode(NODE_TYPES.RECTANGLE, 10, 10, { width: 70, height: 80 });
+      const maskContent = createNode(NODE_TYPES.RECTANGLE, 50, 10, { width: 70, height: 80, fill: "#00ff00" });
+      maskPage.nodes.push(maskSource, maskContent);
+      maskNodes(maskPage, [maskSource.id, maskContent.id]);
+      const maskCanvas = document.createElement("canvas");
+      maskCanvas.width = 160;
+      maskCanvas.height = 110;
+      const maskRenderer = new CanvasRenderer(maskCanvas);
+      maskRenderer.width = 160;
+      maskRenderer.height = 110;
+      maskRenderer.pixelRatio = 1;
+      maskRenderer.render(maskPage, [], { x: 0, y: 0, zoom: 1 }, {
+        background: "#ffffff", grid: false, selection: false, frameLabels: false
+      });
+      const maskPixel = (x) => [...maskRenderer.context.getImageData(x, 50, 1, 1).data];
+      const isGreen = (pixel) => pixel[1] > 180 && pixel[0] < 80 && pixel[2] < 80;
+
+      const sampleSVG = async (samplePage, points, channel) => {
+        const svgSource = documentToSVG(samplePage);
+        const parsedSource = new DOMParser().parseFromString(svgSource, "image/svg+xml");
+        const viewBox = parsedSource.documentElement.getAttribute("viewBox").trim().split(" ").map(Number);
+        const image = new Image();
+        const url = URL.createObjectURL(new Blob([svgSource], { type: "image/svg+xml" }));
+        await new Promise((resolve, reject) => {
+          image.addEventListener("load", resolve, { once: true });
+          image.addEventListener("error", reject, { once: true });
+          image.src = url;
+        });
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, image.naturalWidth);
+        canvas.height = Math.max(1, image.naturalHeight);
+        const context = canvas.getContext("2d");
+        context.drawImage(image, 0, 0);
+        URL.revokeObjectURL(url);
+        const painted = {};
+        for (const [name, point] of Object.entries(points)) {
+          const x = Math.max(0, Math.min(canvas.width - 1, Math.round((point.x - viewBox[0]) * canvas.width / viewBox[2])));
+          const y = Math.max(0, Math.min(canvas.height - 1, Math.round((point.y - viewBox[1]) * canvas.height / viewBox[3])));
+          const pixel = context.getImageData(x, y, 1, 1).data;
+          painted[name] = pixel[channel] > 180 && pixel[3] > 180;
+        }
+        return painted;
+      };
+      const svgBooleanSamples = {};
+      for (const operation of Object.values(BOOLEAN_OPERATIONS)) {
+        canvasBoolean.booleanOperation = operation;
+        svgBooleanSamples[operation] = await sampleSVG(canvasPage, {
+          base: { x: 30, y: 50 },
+          overlap: { x: 65, y: 50 },
+          operand: { x: 105, y: 50 }
+        }, 0);
+      }
+      const svgMaskSamples = await sampleSVG(maskPage, {
+        sourceOnly: { x: 30, y: 50 },
+        overlap: { x: 65, y: 50 },
+        contentOnly: { x: 105, y: 50 }
+      }, 1);
       return {
         valid: !parsed.querySelector("parsererror"),
         gradient: Boolean(parsed.querySelector("linearGradient")),
         shadow: Boolean(parsed.querySelector("feDropShadow")),
         vector: Boolean(parsed.querySelector("path")),
-        curve: parsed.querySelector("path")?.getAttribute("d").includes("C ")
+        curve: parsed.querySelector("path")?.getAttribute("d").includes("C "),
+        compositeValid: !compositeParsed.querySelector("parsererror"),
+        booleanMask: Boolean(compositeParsed.querySelector('[id^="boolean-mask-"]')),
+        expandedStroke: Boolean(compositeParsed.querySelector("feMorphology")),
+        maskGroup: Boolean(compositeParsed.querySelector('[id^="mask-mask_"]')),
+        canvasBoolean: canvasBooleanSamples,
+        canvasMask: {
+          sourceOnly: isGreen(maskPixel(30)),
+          overlap: isGreen(maskPixel(65)),
+          contentOnly: isGreen(maskPixel(105))
+        },
+        svgBoolean: svgBooleanSamples,
+        svgMask: svgMaskSamples
       };
     })()
   `);
-  if (!svgPaintExport.valid || !svgPaintExport.gradient || !svgPaintExport.shadow || !svgPaintExport.vector || !svgPaintExport.curve) {
+  if (!svgPaintExport.valid || !svgPaintExport.gradient || !svgPaintExport.shadow || !svgPaintExport.vector || !svgPaintExport.curve ||
+      !svgPaintExport.compositeValid || !svgPaintExport.booleanMask || !svgPaintExport.expandedStroke || !svgPaintExport.maskGroup) {
     throw new Error(`SVG paint export validation failed: ${JSON.stringify(svgPaintExport)}`);
+  }
+  const canvasBoolean = svgPaintExport.canvasBoolean;
+  const canvasModesValid =
+    canvasBoolean.union.base && canvasBoolean.union.overlap && canvasBoolean.union.operand &&
+    canvasBoolean.subtract.base && !canvasBoolean.subtract.overlap && !canvasBoolean.subtract.operand &&
+    !canvasBoolean.intersect.base && canvasBoolean.intersect.overlap && !canvasBoolean.intersect.operand &&
+    canvasBoolean.exclude.base && !canvasBoolean.exclude.overlap && canvasBoolean.exclude.operand;
+  const canvasMask = svgPaintExport.canvasMask;
+  if (!canvasModesValid || canvasMask.sourceOnly || !canvasMask.overlap || canvasMask.contentOnly) {
+    throw new Error(`Canvas composite pixel validation failed: ${JSON.stringify({ canvasBoolean, canvasMask })}`);
+  }
+  const svgBoolean = svgPaintExport.svgBoolean;
+  const svgModesValid =
+    svgBoolean.union.base && svgBoolean.union.overlap && svgBoolean.union.operand &&
+    svgBoolean.subtract.base && !svgBoolean.subtract.overlap && !svgBoolean.subtract.operand &&
+    !svgBoolean.intersect.base && svgBoolean.intersect.overlap && !svgBoolean.intersect.operand &&
+    svgBoolean.exclude.base && !svgBoolean.exclude.overlap && svgBoolean.exclude.operand;
+  const svgMask = svgPaintExport.svgMask;
+  if (!svgModesValid || svgMask.sourceOnly || !svgMask.overlap || svgMask.contentOnly) {
+    throw new Error(`SVG composite pixel validation failed: ${JSON.stringify({ svgBoolean, svgMask })}`);
   }
 
   await evaluate(`
@@ -458,14 +607,152 @@ try {
     "paint and effect reload persistence",
   );
 
+  const paintState = await evaluate(`({
+    gradient: document.querySelector('[data-gradient-property="angle"]')?.value,
+    shadowBlur: document.querySelector('[data-shadow-property="blur"]')?.value
+  })`);
+
+  await evaluate(`
+    window.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "d",
+      code: "KeyD",
+      ctrlKey: true,
+      bubbles: true
+    }));
+    true;
+  `);
+  await waitFor(
+    `document.querySelectorAll(".layer-row").length === 5 &&
+     document.querySelector(".selection-summary input")?.value === "Rectangle copy"`,
+    "duplicate Boolean operand",
+  );
+
+  await evaluate(`
+    (() => {
+      const selectLayer = (name, shiftKey) => [...document.querySelectorAll(".layer-row")]
+        .find((row) => row.querySelector(".layer-name")?.textContent === name)
+        .dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey }));
+      selectLayer("Rectangle", false);
+      selectLayer("Rectangle copy", true);
+      return true;
+    })()
+  `);
+  await waitFor(
+    `document.querySelector('[data-multi-action="boolean"][data-operation="subtract"]')`,
+    "Boolean multi-selection controls",
+  );
+  await evaluate(`document.querySelector('[data-multi-action="boolean"][data-operation="subtract"]').click(); true`);
+  await waitFor(
+    `document.querySelectorAll(".layer-row").length === 6 &&
+     document.querySelector(".selection-summary input")?.value === "Subtract" &&
+     document.querySelectorAll('.layer-row[style*="--layer-depth: 2"]').length === 2 &&
+     [...document.querySelectorAll(".layer-composite-role")].some((item) => item.textContent === "BASE") &&
+     [...document.querySelectorAll(".layer-composite-role")].some((item) => item.textContent === "CUT")`,
+    "non-destructive Subtract Boolean",
+  );
+
+  for (const operation of ["union", "intersect", "exclude", "subtract"]) {
+    await evaluate(`document.querySelector('[data-inspector-action="boolean-operation"][data-value="${operation}"]').click(); true`);
+    await waitFor(
+      `document.querySelector('[data-inspector-action="boolean-operation"][data-value="${operation}"]')?.classList.contains("active")`,
+      `${operation} Boolean mode`,
+    );
+  }
+
+  await evaluate(`
+    (() => {
+      const stroke = document.querySelector('[data-property="strokeWidth"]');
+      stroke.value = "8";
+      stroke.dispatchEvent(new Event("input", { bubbles: true }));
+      stroke.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    })()
+  `);
+  await waitFor(
+    `document.querySelector('[data-property="strokeWidth"]')?.value === "8" &&
+     document.querySelector("#saveState").textContent === "Saved locally"`,
+    "Boolean expanded stroke editing",
+  );
+  if (process.env.TSYAIKO_BOOLEAN_SCREENSHOT) {
+    const screenshot = await command("Page.captureScreenshot", { format: "png" });
+    writeFileSync(process.env.TSYAIKO_BOOLEAN_SCREENSHOT, Buffer.from(screenshot.data, "base64"));
+  }
+
+  await evaluate(`
+    (() => {
+      const selectLayer = (name, shiftKey) => [...document.querySelectorAll(".layer-row")]
+        .find((row) => row.querySelector(".layer-name")?.textContent === name)
+        .dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey }));
+      selectLayer("Subtract", false);
+      selectLayer("smoke-image", true);
+      return true;
+    })()
+  `);
+  await waitFor(`document.querySelector('[data-multi-action="mask"]')`, "mask multi-selection control");
+  await evaluate(`document.querySelector('[data-multi-action="mask"]').click(); true`);
+  await waitFor(
+    `document.querySelectorAll(".layer-row").length === 7 &&
+     document.querySelector(".selection-summary input")?.value === "Mask group" &&
+     [...document.querySelectorAll(".layer-composite-role")].some((item) => item.textContent === "MASK") &&
+     [...document.querySelectorAll(".layer-composite-role")].some((item) => item.textContent === "CONTENT")`,
+    "nested mask group creation",
+  );
+
+  await evaluate(`document.querySelector('[data-inspector-action="ungroup"]').click(); true`);
+  await waitFor(
+    `document.querySelectorAll(".layer-row").length === 6 &&
+     document.querySelector('[data-multi-action="mask"]')`,
+    "release mask sources",
+  );
+  await evaluate(`document.querySelector('[data-multi-action="mask"]').click(); true`);
+  await waitFor(
+    `document.querySelectorAll(".layer-row").length === 7 &&
+     document.querySelector(".selection-summary input")?.value === "Mask group" &&
+     document.querySelector("#saveState").textContent === "Saved locally"`,
+    "recreate mask group",
+  );
+
+  await command("Page.reload", { ignoreCache: true });
+  await waitFor(
+    `document.readyState === "complete" &&
+     document.querySelectorAll(".layer-row").length === 7 &&
+     document.querySelectorAll('.layer-row[style*="--layer-depth: 3"]').length === 2`,
+    "Boolean and mask hierarchy reload persistence",
+  );
+  await evaluate(`
+    [...document.querySelectorAll(".layer-row")]
+      .find((row) => row.querySelector(".layer-name")?.textContent === "Subtract")
+      .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    true;
+  `);
+  await waitFor(
+    `document.querySelector('[data-inspector-action="boolean-operation"][data-value="subtract"]')?.classList.contains("active") &&
+     document.querySelector('[data-property="strokeWidth"]')?.value === "8"`,
+    "Boolean operation reload persistence",
+  );
+
+  await evaluate(`
+    [...document.querySelectorAll(".layer-row")]
+      .find((row) => row.querySelector(".layer-name")?.textContent === "Mask group")
+      .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    true;
+  `);
+  await waitFor(
+    `document.querySelector(".selection-summary input")?.value === "Mask group" &&
+     [...document.querySelectorAll(".composite-summary")].some((item) => item.textContent.includes("Subtract"))`,
+    "mask inspector reload persistence",
+  );
+
   const result = await evaluate(`({
     currentPage: document.querySelector("#currentPageName").textContent,
     pageCount: document.querySelectorAll(".page-list-row").length,
     layerCount: document.querySelectorAll(".layer-row").length,
     saved: document.querySelector("#saveState").textContent,
-    gradient: document.querySelector('[data-gradient-property="angle"]')?.value,
-    shadowBlur: document.querySelector('[data-shadow-property="blur"]')?.value
+    booleans: [...document.querySelectorAll(".layer-name")].filter((item) => item.textContent === "Subtract").length,
+    masks: [...document.querySelectorAll(".layer-name")].filter((item) => item.textContent === "Mask group").length
   })`);
+  result.gradient = paintState.gradient;
+  result.shadowBlur = paintState.shadowBlur;
   result.curves = reloadedCurveCount;
   if (process.env.TSYAIKO_SCREENSHOT) {
     const screenshot = await command("Page.captureScreenshot", { format: "png" });

@@ -29,9 +29,12 @@ GOCACHE=$PWD/.cache/go-build go run .
 - Multiple pages with creation, switching, renaming, duplication, and deletion
 - Independent pan/zoom state and canvas background for every page
 - Frames, groups, rectangles, ellipses, cubic Bézier vector paths, and editable text
+- Non-destructive Union, Subtract, Intersect, and Exclude Boolean containers with editable ordered sources
+- Mask groups with an explicit bottom mask source, editable clipped content, nesting, reordering, and release workflows
+- Composite-aware Canvas rendering, hit testing, shadows, gradient fills, expanded strokes, PNG output, and structured SVG masks
 - Pen tool for open/closed paths, click-drag curve handles, 45-degree Shift constraints, and click-first-point closure
 - Direct vector editing with draggable anchors and handles, mirrored/free controls, corner/smooth conversion, curve-preserving segment insertion, anchor deletion, path reversal, and fill rules
-- Hierarchical frame/group parenting with nested clipping and inherited visibility, locking, and opacity
+- Hierarchical frame/group/Boolean/mask parenting with nested clipping and inherited visibility, locking, and opacity
 - Embedded PNG, JPEG, WebP, and GIF image layers with cover/contain fitting
 - Solid and editable linear-gradient fills with angle and color stops
 - Data-driven drop shadows with color, opacity, offsets, and blur
@@ -47,7 +50,7 @@ GOCACHE=$PWD/.cache/go-build go run .
 - JSON import/export, SVG export, and high-resolution PNG export
 - Prototype preview surface
 - Responsive editor shell
-- Sanitized, cycle-safe v6 document imports with automatic v1/v2/v3/v4/v5 migration
+- Sanitized, cycle-safe v7 document imports with automatic v1–v6 migration
 - Embedded Go server with a health endpoint and security headers
 
 ## Useful shortcuts
@@ -67,6 +70,11 @@ GOCACHE=$PWD/.cache/go-build go run .
 | Duplicate | `Ctrl/Cmd+D` |
 | Copy / paste | `Ctrl/Cmd+C` / `Ctrl/Cmd+V` |
 | Group / ungroup | `Ctrl/Cmd+G` / `Ctrl/Cmd+Shift+G` |
+| Boolean Union | `Ctrl/Cmd+Alt+U` |
+| Boolean Subtract | `Ctrl/Cmd+Alt+S` |
+| Boolean Intersect | `Ctrl/Cmd+Alt+I` |
+| Boolean Exclude | `Ctrl/Cmd+Alt+X` |
+| Create mask | `Ctrl/Cmd+Alt+M` |
 | Delete | `Backspace` or `Delete` |
 | Nudge | Arrow keys; hold `Shift` for 10 px |
 | Fit document | `1` |
@@ -89,7 +97,7 @@ npm run check
 npm run test:browser
 ```
 
-The unit suite covers document migration and sanitization, cubic evaluation, curve-preserving splitting and reversal, vector bounds, SVG paths, gradient/effect bounds, cycle-safe hierarchy, subtree operations, multi-page identity, rotated hit testing, history, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies pen-drag curves, mirrored and disconnected handle editing, corner/smooth conversion, anchor insertion/deletion, paint editing, image import, grouping, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
+The unit suite covers document migration and sanitization, cubic evaluation, curve-preserving splitting and reversal, vector bounds, Boolean/mask geometry, structured SVG composite export, gradient/effect bounds, cycle-safe hierarchy, subtree operations, multi-page identity, rotated hit testing, history, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies all four Boolean modes and mask intersection with Canvas and rasterized-SVG pixel samples, expanded strokes, nested source editing/release, pen-drag curves, paint editing, image import, grouping, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
 
 ## Project structure
 
@@ -118,7 +126,7 @@ The unit suite covers document migration and sanitization, cubic evaluation, cur
 
 ## Current product boundary
 
-The MVP stores one hierarchical, multi-page document and embedded raster assets in the browser. Cubic paths are implemented, while compound contours, boolean operations, and masks remain future graphics work. It also has no account system, remote database, true component instances, font asset pipeline, auto layout, or multiplayer synchronization yet. These are explicit follow-on milestones described in [the architecture document](docs/ARCHITECTURE.md).
+The MVP stores one hierarchical, multi-page document and embedded raster assets in the browser. Cubic paths, object-level non-destructive Booleans, and silhouette masks are implemented. True multi-contour path editing, destructive path flattening, precision offset curves, and a scalable cached/GPU compositor remain future graphics work. It also has no account system, remote database, true component instances, font asset pipeline, auto layout, or multiplayer synchronization yet. These are explicit follow-on milestones described in [the architecture document](docs/ARCHITECTURE.md).
 
 ## Core design decision
 

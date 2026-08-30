@@ -356,6 +356,11 @@ function bindInspector() {
     if (property === "strokeWidth" || property === "cornerRadius") value = Math.max(0, value);
     if (property === "fontSize") value = Math.max(1, value);
     const previousValue = node[property];
+    if (isAutoBoundsContainer(node) && ["width", "height"].includes(property)) {
+      scaleAutoBoundsContainer(node, property, value);
+      liveDocumentChange();
+      return;
+    }
     if (node.type === NODE_TYPES.VECTOR && ["width", "height"].includes(property)) {
       const scale = value / previousValue;
       node.vectorPoints = node.vectorPoints.map((point) => scaleVectorPoint(
@@ -508,7 +513,7 @@ function bindMenus() {
     if (action === "redo") redo();
     if (action === "fit") fitToContent();
     if (action === "shortcuts") {
-      showToast("V select · P pen (drag for curves) · Enter edit path · Alt-drag disconnect handle · ⌘G group · ⌘D duplicate");
+      showToast("V select · P pen · Enter edit · ⌘G group · ⌘⌥U/S/I/X Boolean · ⌘⌥M mask · ⌘D duplicate");
     }
   });
 
@@ -557,18 +562,18 @@ function bindKeyboard() {
       duplicateSelection();
       return;
     }
-    if (command && event.altKey && ["u", "s", "i", "x"].includes(key)) {
+    const booleanShortcut = {
+      KeyU: BOOLEAN_OPERATIONS.UNION,
+      KeyS: BOOLEAN_OPERATIONS.SUBTRACT,
+      KeyI: BOOLEAN_OPERATIONS.INTERSECT,
+      KeyX: BOOLEAN_OPERATIONS.EXCLUDE,
+    }[event.code];
+    if (command && event.altKey && booleanShortcut) {
       event.preventDefault();
-      const operation = {
-        u: BOOLEAN_OPERATIONS.UNION,
-        s: BOOLEAN_OPERATIONS.SUBTRACT,
-        i: BOOLEAN_OPERATIONS.INTERSECT,
-        x: BOOLEAN_OPERATIONS.EXCLUDE,
-      }[key];
-      booleanSelection(operation);
+      booleanSelection(booleanShortcut);
       return;
     }
-    if (command && event.altKey && key === "m") {
+    if (command && event.altKey && event.code === "KeyM") {
       event.preventDefault();
       maskSelection();
       return;
@@ -1682,6 +1687,31 @@ function isAutoBoundsContainer(node) {
   return [NODE_TYPES.GROUP, NODE_TYPES.BOOLEAN, NODE_TYPES.MASK].includes(node?.type);
 }
 
+function scaleAutoBoundsContainer(node, property, value) {
+  const original = cloneNode(node);
+  const scaleX = property === "width" ? value / original.width : 1;
+  const scaleY = property === "height" ? value / original.height : 1;
+  const snapshots = getNodesWithDescendants(currentPage(), [node.id]).map(cloneNode);
+  node[property] = value;
+  for (const snapshot of snapshots) {
+    if (snapshot.id === node.id || isAutoBoundsContainer(snapshot)) continue;
+    const child = getNode(currentPage(), snapshot.id);
+    if (!child) continue;
+    child.x = original.x + (snapshot.x - original.x) * scaleX;
+    child.y = original.y + (snapshot.y - original.y) * scaleY;
+    child.width = Math.max(1, snapshot.width * scaleX);
+    child.height = Math.max(1, snapshot.height * scaleY);
+    if (child.type === NODE_TYPES.VECTOR) {
+      child.vectorPoints = snapshot.vectorPoints.map((point) =>
+        scaleVectorPoint(point, scaleX, scaleY));
+    }
+    if (child.type === NODE_TYPES.TEXT) {
+      child.fontSize = Math.max(1, snapshot.fontSize * Math.min(scaleX, scaleY));
+    }
+  }
+  syncGroupBounds(currentPage());
+}
+
 function arrangeSelection(direction) {
   if (selectedIds.length !== 1) return;
   if (reorderNode(currentPage(), selectedIds[0], direction)) commitDocument();
@@ -1905,6 +1935,15 @@ function renderLayers() {
     const collapsed = collapsedLayerIds.has(node.id);
     const visible = isNodeEffectivelyVisible(page, node);
     const locked = isNodeEffectivelyLocked(page, node);
+    const parent = node.parentId ? getNode(page, node.parentId) : null;
+    const siblingIndex = parent ? (childrenByParent.get(parent.id) ?? []).indexOf(node) : -1;
+    const compositeRole = parent?.type === NODE_TYPES.MASK
+      ? siblingIndex === 0 ? "MASK" : "CONTENT"
+      : parent?.type === NODE_TYPES.BOOLEAN
+        ? siblingIndex === 0
+          ? "BASE"
+          : ({ union: "ADD", subtract: "CUT", intersect: "AND", exclude: "XOR" }[parent.booleanOperation] ?? "SOURCE")
+        : "";
     const row = `
       <div class="layer-row ${selectedIds.includes(node.id) ? "selected" : ""} ${visible ? "" : "hidden-layer"}" data-layer-id="${escapeAttribute(node.id)}" style="--layer-depth: ${depth}">
         ${hasChildren
@@ -1912,6 +1951,7 @@ function renderLayers() {
           : '<span class="layer-collapse-spacer"></span>'}
         <span class="layer-icon">${nodeIcon(node.type)}</span>
         <span class="layer-name" title="${escapeAttribute(node.name)}">${escapeHTML(node.name)}</span>
+        <span class="layer-composite-role">${compositeRole}</span>
         <button class="layer-action" data-layer-action="visibility" title="${node.visible ? "Hide" : "Show"} layer" aria-label="${node.visible ? "Hide" : "Show"} ${escapeAttribute(node.name)}">${visibilityIcon(node.visible)}</button>
         <button class="layer-action ${locked && !node.locked ? "inherited" : ""}" data-layer-action="lock" title="${node.locked ? "Unlock" : "Lock"} layer" aria-label="${node.locked ? "Unlock" : "Lock"} ${escapeAttribute(node.name)}">${lockIcon(locked)}</button>
       </div>`;
@@ -2680,6 +2720,8 @@ function nodeIcon(type) {
   const icons = {
     frame: '<svg viewBox="0 0 20 20"><path d="M4 2.5v15M16 2.5v15M2.5 4h15M2.5 16h15" /></svg>',
     group: '<svg viewBox="0 0 20 20"><rect x="3" y="3" width="5" height="5" /><rect x="12" y="3" width="5" height="5" /><rect x="3" y="12" width="5" height="5" /><rect x="12" y="12" width="5" height="5" /></svg>',
+    boolean: '<svg viewBox="0 0 20 20"><circle cx="8" cy="10" r="5.5" /><circle cx="12" cy="10" r="5.5" /><path d="M10 5.3a5.5 5.5 0 0 1 0 9.4" /></svg>',
+    mask: '<svg viewBox="0 0 20 20"><rect x="3" y="4" width="10" height="10" rx="2" /><path d="M7 8h10v8H7z" /></svg>',
     rectangle: '<svg viewBox="0 0 20 20"><rect x="3.5" y="4" width="13" height="12" rx="1" /></svg>',
     ellipse: '<svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5" /></svg>',
     vector: '<svg viewBox="0 0 20 20"><path d="m3.5 15.5 4-11 9 5-5 7-8-1Z" /><circle cx="7.5" cy="4.5" r="1" /><circle cx="16.5" cy="9.5" r="1" /><circle cx="11.5" cy="16.5" r="1" /></svg>',

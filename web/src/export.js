@@ -2,7 +2,7 @@ import {
   getChildNodes,
   getDocumentBounds,
   getEffectiveOpacity,
-  getNodesWithDescendants,
+  getRenderableNodeIds,
   isNodeEffectivelyVisible,
   NODE_TYPES,
 } from "./model.js";
@@ -11,7 +11,7 @@ import { getVectorSegments } from "./vector.js";
 export function documentToSVG(document, ids = null) {
   const bounds = getDocumentBounds(document, ids);
   const idSet = ids
-    ? new Set(getNodesWithDescendants(document, ids).map((node) => node.id))
+    ? getRenderableNodeIds(document, ids)
     : null;
   const nodes = document.nodes.filter(
     (node) => isNodeEffectivelyVisible(document, node) && branchIntersectsSet(document, node, idSet),
@@ -29,7 +29,7 @@ export function documentToSVG(document, ids = null) {
         (node.type !== NODE_TYPES.VECTOR || node.vectorClosed)
         ? gradientToSVG(node)
         : "",
-      ![NODE_TYPES.GROUP, NODE_TYPES.MASK].includes(node.type) &&
+      node.type !== NODE_TYPES.GROUP &&
         node.shadow?.enabled && node.shadow.opacity > 0
         ? shadowToSVG(node)
         : "",
