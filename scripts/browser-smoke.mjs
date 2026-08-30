@@ -61,11 +61,12 @@ try {
         createNode,
         createPage,
         createVectorNodeFromWorldPoints,
+        LAYOUT_MODES,
         maskNodes,
         NODE_TYPES
       } = await import("/src/model.js");
       const { documentToSVG } = await import("/src/export.js");
-      const { CanvasRenderer } = await import("/src/renderer.js");
+      const { CanvasRenderer, renderDocumentToCanvas } = await import("/src/renderer.js");
       const page = createPage("Paint export");
       page.nodes.push(createNode(NODE_TYPES.RECTANGLE, 0, 0, {
         fillType: "linear-gradient",
@@ -189,6 +190,33 @@ try {
         overlap: { x: 65, y: 50 },
         contentOnly: { x: 105, y: 50 }
       }, 1);
+
+      const responsivePage = createPage("Responsive export");
+      const responsiveFrame = createNode(NODE_TYPES.FRAME, 0, 0, {
+        width: 200,
+        height: 80,
+        fill: "transparent",
+        stroke: "transparent",
+        shadow: { enabled: false },
+        layoutMode: LAYOUT_MODES.HORIZONTAL,
+        paddingTop: 10,
+        paddingRight: 10,
+        paddingBottom: 10,
+        paddingLeft: 10
+      });
+      const responsiveChild = createNode(NODE_TYPES.RECTANGLE, 99, 99, {
+        parentId: responsiveFrame.id,
+        width: 40,
+        height: 20,
+        cornerRadius: 0,
+        fill: "#ff0000",
+        strokeWidth: 0
+      });
+      responsivePage.nodes.push(responsiveFrame, responsiveChild);
+      const responsiveSVG = documentToSVG(responsivePage);
+      const responsiveParsed = new DOMParser().parseFromString(responsiveSVG, "image/svg+xml");
+      const responsiveCanvas = renderDocumentToCanvas(responsivePage, null, 1);
+      const responsivePixel = [...responsiveCanvas.getContext("2d").getImageData(30, 20, 1, 1).data];
       return {
         valid: !parsed.querySelector("parsererror"),
         gradient: Boolean(parsed.querySelector("linearGradient")),
@@ -206,13 +234,21 @@ try {
           contentOnly: isGreen(maskPixel(105))
         },
         svgBoolean: svgBooleanSamples,
-        svgMask: svgMaskSamples
+        svgMask: svgMaskSamples,
+        responsiveExport: {
+          sourceUntouched: responsiveChild.x === 99 && responsiveChild.y === 99,
+          svgResolved: Boolean(responsiveParsed.querySelector('rect[x="10"][y="10"][width="40"][height="20"][fill="#ff0000"]')),
+          canvasResolved: responsivePixel[0] > 200 && responsivePixel[1] < 80 && responsivePixel[2] < 80
+        }
       };
     })()
   `);
   if (!svgPaintExport.valid || !svgPaintExport.gradient || !svgPaintExport.shadow || !svgPaintExport.vector || !svgPaintExport.curve ||
       !svgPaintExport.compositeValid || !svgPaintExport.booleanMask || !svgPaintExport.expandedStroke || !svgPaintExport.maskGroup) {
     throw new Error(`SVG paint export validation failed: ${JSON.stringify(svgPaintExport)}`);
+  }
+  if (!Object.values(svgPaintExport.responsiveExport).every(Boolean)) {
+    throw new Error(`Responsive export validation failed: ${JSON.stringify(svgPaintExport.responsiveExport)}`);
   }
   const canvasBoolean = svgPaintExport.canvasBoolean;
   const canvasModesValid =

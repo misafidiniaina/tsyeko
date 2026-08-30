@@ -12,6 +12,7 @@ import {
   pointInNode,
   worldToLocal,
 } from "./model.js";
+import { createResolvedLayoutSnapshot } from "./layout.js";
 import {
   flattenVectorPath,
   getVectorSegments,
@@ -935,7 +936,8 @@ export class CanvasRenderer {
   }
 }
 
-export function renderDocumentToCanvas(document, ids = null, requestedScale = 2) {
+export function renderDocumentToCanvas(sourceDocument, ids = null, requestedScale = 2) {
+  const document = createResolvedLayoutSnapshot(sourceDocument);
   const bounds = getDocumentBounds(document, ids);
   const maxDimension = 8192;
   const scale = Math.min(

@@ -38,10 +38,11 @@ test("v8 migration adds safe responsive layout defaults", () => {
       nodes: [
         { id: "frame", type: "frame", layoutMode: "diagonal", layoutGap: -20 },
         { id: "child", type: "rectangle", parentId: "frame", constraintHorizontal: "invalid" },
+        { id: "rotated", type: "frame", layoutMode: "horizontal", rotation: 45 },
       ],
     }],
   });
-  const [frame, child] = document.pages[0].nodes;
+  const [frame, child, rotated] = document.pages[0].nodes;
 
   assert.equal(document.version, 8);
   assert.equal(frame.layoutMode, LAYOUT_MODES.NONE);
@@ -51,6 +52,7 @@ test("v8 migration adds safe responsive layout defaults", () => {
   assert.equal(child.layoutPositioning, LAYOUT_POSITIONING.AUTO);
   assert.equal(child.constraintHorizontal, HORIZONTAL_CONSTRAINTS.LEFT);
   assert.equal(child.constraintVertical, VERTICAL_CONSTRAINTS.TOP);
+  assert.equal(rotated.rotation, 0);
 });
 
 test("horizontal Auto Layout distributes fill children and aligns the counter axis", () => {
@@ -293,10 +295,9 @@ test("SVG export uses the same resolved Auto Layout geometry as the canvas model
   });
   const page = pageWith(frame, child);
 
-  resolvePageLayout(page);
   const svg = documentToSVG(page);
 
-  assert.equal(child.x, 10);
-  assert.equal(child.y, 10);
+  assert.equal(child.x, 99);
+  assert.equal(child.y, 99);
   assert.match(svg, /<rect x="10" y="10" width="40" height="20"/);
 });

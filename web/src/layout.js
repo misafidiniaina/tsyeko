@@ -15,6 +15,7 @@ import {
   PRIMARY_AXIS_ALIGNS,
   reorderNode,
   sortNodesByHierarchy,
+  syncGroupBounds,
   VERTICAL_CONSTRAINTS,
 } from "./model.js";
 import { scaleVectorPoint } from "./vector.js";
@@ -55,6 +56,16 @@ export function resolvePageLayout(document) {
     if (!passChanged) break;
   }
   return changed;
+}
+
+export function createResolvedLayoutSnapshot(document) {
+  const snapshot = globalThis.structuredClone
+    ? globalThis.structuredClone(document)
+    : JSON.parse(JSON.stringify(document));
+  syncGroupBounds(snapshot);
+  resolvePageLayout(snapshot);
+  syncGroupBounds(snapshot);
+  return snapshot;
 }
 
 function layoutFrame(document, frame) {

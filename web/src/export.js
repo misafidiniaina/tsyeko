@@ -6,9 +6,11 @@ import {
   isNodeEffectivelyVisible,
   NODE_TYPES,
 } from "./model.js";
+import { createResolvedLayoutSnapshot } from "./layout.js";
 import { getVectorSegments } from "./vector.js";
 
-export function documentToSVG(document, ids = null) {
+export function documentToSVG(sourceDocument, ids = null) {
+  const document = createResolvedLayoutSnapshot(sourceDocument);
   const bounds = getDocumentBounds(document, ids);
   const idSet = ids
     ? getRenderableNodeIds(document, ids)

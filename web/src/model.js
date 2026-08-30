@@ -522,6 +522,7 @@ export function normalizeNode(input) {
     node.counterAxisAlign = Object.values(COUNTER_AXIS_ALIGNS).includes(input.counterAxisAlign)
       ? input.counterAxisAlign
       : defaults.counterAxisAlign;
+    if (node.layoutMode !== LAYOUT_MODES.NONE) node.rotation = 0;
   }
 
   return node;
