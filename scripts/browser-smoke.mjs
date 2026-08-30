@@ -1254,6 +1254,59 @@ try {
     const screenshot = await command("Page.captureScreenshot", { format: "png" });
     writeFileSync(process.env.TSYAIKO_SCREENSHOT, Buffer.from(screenshot.data, "base64"));
   }
+  const hostedCreateResponse = await fetch(`http://127.0.0.1:${serverPort}/v1/files`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: "Browser hosted file",
+      document: {
+        version: 10,
+        id: "document_hosted_smoke",
+        name: "Hosted smoke",
+        background: "#101114",
+        components: [],
+        componentSets: [],
+        pages: [{
+          id: "page_hosted_smoke",
+          name: "Hosted page",
+          background: "#101114",
+          nodes: [],
+        }],
+      },
+    }),
+  });
+  if (!hostedCreateResponse.ok) {
+    throw new Error(`Hosted file creation failed with ${hostedCreateResponse.status}.`);
+  }
+  const hostedFile = await hostedCreateResponse.json();
+  await command("Page.navigate", {
+    url: `http://127.0.0.1:${serverPort}/?file=${hostedFile.id}`,
+  });
+  await waitFor(
+    `document.readyState === "complete" &&
+     document.querySelector("#documentTitle")?.value === "Hosted smoke" &&
+     document.querySelector("#saveState")?.textContent === "Hosted · revision 1"`,
+    "hosted file load",
+  );
+  await evaluate(`
+    (() => {
+      const title = document.querySelector("#documentTitle");
+      title.value = "Hosted smoke updated";
+      title.dispatchEvent(new Event("input", { bubbles: true }));
+      title.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    })()
+  `);
+  await waitFor(
+    `document.querySelector("#saveState")?.textContent === "Hosted · revision 2"`,
+    "hosted revision autosave",
+  );
+  const hostedReload = await fetch(`http://127.0.0.1:${serverPort}/v1/files/${hostedFile.id}`);
+  const hostedSavedFile = await hostedReload.json();
+  if (!hostedReload.ok || hostedSavedFile.document?.name !== "Hosted smoke updated" || hostedSavedFile.revision !== 2) {
+    throw new Error(`Hosted autosave verification failed: ${JSON.stringify(hostedSavedFile)}`);
+  }
+  result.hostedRevision = hostedSavedFile.revision;
   process.stdout.write(`Browser smoke test passed: ${JSON.stringify(result)}\n`);
 } finally {
   socket?.close();

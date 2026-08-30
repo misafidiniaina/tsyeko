@@ -45,6 +45,8 @@ Browser
 Embedded Go HTTP server
 ├── static assets
 ├── GET /api/health
+├── revision-checked /v1/files snapshot API
+├── atomic development snapshot storage
 └── security response headers
 ```
 
@@ -610,6 +612,7 @@ Exit criterion: a designer can complete and export a small production UI without
 
 ### Milestone 2 — hosted collaboration
 
+- Durable file snapshots, optimistic revisions, browser autosave, conflict detection, and local fallback (implemented foundation)
 - Accounts, organizations, projects, and sharing
 - PostgreSQL and object storage
 - WebSocket rooms and presence

@@ -78,6 +78,12 @@ import {
 } from "./components.js";
 import { DocumentHistory } from "./history.js";
 import { documentToSVG, downloadBlob, safeFilename } from "./export.js";
+import {
+  HostedFileError,
+  loadHostedFile,
+  requestedHostedFileId,
+  saveHostedFile,
+} from "./hosted.js";
 import { loadWorkspace, saveWorkspace } from "./persistence.js";
 import {
   CanvasRenderer,
@@ -133,7 +139,21 @@ const elements = {
 
 const renderer = new CanvasRenderer(elements.canvas);
 renderer.onInvalidate = () => requestRender();
-const restoredWorkspace = await restoreWorkspace();
+const hostedFileId = requestedHostedFileId();
+let hostedRevision = null;
+let hostedLoadError = null;
+let hostedConflict = false;
+let restoredWorkspace = null;
+if (hostedFileId) {
+  try {
+    const hosted = await loadHostedFile(hostedFileId);
+    restoredWorkspace = { document: normalizeDocument(hosted.document) };
+    hostedRevision = hosted.revision;
+  } catch (error) {
+    hostedLoadError = error;
+  }
+}
+if (!restoredWorkspace) restoredWorkspace = await restoreWorkspace();
 let designDocument = restoredWorkspace?.document ?? createStarterDocument();
 syncDocumentComponents(designDocument);
 resolveAllPageLayouts(designDocument);
@@ -153,6 +173,7 @@ let guides = [];
 let spacePressed = false;
 let saveTimer = null;
 let saveVersion = 0;
+let hostedSaveQueue = Promise.resolve();
 let frameRequest = null;
 let helpTimer = null;
 let imagePickerTarget = null;
@@ -168,6 +189,12 @@ function initialize() {
   bindInspector();
   bindMenus();
   bindKeyboard();
+  if (hostedRevision) {
+    elements.saveState.textContent = `Hosted · revision ${hostedRevision}`;
+  } else if (hostedLoadError) {
+    elements.saveState.textContent = "Hosted file unavailable";
+    showToast("The hosted file could not be opened. Showing the local workspace instead.");
+  }
 
   const resizeObserver = new ResizeObserver(() => {
     renderer.resize();
@@ -3455,6 +3482,7 @@ function scheduleSave() {
   elements.saveState.textContent = "Saving…";
   window.clearTimeout(saveTimer);
   saveTimer = window.setTimeout(async () => {
+    let localSaved = false;
     try {
       rememberCurrentView();
       await saveWorkspace({
@@ -3463,12 +3491,47 @@ function scheduleSave() {
         pageViews,
         camera,
       });
-      if (version === saveVersion) elements.saveState.textContent = "Saved locally";
+      localSaved = true;
     } catch {
-      if (version === saveVersion) elements.saveState.textContent = "Storage unavailable";
       showToast("Browser storage is unavailable or full. Export the document as JSON to keep a copy.");
     }
+    if (hostedFileId && hostedRevision && !hostedConflict) {
+      try {
+        await queueHostedSave(cloneDocument(designDocument));
+        if (version === saveVersion) elements.saveState.textContent = `Hosted · revision ${hostedRevision}`;
+        return;
+      } catch (error) {
+        if (error instanceof HostedFileError && error.code === "revision_conflict") {
+          hostedConflict = true;
+          if (version === saveVersion) elements.saveState.textContent = "Hosted conflict · reload required";
+          showToast("A newer hosted revision exists. Your work remains saved locally; reload before publishing more changes.");
+          return;
+        }
+        if (version === saveVersion) elements.saveState.textContent = localSaved
+          ? "Hosted offline · saved locally"
+          : "Storage unavailable";
+        showToast("The hosted snapshot could not be reached. Changes remain in local storage.");
+        return;
+      }
+    }
+    if (version === saveVersion) {
+      elements.saveState.textContent = localSaved ? "Saved locally" : "Storage unavailable";
+    }
   }, 280);
+}
+
+function queueHostedSave(document) {
+  hostedSaveQueue = hostedSaveQueue
+    .catch(() => undefined)
+    .then(async () => {
+      if (hostedConflict || !hostedRevision) {
+        throw new HostedFileError("Hosted saving is unavailable.", "hosted_unavailable", 0);
+      }
+      const file = await saveHostedFile(hostedFileId, hostedRevision, document);
+      hostedRevision = file.revision;
+      return file;
+    });
+  return hostedSaveQueue;
 }
 
 async function restoreWorkspace() {
