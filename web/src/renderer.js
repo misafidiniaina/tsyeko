@@ -1,8 +1,10 @@
 import {
   getAncestors,
+  getChildNodes,
   getDocumentBounds,
   getEffectiveOpacity,
   getNodesWithDescendants,
+  isCompositeNode,
   isNodeEffectivelyLocked,
   isNodeEffectivelyVisible,
   localToWorld,
@@ -77,9 +79,9 @@ export class CanvasRenderer {
     const idSet = options.ids
       ? new Set(getNodesWithDescendants(document, options.ids).map((node) => node.id))
       : null;
-    for (const node of document.nodes) {
-      if (!isNodeEffectivelyVisible(document, node) || node.id === options.editingId || (idSet && !idSet.has(node.id))) continue;
-      this.drawNodeWithHierarchy(document, node, camera, options);
+    const sceneOptions = { ...options, idSet };
+    for (const node of getChildNodes(document)) {
+      this.drawSceneNode(document, node, camera, sceneOptions);
     }
 
     if (options.guides?.length) {
@@ -109,31 +111,275 @@ export class CanvasRenderer {
     }
   }
 
-  drawNodeWithHierarchy(document, node, camera, options = {}) {
+  drawSceneNode(document, node, camera, options = {}) {
+    if (!isNodeEffectivelyVisible(document, node) || !branchIntersectsSet(document, node, options.idSet)) return;
+    const children = getChildNodes(document, node.id);
+
+    if (node.type === NODE_TYPES.GROUP) {
+      for (const child of children) this.drawSceneNode(document, child, camera, options);
+      return;
+    }
+
+    if (node.type === NODE_TYPES.BOOLEAN) {
+      this.drawBooleanComposite(document, node, camera, options);
+      return;
+    }
+
+    if (node.type === NODE_TYPES.MASK) {
+      this.drawMaskComposite(document, node, camera, options);
+      return;
+    }
+
+    const shouldDrawNode = !options.idSet || options.idSet.has(node.id);
+    if (shouldDrawNode && node.id !== options.editingId) {
+      this.drawNode(node, camera, {
+        ...options,
+        effectiveOpacity: getOpacityUntil(document, node, options.opacityStopId),
+        effectiveLocked: isNodeEffectivelyLocked(document, node),
+      });
+    }
+
+    if (node.type !== NODE_TYPES.FRAME || !children.length) return;
     const context = this.context;
     context.save();
-    for (const frame of getAncestors(document, node).filter((ancestor) => ancestor.type === NODE_TYPES.FRAME)) {
-      const center = this.worldToScreen(
-        { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 },
-        camera,
-      );
-      const width = frame.width * camera.zoom;
-      const height = frame.height * camera.zoom;
-      const radius = Math.min(frame.cornerRadius * camera.zoom, width / 2, height / 2);
-      context.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
-      context.translate(center.x, center.y);
-      context.rotate((frame.rotation * Math.PI) / 180);
+    this.clipToFrame(node, camera);
+    for (const child of children) this.drawSceneNode(document, child, camera, options);
+    context.restore();
+  }
+
+  clipToFrame(frame, camera) {
+    const context = this.context;
+    const center = this.worldToScreen(
+      { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 },
+      camera,
+    );
+    const width = frame.width * camera.zoom;
+    const height = frame.height * camera.zoom;
+    const radius = Math.min(frame.cornerRadius * camera.zoom, width / 2, height / 2);
+    context.translate(center.x, center.y);
+    context.rotate((frame.rotation * Math.PI) / 180);
+    context.beginPath();
+    roundedRect(context, -width / 2, -height / 2, width, height, radius);
+    context.clip();
+    context.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
+  }
+
+  drawBooleanComposite(document, node, camera, options = {}) {
+    const mask = this.createBooleanMaskLayer(document, node, camera, options);
+    const painted = this.colorizeMask(mask, node, camera, false);
+    const output = this.createLayer();
+    const outputContext = output.getContext("2d");
+    outputContext.drawImage(painted, 0, 0);
+
+    if (node.strokeWidth > 0 && node.stroke !== "transparent") {
+      const expanded = this.expandMask(mask, node.strokeWidth * camera.zoom);
+      const stroke = this.colorizeMask(expanded, node, camera, true);
+      outputContext.globalCompositeOperation = "destination-over";
+      outputContext.drawImage(stroke, 0, 0);
+    }
+
+    this.drawCompositeLayer(output, document, node, camera, options);
+  }
+
+  drawMaskComposite(document, node, camera, options = {}) {
+    const output = this.createMaskOutputLayer(document, node, camera, options);
+    this.drawCompositeLayer(output, document, node, camera, options);
+  }
+
+  drawCompositeLayer(layer, document, node, camera, options = {}) {
+    const context = this.context;
+    context.save();
+    context.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
+    context.globalAlpha = getOpacityUntil(document, node, options.opacityStopId);
+    this.applyNodeShadow(node, camera.zoom, options);
+    context.drawImage(layer, 0, 0, this.width, this.height);
+    context.restore();
+
+    if (isNodeEffectivelyLocked(document, node) && options.lockIndicators !== false) {
+      this.drawLockIndicator(node, camera);
+    }
+  }
+
+  createBooleanMaskLayer(document, node, camera, options = {}) {
+    const children = getChildNodes(document, node.id)
+      .filter((child) => isNodeEffectivelyVisible(document, child));
+    const output = this.createLayer();
+    if (!children.length) return output;
+    const context = output.getContext("2d");
+
+    children.forEach((child, index) => {
+      const source = this.createBranchMaskLayer(document, child, camera, options);
+      context.globalCompositeOperation = index === 0
+        ? "source-over"
+        : booleanCompositeOperation(node.booleanOperation);
+      context.drawImage(source, 0, 0);
+    });
+    context.globalCompositeOperation = "source-over";
+    return output;
+  }
+
+  createMaskOutputLayer(document, node, camera, options = {}) {
+    const children = getChildNodes(document, node.id);
+    const output = this.createLayer();
+    if (children.length < 2 || !isNodeEffectivelyVisible(document, children[0])) return output;
+
+    const source = this.createBranchMaskLayer(document, children[0], camera, options);
+    const context = output.getContext("2d");
+    context.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
+    this.withContext(context, () => {
+      const contentOptions = {
+        ...options,
+        idSet: null,
+        opacityStopId: node.id,
+        frameLabels: false,
+        lockIndicators: false,
+      };
+      for (const child of children.slice(1).filter((item) => isNodeEffectivelyVisible(document, item))) {
+        this.drawSceneNode(document, child, camera, contentOptions);
+      }
+    });
+    context.save();
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.globalCompositeOperation = "destination-in";
+    context.drawImage(source, 0, 0);
+    context.restore();
+    return output;
+  }
+
+  createBranchMaskLayer(document, root, camera, options = {}) {
+    const output = this.createLayer();
+    const context = output.getContext("2d");
+    context.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
+    this.withContext(context, () => this.drawBranchMask(document, root, camera, options));
+    return output;
+  }
+
+  drawBranchMask(document, node, camera, options = {}) {
+    if (!isNodeEffectivelyVisible(document, node)) return;
+    const children = getChildNodes(document, node.id);
+    if (node.type === NODE_TYPES.GROUP) {
+      for (const child of children) this.drawBranchMask(document, child, camera, options);
+      return;
+    }
+    if (node.type === NODE_TYPES.BOOLEAN) {
+      this.drawPhysicalLayer(this.createBooleanMaskLayer(document, node, camera, options));
+      return;
+    }
+    if (node.type === NODE_TYPES.MASK) {
+      this.drawPhysicalLayer(this.createMaskOutputLayer(document, node, camera, options));
+      return;
+    }
+
+    this.drawNodeMaskGeometry(node, camera);
+    if (node.type !== NODE_TYPES.FRAME || !children.length) return;
+    const context = this.context;
+    context.save();
+    this.clipToFrame(node, camera);
+    for (const child of children) this.drawBranchMask(document, child, camera, options);
+    context.restore();
+  }
+
+  drawNodeMaskGeometry(node, camera) {
+    const context = this.context;
+    const zoom = camera.zoom;
+    const center = this.worldToScreen(
+      { x: node.x + node.width / 2, y: node.y + node.height / 2 },
+      camera,
+    );
+    const width = node.width * zoom;
+    const height = node.height * zoom;
+    context.save();
+    context.translate(center.x, center.y);
+    context.rotate((node.rotation * Math.PI) / 180);
+    context.fillStyle = "#ffffff";
+    context.strokeStyle = "#ffffff";
+    context.shadowColor = "transparent";
+
+    if (node.type === NODE_TYPES.VECTOR) {
+      context.beginPath();
+      buildVectorPath(context, node, zoom);
+      if (node.vectorClosed) context.fill(node.vectorFillRule);
+      if (!node.vectorClosed || node.strokeWidth > 0) {
+        context.lineWidth = Math.max(1, node.strokeWidth * zoom);
+        context.lineCap = "round";
+        context.lineJoin = "round";
+        context.stroke();
+      }
+    } else if (node.type === NODE_TYPES.ELLIPSE) {
+      context.beginPath();
+      context.ellipse(0, 0, width / 2, height / 2, 0, 0, Math.PI * 2);
+      context.fill();
+    } else if (node.type === NODE_TYPES.TEXT) {
+      this.drawText({ ...node, fill: "#ffffff", fillType: "solid" }, width, height, zoom);
+    } else {
+      const radius = Math.min(node.cornerRadius * zoom, width / 2, height / 2);
       context.beginPath();
       roundedRect(context, -width / 2, -height / 2, width, height, radius);
-      context.clip();
+      context.fill();
     }
-    context.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
-    this.drawNode(node, camera, {
-      ...options,
-      effectiveOpacity: getEffectiveOpacity(document, node),
-      effectiveLocked: isNodeEffectivelyLocked(document, node),
-    });
     context.restore();
+  }
+
+  colorizeMask(mask, node, camera, useStroke) {
+    const output = this.createLayer();
+    const context = output.getContext("2d");
+    const center = this.worldToScreen(
+      { x: node.x + node.width / 2, y: node.y + node.height / 2 },
+      camera,
+    );
+    const width = node.width * camera.zoom;
+    const height = node.height * camera.zoom;
+    context.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
+    context.translate(center.x, center.y);
+    context.rotate((node.rotation * Math.PI) / 180);
+    context.fillStyle = useStroke
+      ? node.stroke
+      : createNodeFill(context, node, width, height);
+    const paintExtent = Math.max(this.width, this.height) * 3 + width + height;
+    context.fillRect(-paintExtent, -paintExtent, paintExtent * 2, paintExtent * 2);
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.globalCompositeOperation = "destination-in";
+    context.drawImage(mask, 0, 0);
+    return output;
+  }
+
+  expandMask(mask, screenRadius) {
+    const output = this.createLayer();
+    const context = output.getContext("2d");
+    const radius = Math.max(0, screenRadius * this.pixelRatio);
+    context.drawImage(mask, 0, 0);
+    if (radius < 0.5) return output;
+    const steps = Math.max(16, Math.min(64, Math.ceil(radius * 3)));
+    for (let index = 0; index < steps; index += 1) {
+      const angle = (index / steps) * Math.PI * 2;
+      context.drawImage(mask, Math.cos(angle) * radius, Math.sin(angle) * radius);
+    }
+    return output;
+  }
+
+  drawPhysicalLayer(layer) {
+    const context = this.context;
+    context.save();
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.drawImage(layer, 0, 0);
+    context.restore();
+  }
+
+  createLayer() {
+    const canvas = this.canvas.ownerDocument.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(this.width * this.pixelRatio));
+    canvas.height = Math.max(1, Math.round(this.height * this.pixelRatio));
+    return canvas;
+  }
+
+  withContext(context, callback) {
+    const previous = this.context;
+    this.context = context;
+    try {
+      return callback();
+    } finally {
+      this.context = previous;
+    }
   }
 
   drawGrid(camera) {
@@ -592,30 +838,15 @@ export class CanvasRenderer {
     const padding = 4 / camera.zoom;
     for (let index = document.nodes.length - 1; index >= 0; index -= 1) {
       const node = document.nodes[index];
-      if (node.type === NODE_TYPES.GROUP || !isNodeEffectivelyVisible(document, node) || !pointInNode(node, worldPoint, padding)) continue;
+      if (node.type === NODE_TYPES.GROUP ||
+        !isNodeEffectivelyVisible(document, node) ||
+        getAncestors(document, node).some(isCompositeNode) ||
+        !pointInNode(node, worldPoint, padding)) continue;
       const clipped = getAncestors(document, node)
         .filter((ancestor) => ancestor.type === NODE_TYPES.FRAME)
         .some((frame) => !pointInNode(frame, worldPoint));
       if (clipped) continue;
-      if (node.type === NODE_TYPES.ELLIPSE) {
-        const local = worldToLocal(node, worldPoint);
-        const x = (local.x - node.width / 2) / (node.width / 2 + padding);
-        const y = (local.y - node.height / 2) / (node.height / 2 + padding);
-        if (x * x + y * y > 1) continue;
-      }
-      if (node.type === NODE_TYPES.VECTOR) {
-        const local = worldToLocal(node, worldPoint);
-        const flattened = flattenVectorPath(node);
-        const inside = node.vectorClosed && (
-          node.vectorFillRule === "evenodd"
-            ? pointInPolygon(local, flattened)
-            : pointInPolygonNonZero(local, flattened)
-        );
-        const pathPadding = Math.max(padding, node.strokeWidth / 2 + padding);
-        const nearPath = flattened.slice(1).some((end, flattenedIndex) =>
-          distanceToSegment(local, flattened[flattenedIndex], end) <= pathPadding);
-        if (!inside && !nearPath) continue;
-      }
+      if (!pointInSceneNode(document, node, worldPoint, padding)) continue;
       return node;
     }
     return null;
@@ -819,6 +1050,33 @@ function roundedRect(context, x, y, width, height, radius) {
   context.quadraticCurveTo(x, y, x + radius, y);
 }
 
+function booleanCompositeOperation(operation) {
+  if (operation === "subtract") return "destination-out";
+  if (operation === "intersect") return "destination-in";
+  if (operation === "exclude") return "xor";
+  return "source-over";
+}
+
+function branchIntersectsSet(document, node, idSet) {
+  if (!idSet || idSet.has(node.id)) return true;
+  return getChildNodes(document, node.id)
+    .some((child) => branchIntersectsSet(document, child, idSet));
+}
+
+function getOpacityUntil(document, node, stopId = null) {
+  if (!stopId) return getEffectiveOpacity(document, node);
+  let opacity = node.opacity;
+  let cursor = node;
+  const visited = new Set([node.id]);
+  while (cursor.parentId && cursor.parentId !== stopId && !visited.has(cursor.parentId)) {
+    visited.add(cursor.parentId);
+    cursor = document.nodes.find((item) => item.id === cursor.parentId);
+    if (!cursor) break;
+    opacity *= cursor.opacity;
+  }
+  return opacity;
+}
+
 function buildVectorPath(context, node, zoom) {
   const [first] = node.vectorPoints;
   if (!first) return;
@@ -901,6 +1159,59 @@ function mapSegment(segment, mapper) {
     c2: mapper(segment.c2),
     p3: mapper(segment.p3),
   };
+}
+
+export function pointInSceneNode(document, node, worldPoint, padding = 0) {
+  if (!node || !isNodeEffectivelyVisible(document, node)) return false;
+  const children = getChildNodes(document, node.id)
+    .filter((child) => isNodeEffectivelyVisible(document, child));
+
+  if (node.type === NODE_TYPES.GROUP) {
+    return children.some((child) => pointInSceneNode(document, child, worldPoint, padding));
+  }
+
+  if (node.type === NODE_TYPES.BOOLEAN) {
+    const matches = children.map((child) =>
+      pointInSceneNode(document, child, worldPoint, padding));
+    if (!matches.length) return false;
+    if (node.booleanOperation === "subtract") {
+      return matches[0] && !matches.slice(1).some(Boolean);
+    }
+    if (node.booleanOperation === "intersect") return matches.every(Boolean);
+    if (node.booleanOperation === "exclude") {
+      return matches.filter(Boolean).length % 2 === 1;
+    }
+    return matches.some(Boolean);
+  }
+
+  if (node.type === NODE_TYPES.MASK) {
+    if (children.length < 2) return false;
+    return pointInSceneNode(document, children[0], worldPoint, padding) &&
+      children.slice(1).some((child) =>
+        pointInSceneNode(document, child, worldPoint, padding));
+  }
+
+  if (!pointInNode(node, worldPoint, padding)) return false;
+  if (node.type === NODE_TYPES.ELLIPSE) {
+    const local = worldToLocal(node, worldPoint);
+    const x = (local.x - node.width / 2) / (node.width / 2 + padding);
+    const y = (local.y - node.height / 2) / (node.height / 2 + padding);
+    return x * x + y * y <= 1;
+  }
+  if (node.type === NODE_TYPES.VECTOR) {
+    const local = worldToLocal(node, worldPoint);
+    const flattened = flattenVectorPath(node);
+    const inside = node.vectorClosed && (
+      node.vectorFillRule === "evenodd"
+        ? pointInPolygon(local, flattened)
+        : pointInPolygonNonZero(local, flattened)
+    );
+    const pathPadding = Math.max(padding, node.strokeWidth / 2 + padding);
+    const nearPath = flattened.slice(1).some((end, flattenedIndex) =>
+      distanceToSegment(local, flattened[flattenedIndex], end) <= pathPadding);
+    return inside || nearPath;
+  }
+  return true;
 }
 
 function pointInPolygon(point, polygon) {

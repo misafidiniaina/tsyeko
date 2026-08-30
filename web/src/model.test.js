@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  BOOLEAN_OPERATIONS,
+  booleanGroupNodes,
   createEmptyDocument,
   createNode,
   createPage,
@@ -18,6 +20,7 @@ import {
   groupNodes,
   isNodeEffectivelyVisible,
   localToWorld,
+  maskNodes,
   NODE_TYPES,
   normalizeDocument,
   normalizeVectorBounds,
@@ -43,7 +46,7 @@ test("migrates v1 documents and clamps untrusted geometry", () => {
   });
 
   assert.equal(document.name, "Imported");
-  assert.equal(document.version, 6);
+  assert.equal(document.version, 7);
   assert.equal(document.pages.length, 1);
   assert.equal(document.pages[0].nodes[0].x, 12);
   assert.equal(document.pages[0].nodes[0].width, 1);
@@ -187,6 +190,71 @@ test("groups, duplicates, ungroups, and recursively deletes subtrees", () => {
   assert.equal(copies.some((copy) => page.nodes.includes(copy)), false);
 });
 
+test("creates editable Boolean containers with deterministic source order", () => {
+  const page = createPage("Boolean");
+  const base = createNode(NODE_TYPES.RECTANGLE, 0, 0, { width: 100, height: 80 });
+  const cutter = createNode(NODE_TYPES.ELLIPSE, 40, 20, { width: 80, height: 80 });
+  page.nodes.push(base, cutter);
+
+  const boolean = booleanGroupNodes(page, [base.id, cutter.id], BOOLEAN_OPERATIONS.SUBTRACT);
+  assert.equal(boolean.type, NODE_TYPES.BOOLEAN);
+  assert.equal(boolean.booleanOperation, BOOLEAN_OPERATIONS.SUBTRACT);
+  assert.equal(boolean.name, "Subtract");
+  assert.deepEqual(
+    page.nodes.filter((node) => node.parentId === boolean.id).map((node) => node.id),
+    [base.id, cutter.id],
+  );
+  assert.equal(boolean.x, 0);
+  assert.equal(boolean.width, 120);
+
+  const copy = duplicateNodes(page, [boolean.id], 10);
+  const copiedBoolean = copy.find((node) => node.type === NODE_TYPES.BOOLEAN);
+  assert.equal(copy.filter((node) => node.parentId === copiedBoolean.id).length, 2);
+
+  assert.deepEqual(ungroupNodes(page, [boolean.id]), [base.id, cutter.id]);
+  assert.equal(base.parentId, null);
+  assert.equal(page.nodes.some((node) => node.id === boolean.id), false);
+});
+
+test("creates mask groups whose first child is the mask source", () => {
+  const page = createPage("Mask");
+  const source = createNode(NODE_TYPES.ELLIPSE, 20, 10);
+  const content = createNode(NODE_TYPES.IMAGE, 0, 0, { width: 180, height: 140 });
+  page.nodes.push(source, content);
+
+  const mask = maskNodes(page, [source.id, content.id]);
+  assert.equal(mask.type, NODE_TYPES.MASK);
+  assert.equal(mask.name, "Mask group");
+  assert.deepEqual(
+    page.nodes.filter((node) => node.parentId === mask.id).map((node) => node.id),
+    [source.id, content.id],
+  );
+  assert.equal(booleanGroupNodes(page, [mask.id], BOOLEAN_OPERATIONS.UNION), null);
+  assert.equal(maskNodes(page, [mask.id]), null);
+});
+
+test("migrates and sanitizes v7 Boolean and mask containers", () => {
+  const document = normalizeDocument({
+    version: 6,
+    name: "Composites",
+    pages: [{
+      name: "Page",
+      nodes: [
+        { id: "boolean", type: "boolean", booleanOperation: "unsafe" },
+        { id: "shape", type: "rectangle", parentId: "boolean" },
+        { id: "mask", type: "mask" },
+        { id: "content", type: "ellipse", parentId: "mask" },
+      ],
+    }],
+  });
+  const page = getFirstPage(document);
+
+  assert.equal(document.version, 7);
+  assert.equal(page.nodes.find((node) => node.id === "boolean").booleanOperation, "union");
+  assert.equal(page.nodes.find((node) => node.id === "shape").parentId, "boolean");
+  assert.equal(page.nodes.find((node) => node.id === "content").parentId, "mask");
+});
+
 test("inherits visibility through frame and group ancestors", () => {
   const page = createPage("Visibility");
   const frame = createNode(NODE_TYPES.FRAME);
@@ -261,7 +329,7 @@ test("migrates implicit frame shadows into explicit v6 effects", () => {
   });
   const frame = getFirstPage(document).nodes[0];
 
-  assert.equal(document.version, 6);
+  assert.equal(document.version, 7);
   assert.equal(frame.fillType, "solid");
   assert.equal(frame.shadow.enabled, true);
   assert.equal(frame.shadow.blur, 16);
@@ -364,7 +432,7 @@ test("normalizes vector paths and rejects invalid point data", () => {
   });
   const vector = getFirstPage(document).nodes[0];
 
-  assert.equal(document.version, 6);
+  assert.equal(document.version, 7);
   assert.equal(vector.type, NODE_TYPES.VECTOR);
   assert.equal(vector.vectorPoints.length, 2);
   assert.equal(vector.vectorClosed, false);
@@ -455,7 +523,7 @@ test("migrates v5 corner anchors and sanitizes Bézier handles", () => {
   const first = vector.vectorPoints[0];
   const second = vector.vectorPoints[1];
 
-  assert.equal(document.version, 6);
+  assert.equal(document.version, 7);
   assert.equal(first.handleMode, "mirrored");
   assert.ok(first.in && first.out);
   assert.equal(first.in.x - first.x, -(first.out.x - first.x));

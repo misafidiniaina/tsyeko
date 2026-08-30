@@ -1,5 +1,5 @@
 import {
-  getAncestors,
+  getChildNodes,
   getDocumentBounds,
   getEffectiveOpacity,
   getNodesWithDescendants,
@@ -14,35 +14,36 @@ export function documentToSVG(document, ids = null) {
     ? new Set(getNodesWithDescendants(document, ids).map((node) => node.id))
     : null;
   const nodes = document.nodes.filter(
-    (node) => node.type !== NODE_TYPES.GROUP && isNodeEffectivelyVisible(document, node) && (!idSet || idSet.has(node.id)),
+    (node) => isNodeEffectivelyVisible(document, node) && branchIntersectsSet(document, node, idSet),
   );
   const width = Math.max(1, Math.ceil(bounds.width));
   const height = Math.max(1, Math.ceil(bounds.height));
-  const frameIds = new Set(nodes.flatMap((node) =>
-    getAncestors(document, node)
-      .filter((ancestor) => ancestor.type === NODE_TYPES.FRAME)
-      .map((ancestor) => ancestor.id),
-  ));
-  const frameClips = document.nodes
-    .filter((node) => frameIds.has(node.id))
+  const frameClips = nodes
+    .filter((node) => node.type === NODE_TYPES.FRAME)
     .map(frameClipToSVG)
     .join("");
   const paintDefinitions = nodes
     .flatMap((node) => [
-      node.fillType === "linear-gradient" && (node.type !== NODE_TYPES.VECTOR || node.vectorClosed)
+      node.fillType === "linear-gradient" &&
+        ![NODE_TYPES.GROUP, NODE_TYPES.MASK].includes(node.type) &&
+        (node.type !== NODE_TYPES.VECTOR || node.vectorClosed)
         ? gradientToSVG(node)
         : "",
-      node.shadow?.enabled && node.shadow.opacity > 0 ? shadowToSVG(node) : "",
+      ![NODE_TYPES.GROUP, NODE_TYPES.MASK].includes(node.type) &&
+        node.shadow?.enabled && node.shadow.opacity > 0
+        ? shadowToSVG(node)
+        : "",
     ])
     .join("");
-  const definitions = `${frameClips}${paintDefinitions}`;
-  const body = nodes.map((node) => {
-    let output = nodeToSVG(node, getEffectiveOpacity(document, node));
-    for (const frame of getAncestors(document, node).filter((ancestor) => ancestor.type === NODE_TYPES.FRAME)) {
-      output = `<g clip-path="url(#frame-clip-${safeId(frame.id)})">${output}</g>`;
-    }
-    return output;
-  }).join("\n  ");
+  const compositeDefinitions = nodes
+    .filter((node) => [NODE_TYPES.BOOLEAN, NODE_TYPES.MASK].includes(node.type))
+    .map((node) => compositeDefinitionToSVG(document, node))
+    .join("");
+  const definitions = `${frameClips}${paintDefinitions}${compositeDefinitions}`;
+  const body = getChildNodes(document)
+    .map((node) => branchToSVG(document, node, idSet))
+    .filter(Boolean)
+    .join("\n  ");
 
   return [
     `<?xml version="1.0" encoding="UTF-8"?>`,
@@ -52,6 +53,173 @@ export function documentToSVG(document, ids = null) {
     `  ${body}`,
     `</svg>`,
   ].join("\n");
+}
+
+function branchToSVG(document, node, idSet, opacityStopId = null) {
+  if (!isNodeEffectivelyVisible(document, node) || !branchIntersectsSet(document, node, idSet)) return "";
+  const children = getChildNodes(document, node.id);
+
+  if (node.type === NODE_TYPES.GROUP) {
+    return children
+      .map((child) => branchToSVG(document, child, idSet, opacityStopId))
+      .filter(Boolean)
+      .join("");
+  }
+
+  if (node.type === NODE_TYPES.BOOLEAN) {
+    return booleanNodeToSVG(document, node, opacityStopId);
+  }
+
+  if (node.type === NODE_TYPES.MASK) {
+    if (children.length < 2) return "";
+    const content = children.slice(1)
+      .map((child) => branchToSVG(document, child, null, node.id))
+      .filter(Boolean)
+      .join("");
+    const opacity = getOpacityUntil(document, node, opacityStopId);
+    const filter = node.shadow?.enabled && node.shadow.opacity > 0
+      ? ` filter="url(#shadow-${safeId(node.id)})"`
+      : "";
+    return `<g opacity="${round(opacity)}" mask="url(#mask-${safeId(node.id)})"${filter}>${content}</g>`;
+  }
+
+  const ownOutput = !idSet || idSet.has(node.id)
+    ? nodeToSVG(node, getOpacityUntil(document, node, opacityStopId))
+    : "";
+  if (node.type !== NODE_TYPES.FRAME || !children.length) return ownOutput;
+  const descendants = children
+    .map((child) => branchToSVG(document, child, idSet, opacityStopId))
+    .filter(Boolean)
+    .join("");
+  return `${ownOutput}${descendants ? `<g clip-path="url(#frame-clip-${safeId(node.id)})">${descendants}</g>` : ""}`;
+}
+
+function booleanNodeToSVG(document, node, opacityStopId) {
+  const fill = node.fillType === "linear-gradient"
+    ? `url(#gradient-${safeId(node.id)})`
+    : node.fill;
+  const padding = Math.max(0, node.strokeWidth);
+  const rectangle = (paint, maskId) =>
+    `<rect x="${round(node.x - padding)}" y="${round(node.y - padding)}" width="${round(node.width + padding * 2)}" height="${round(node.height + padding * 2)}" fill="${escapeXML(paint)}" mask="url(#${maskId})" />`;
+  const stroke = node.strokeWidth > 0 && node.stroke !== "transparent"
+    ? rectangle(node.stroke, `boolean-stroke-mask-${safeId(node.id)}`)
+    : "";
+  const painted = rectangle(fill, `boolean-mask-${safeId(node.id)}`);
+  const opacity = getOpacityUntil(document, node, opacityStopId);
+  const filter = node.shadow?.enabled && node.shadow.opacity > 0
+    ? ` filter="url(#shadow-${safeId(node.id)})"`
+    : "";
+  return `<g opacity="${round(opacity)}"${filter}>${stroke}${painted}</g>`;
+}
+
+function compositeDefinitionToSVG(document, node) {
+  return node.type === NODE_TYPES.BOOLEAN
+    ? booleanDefinitionToSVG(document, node)
+    : maskDefinitionToSVG(document, node);
+}
+
+function booleanDefinitionToSVG(document, node) {
+  const children = getChildNodes(document, node.id)
+    .filter((child) => isNodeEffectivelyVisible(document, child));
+  const id = safeId(node.id);
+  const bounds = maskBounds(node, Math.max(2, node.strokeWidth * 2));
+  const maskStart = `<mask id="boolean-mask-${id}" ${bounds} maskUnits="userSpaceOnUse" style="mask-type:luminance">`;
+  let source = "";
+  let supportingMasks = "";
+
+  if (node.booleanOperation === "subtract") {
+    source = children.length
+      ? `${maskGeometryToSVG(document, children[0], "#ffffff")}${children.slice(1).map((child) => maskGeometryToSVG(document, child, "#000000")).join("")}`
+      : "";
+  } else if (node.booleanOperation === "intersect") {
+    let intersection = `<rect x="${round(node.x)}" y="${round(node.y)}" width="${round(node.width)}" height="${round(node.height)}" fill="#ffffff" />`;
+    children.forEach((child, index) => {
+      const childMaskId = `boolean-intersect-${id}-${index}`;
+      supportingMasks += `<mask id="${childMaskId}" ${bounds} maskUnits="userSpaceOnUse" style="mask-type:luminance">${maskGeometryToSVG(document, child, "#ffffff")}</mask>`;
+      intersection = `<g mask="url(#${childMaskId})">${intersection}</g>`;
+    });
+    source = children.length ? intersection : "";
+  } else if (node.booleanOperation === "exclude") {
+    source = `<g style="isolation:isolate">${children.map((child) =>
+      `<g style="mix-blend-mode:exclusion">${maskGeometryToSVG(document, child, "#ffffff")}</g>`).join("")}</g>`;
+  } else {
+    source = children.map((child) => maskGeometryToSVG(document, child, "#ffffff")).join("");
+  }
+
+  const baseMask = `${supportingMasks}${maskStart}${source}</mask>`;
+  if (node.strokeWidth <= 0 || node.stroke === "transparent") return baseMask;
+  const extent = Math.max(1, node.strokeWidth);
+  const expansion = `<filter id="boolean-expand-${id}" ${maskBounds(node, extent * 3)} filterUnits="userSpaceOnUse"><feMorphology in="SourceGraphic" operator="dilate" radius="${round(extent)}" /></filter>`;
+  const expandedMask = `<mask id="boolean-stroke-mask-${id}" ${maskBounds(node, extent * 3)} maskUnits="userSpaceOnUse" style="mask-type:luminance"><g filter="url(#boolean-expand-${id})"><rect x="${round(node.x)}" y="${round(node.y)}" width="${round(node.width)}" height="${round(node.height)}" fill="#ffffff" mask="url(#boolean-mask-${id})" /></g></mask>`;
+  return `${baseMask}${expansion}${expandedMask}`;
+}
+
+function maskDefinitionToSVG(document, node) {
+  const source = getChildNodes(document, node.id)[0];
+  return `<mask id="mask-${safeId(node.id)}" ${maskBounds(node, 2)} maskUnits="userSpaceOnUse" style="mask-type:luminance">${source ? maskGeometryToSVG(document, source, "#ffffff") : ""}</mask>`;
+}
+
+function maskGeometryToSVG(document, node, color) {
+  if (!isNodeEffectivelyVisible(document, node)) return "";
+  const children = getChildNodes(document, node.id);
+  if (node.type === NODE_TYPES.GROUP) {
+    return children.map((child) => maskGeometryToSVG(document, child, color)).join("");
+  }
+  if (node.type === NODE_TYPES.BOOLEAN) {
+    return `<rect x="${round(node.x)}" y="${round(node.y)}" width="${round(node.width)}" height="${round(node.height)}" fill="${color}" mask="url(#boolean-mask-${safeId(node.id)})" />`;
+  }
+  if (node.type === NODE_TYPES.MASK) {
+    const content = children.slice(1)
+      .map((child) => maskGeometryToSVG(document, child, color))
+      .join("");
+    return `<g mask="url(#mask-${safeId(node.id)})">${content}</g>`;
+  }
+
+  const shadow = { enabled: false, color: "#000000", opacity: 0, offsetX: 0, offsetY: 0, blur: 0 };
+  if (node.type === NODE_TYPES.TEXT) {
+    return nodeToSVG({ ...node, fill: color, fillType: "solid", shadow }, 1);
+  }
+  if (node.type === NODE_TYPES.VECTOR) {
+    return nodeToSVG({
+      ...node,
+      fill: color,
+      fillType: "solid",
+      stroke: color,
+      strokeWidth: node.vectorClosed ? node.strokeWidth : Math.max(1, node.strokeWidth),
+      shadow,
+    }, 1);
+  }
+
+  const transform = `transform="rotate(${round(node.rotation)} ${round(node.x + node.width / 2)} ${round(node.y + node.height / 2)})"`;
+  if (node.type === NODE_TYPES.ELLIPSE) {
+    return `<ellipse cx="${round(node.x + node.width / 2)}" cy="${round(node.y + node.height / 2)}" rx="${round(node.width / 2)}" ry="${round(node.height / 2)}" fill="${color}" ${transform} />`;
+  }
+  const radius = Math.min(node.cornerRadius, node.width / 2, node.height / 2);
+  return `<rect x="${round(node.x)}" y="${round(node.y)}" width="${round(node.width)}" height="${round(node.height)}" rx="${round(radius)}" fill="${color}" ${transform} />`;
+}
+
+function maskBounds(node, padding = 0) {
+  return `x="${round(node.x - padding)}" y="${round(node.y - padding)}" width="${round(node.width + padding * 2)}" height="${round(node.height + padding * 2)}"`;
+}
+
+function branchIntersectsSet(document, node, idSet) {
+  if (!idSet || idSet.has(node.id)) return true;
+  return getChildNodes(document, node.id)
+    .some((child) => branchIntersectsSet(document, child, idSet));
+}
+
+function getOpacityUntil(document, node, stopId = null) {
+  if (!stopId) return getEffectiveOpacity(document, node);
+  let opacity = node.opacity;
+  let cursor = node;
+  const visited = new Set([node.id]);
+  while (cursor.parentId && cursor.parentId !== stopId && !visited.has(cursor.parentId)) {
+    visited.add(cursor.parentId);
+    cursor = document.nodes.find((item) => item.id === cursor.parentId);
+    if (!cursor) break;
+    opacity *= cursor.opacity;
+  }
+  return opacity;
 }
 
 export function downloadBlob(content, filename, type) {

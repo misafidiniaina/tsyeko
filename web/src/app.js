@@ -1,4 +1,6 @@
 import {
+  BOOLEAN_OPERATIONS,
+  booleanGroupNodes,
   cloneDocument,
   createEmptyDocument,
   createNode,
@@ -20,9 +22,11 @@ import {
   getTopLevelNodeIds,
   groupNodes,
   isContainerNode,
+  isCompositeNode,
   isNodeEffectivelyLocked,
   isNodeEffectivelyVisible,
   localToWorld,
+  maskNodes,
   NODE_TYPES,
   normalizeDocument,
   normalizeVectorBounds,
@@ -374,7 +378,7 @@ function bindInspector() {
       const sine = Math.sin(radians);
       const center = { x: node.x + node.width / 2, y: node.y + node.height / 2 };
       for (const child of getNodesWithDescendants(currentPage(), [node.id])) {
-        if (child.id === node.id || child.type === NODE_TYPES.GROUP) continue;
+        if (child.id === node.id || isAutoBoundsContainer(child)) continue;
         const childCenter = { x: child.x + child.width / 2, y: child.y + child.height / 2 };
         const offsetX = childCenter.x - center.x;
         const offsetY = childCenter.y - center.y;
@@ -410,6 +414,14 @@ function bindInspector() {
     if (action === "ungroup") {
       ungroupSelection();
       return;
+    }
+    if (action === "boolean-operation" && node.type === NODE_TYPES.BOOLEAN) {
+      const operation = button.dataset.value;
+      if (Object.values(BOOLEAN_OPERATIONS).includes(operation)) {
+        const previousDefaultName = capitalize(node.booleanOperation);
+        node.booleanOperation = operation;
+        if (node.name === previousDefaultName) node.name = capitalize(operation);
+      }
     }
     if (action === "align") node.textAlign = button.dataset.value;
     if (action === "fill-mode") node.fillType = button.dataset.value;
@@ -543,6 +555,22 @@ function bindKeyboard() {
     if (command && key === "d") {
       event.preventDefault();
       duplicateSelection();
+      return;
+    }
+    if (command && event.altKey && ["u", "s", "i", "x"].includes(key)) {
+      event.preventDefault();
+      const operation = {
+        u: BOOLEAN_OPERATIONS.UNION,
+        s: BOOLEAN_OPERATIONS.SUBTRACT,
+        i: BOOLEAN_OPERATIONS.INTERSECT,
+        x: BOOLEAN_OPERATIONS.EXCLUDE,
+      }[key];
+      booleanSelection(operation);
+      return;
+    }
+    if (command && event.altKey && key === "m") {
+      event.preventDefault();
+      maskSelection();
       return;
     }
     if (command && key === "g") {
@@ -1249,7 +1277,7 @@ function updateMove(world, event) {
 }
 
 function createResizeInteraction(event, node, handle) {
-  const nodes = node.type === NODE_TYPES.GROUP
+  const nodes = isAutoBoundsContainer(node)
     ? getNodesWithDescendants(currentPage(), [node.id])
     : [node];
   return {
@@ -1316,11 +1344,11 @@ function updateResize(world, event) {
       scaleVectorPoint(point, scaleX, scaleY));
   }
 
-  if (node.type === NODE_TYPES.GROUP) {
+  if (isAutoBoundsContainer(node)) {
     const scaleX = width / original.width;
     const scaleY = height / original.height;
     for (const snapshot of interaction.nodes) {
-      if (snapshot.id === node.id || snapshot.type === NODE_TYPES.GROUP) continue;
+      if (snapshot.id === node.id || isAutoBoundsContainer(snapshot)) continue;
       const child = getNode(currentPage(), snapshot.id);
       if (!child) continue;
       child.x = node.x + (snapshot.x - original.x) * scaleX;
@@ -1364,7 +1392,7 @@ function updateRotation(world, event) {
   let degrees = interaction.startRotation + ((angle - interaction.startAngle) * 180) / Math.PI;
   if (event.shiftKey) degrees = Math.round(degrees / 15) * 15;
   const delta = normalizeDegrees(degrees - interaction.startRotation);
-  if (node.type === NODE_TYPES.GROUP) node.rotation = 0;
+  if (isAutoBoundsContainer(node)) node.rotation = 0;
   else node.rotation = normalizeDegrees(degrees);
 
   if (isContainerNode(node)) {
@@ -1372,7 +1400,7 @@ function updateRotation(world, event) {
     const cosine = Math.cos(radians);
     const sine = Math.sin(radians);
     for (const snapshot of interaction.nodes) {
-      if (snapshot.id === node.id || snapshot.type === NODE_TYPES.GROUP) continue;
+      if (snapshot.id === node.id || isAutoBoundsContainer(snapshot)) continue;
       const child = getNode(currentPage(), snapshot.id);
       if (!child) continue;
       const childCenter = {
@@ -1399,7 +1427,11 @@ function updateMarquee(screen) {
   const worldEnd = renderer.screenToWorld(interaction.current, camera);
   const marquee = normalizedRect(worldStart, worldEnd);
   const matching = currentPage().nodes
-    .filter((node) => isNodeEffectivelyVisible(currentPage(), node) && rectanglesIntersect(marquee, getNodeAABB(node)))
+    .filter((node) =>
+      node.type !== NODE_TYPES.GROUP &&
+      !getAncestors(currentPage(), node).some(isCompositeNode) &&
+      isNodeEffectivelyVisible(currentPage(), node) &&
+      rectanglesIntersect(marquee, getNodeAABB(node)))
     .map((node) => node.id);
   selectedIds = interaction.additive
     ? [...new Set([...interaction.previousSelection, ...matching])]
@@ -1600,16 +1632,54 @@ function groupSelection() {
   commitDocument();
 }
 
+function booleanSelection(operation) {
+  if (selectedIds.length < 2) {
+    showToast("Select at least two sibling layers for a Boolean operation.");
+    return;
+  }
+  vectorEdit = null;
+  const boolean = booleanGroupNodes(currentPage(), selectedIds, operation);
+  if (!boolean) {
+    showToast("Boolean sources must share the same parent.");
+    return;
+  }
+  selectedIds = [boolean.id];
+  collapsedLayerIds.delete(boolean.id);
+  commitDocument();
+  showToast(`${capitalize(operation)} Boolean created`);
+}
+
+function maskSelection() {
+  if (selectedIds.length < 2) {
+    showToast("Select a mask shape and at least one content layer.");
+    return;
+  }
+  vectorEdit = null;
+  const mask = maskNodes(currentPage(), selectedIds);
+  if (!mask) {
+    showToast("Mask layers must share the same parent.");
+    return;
+  }
+  selectedIds = [mask.id];
+  collapsedLayerIds.delete(mask.id);
+  commitDocument();
+  showToast("Mask group created");
+}
+
 function ungroupSelection() {
   if (!selectedIds.length) return;
   vectorEdit = null;
   const released = ungroupNodes(currentPage(), selectedIds);
   if (!released.length) {
-    showToast("Select a group to ungroup it.");
+    showToast("Select a group, Boolean, or mask to release its layers.");
     return;
   }
   selectedIds = released;
   commitDocument();
+}
+
+function isAutoBoundsContainer(node) {
+  return [NODE_TYPES.GROUP, NODE_TYPES.BOOLEAN, NODE_TYPES.MASK].includes(node?.type);
 }
 
 function arrangeSelection(direction) {
@@ -1628,7 +1698,7 @@ function reparentMovedRoots(rootIds = []) {
   for (const id of rootIds) {
     const node = getNode(page, id);
     const currentParent = node?.parentId ? getNode(page, node.parentId) : null;
-    if (!node || currentParent?.type === NODE_TYPES.GROUP) continue;
+    if (!node || [NODE_TYPES.GROUP, NODE_TYPES.BOOLEAN, NODE_TYPES.MASK].includes(currentParent?.type)) continue;
     node.parentId = findContainingFrame(page, node, rootIds)?.id ?? null;
   }
   sortNodesByHierarchy(page);
@@ -1906,9 +1976,21 @@ function renderInspector() {
           <button class="button button-quiet" data-multi-action="group">Group selection</button>
           <button class="button button-quiet" data-multi-action="duplicate">Duplicate selection</button>
         </div>
+      </div>
+      <div class="inspector-section">
+        <p class="inspector-section-title">Combine shapes</p>
+        <div class="boolean-operation-grid">
+          ${Object.values(BOOLEAN_OPERATIONS).map((operation) => `<button class="icon-toggle" data-multi-action="boolean" data-operation="${operation}">${capitalize(operation)}</button>`).join("")}
+        </div>
+        <button class="button button-quiet" data-multi-action="mask" style="width: 100%; margin-top: 8px">Use bottom layer as mask</button>
+        <p class="inspector-hint">Operations preserve every source layer. The bottom layer is the Boolean base or mask source.</p>
       </div>`;
     elements.inspector.querySelector("[data-multi-action='group']")?.addEventListener("click", groupSelection);
     elements.inspector.querySelector("[data-multi-action='duplicate']")?.addEventListener("click", duplicateSelection);
+    elements.inspector.querySelectorAll("[data-multi-action='boolean']").forEach((button) => {
+      button.addEventListener("click", () => booleanSelection(button.dataset.operation));
+    });
+    elements.inspector.querySelector("[data-multi-action='mask']")?.addEventListener("click", maskSelection);
     return;
   }
 
@@ -1928,25 +2010,26 @@ function renderInspector() {
         ${numberField("W", "width", node.width)}
         ${numberField("H", "height", node.height)}
         ${numberField("↻", "rotation", node.rotation)}
-        ${numberField("R", "cornerRadius", node.cornerRadius, [NODE_TYPES.ELLIPSE, NODE_TYPES.TEXT, NODE_TYPES.VECTOR].includes(node.type))}
+        ${numberField("R", "cornerRadius", node.cornerRadius, [NODE_TYPES.ELLIPSE, NODE_TYPES.TEXT, NODE_TYPES.VECTOR, NODE_TYPES.BOOLEAN, NODE_TYPES.MASK].includes(node.type))}
       </div>
     </section>` : ""}
 
     ${node.type === NODE_TYPES.TEXT ? textInspector(node) : ""}
     ${node.type === NODE_TYPES.IMAGE ? imageInspector(node) : ""}
     ${node.type === NODE_TYPES.VECTOR ? vectorInspector(node) : ""}
+    ${node.type === NODE_TYPES.BOOLEAN ? booleanInspector(node) : ""}
 
     ${node.type === NODE_TYPES.GROUP ? `
       <section class="inspector-section">
         <p class="inspector-section-title">Group</p>
         <label class="field"><span class="field-label">%</span><input type="number" data-property="opacity" data-value-type="number" data-scale="0.01" min="0" max="100" value="${Math.round(node.opacity * 100)}" aria-label="Group opacity" /></label>
         <button class="button button-quiet" data-inspector-action="ungroup" style="width: 100%; margin-top: 8px">Ungroup layers</button>
-      </section>` : node.type === NODE_TYPES.VECTOR && !node.vectorClosed ? "" : `<section class="inspector-section">
+      </section>` : node.type === NODE_TYPES.MASK ? maskInspector(node) : node.type === NODE_TYPES.VECTOR && !node.vectorClosed ? "" : `<section class="inspector-section">
       <p class="inspector-section-title">Fill</p>
       ${fillInspector(node)}
     </section>`}
 
-    ${node.type !== NODE_TYPES.TEXT && node.type !== NODE_TYPES.GROUP ? `
+    ${![NODE_TYPES.TEXT, NODE_TYPES.GROUP, NODE_TYPES.MASK].includes(node.type) ? `
       <section class="inspector-section">
         <p class="inspector-section-title">Stroke</p>
         <div class="color-row">
@@ -1956,7 +2039,7 @@ function renderInspector() {
         </div>
       </section>` : ""}
 
-    ${node.type !== NODE_TYPES.GROUP ? shadowInspector(node) : ""}
+    ${![NODE_TYPES.GROUP, NODE_TYPES.MASK].includes(node.type) ? shadowInspector(node) : ""}
 
     <section class="inspector-section">
       <p class="inspector-section-title">Layer</p>
@@ -1969,6 +2052,38 @@ function renderInspector() {
         <button class="icon-toggle" data-inspector-action="bring-forward">Bring forward</button>
       </div>
       <button class="button button-quiet" data-inspector-action="delete" style="width: 100%; margin-top: 8px; color: #fca5a5">Delete layer</button>
+    </section>`;
+}
+
+function booleanInspector(node) {
+  const sourceCount = getChildNodes(currentPage(), node.id).length;
+  return `
+    <section class="inspector-section">
+      <p class="inspector-section-title">Boolean operation</p>
+      <div class="boolean-operation-grid" data-boolean-controls>
+        ${Object.values(BOOLEAN_OPERATIONS).map((operation) => `
+          <button class="icon-toggle ${node.booleanOperation === operation ? "active" : ""}" data-inspector-action="boolean-operation" data-value="${operation}">${capitalize(operation)}</button>`).join("")}
+      </div>
+      <div class="composite-summary"><span>${sourceCount} editable source${sourceCount === 1 ? "" : "s"}</span><span>Non-destructive</span></div>
+      <button class="button button-quiet" data-inspector-action="ungroup" style="width: 100%; margin-top: 8px">Release Boolean sources</button>
+    </section>`;
+}
+
+function maskInspector(node) {
+  const children = getChildNodes(currentPage(), node.id);
+  const source = children[0];
+  const contentCount = Math.max(0, children.length - 1);
+  return `
+    <section class="inspector-section">
+      <p class="inspector-section-title">Mask group</p>
+      <div class="composite-summary">
+        <span>Mask source</span>
+        <span>${source ? escapeHTML(source.name) : "Missing"}</span>
+      </div>
+      <div class="composite-summary"><span>Clipped content</span><span>${contentCount} layer${contentCount === 1 ? "" : "s"}</span></div>
+      <label class="field" style="margin-top: 8px"><span class="field-label">%</span><input type="number" data-property="opacity" data-value-type="number" data-scale="0.01" min="0" max="100" value="${Math.round(node.opacity * 100)}" aria-label="Mask group opacity" /></label>
+      <button class="button button-quiet" data-inspector-action="ungroup" style="width: 100%; margin-top: 8px">Release mask layers</button>
+      <p class="inspector-hint">The bottom child is always the mask source. Reorder children in Layers to choose a different source.</p>
     </section>`;
 }
 

@@ -3,8 +3,15 @@ import {
   VECTOR_HANDLE_MODES,
 } from "./vector.js";
 
-export const DOCUMENT_VERSION = 6;
+export const DOCUMENT_VERSION = 7;
 const MAX_HIERARCHY_DEPTH = 256;
+
+export const BOOLEAN_OPERATIONS = Object.freeze({
+  UNION: "union",
+  SUBTRACT: "subtract",
+  INTERSECT: "intersect",
+  EXCLUDE: "exclude",
+});
 
 const DEFAULT_SHADOW = Object.freeze({
   enabled: false,
@@ -26,6 +33,8 @@ const DEFAULT_FRAME_SHADOW = Object.freeze({
 export const NODE_TYPES = Object.freeze({
   FRAME: "frame",
   GROUP: "group",
+  BOOLEAN: "boolean",
+  MASK: "mask",
   RECTANGLE: "rectangle",
   ELLIPSE: "ellipse",
   VECTOR: "vector",
@@ -36,6 +45,27 @@ export const NODE_TYPES = Object.freeze({
 const DEFAULTS = Object.freeze({
   group: {
     name: "Group",
+    width: 160,
+    height: 100,
+    fill: "transparent",
+    stroke: "transparent",
+    strokeWidth: 0,
+    cornerRadius: 0,
+    shadow: DEFAULT_SHADOW,
+  },
+  boolean: {
+    name: "Union",
+    width: 160,
+    height: 100,
+    fill: "#8b5cf6",
+    stroke: "transparent",
+    strokeWidth: 0,
+    cornerRadius: 0,
+    booleanOperation: BOOLEAN_OPERATIONS.UNION,
+    shadow: DEFAULT_SHADOW,
+  },
+  mask: {
+    name: "Mask group",
     width: 160,
     height: 100,
     fill: "transparent",
@@ -401,6 +431,12 @@ export function normalizeNode(input) {
     normalizeVectorBounds(node);
   }
 
+  if (node.type === NODE_TYPES.BOOLEAN) {
+    node.booleanOperation = Object.values(BOOLEAN_OPERATIONS).includes(input.booleanOperation)
+      ? input.booleanOperation
+      : defaults.booleanOperation;
+  }
+
   return node;
 }
 
@@ -540,7 +576,12 @@ export function getNodes(document, ids) {
 }
 
 export function isContainerNode(node) {
-  return node?.type === NODE_TYPES.FRAME || node?.type === NODE_TYPES.GROUP;
+  return [NODE_TYPES.FRAME, NODE_TYPES.GROUP, NODE_TYPES.BOOLEAN, NODE_TYPES.MASK]
+    .includes(node?.type);
+}
+
+export function isCompositeNode(node) {
+  return node?.type === NODE_TYPES.BOOLEAN || node?.type === NODE_TYPES.MASK;
 }
 
 export function getChildNodes(document, parentId = null) {
@@ -681,7 +722,10 @@ export function getNodeVisualBounds(node) {
 export function getDocumentBounds(document, ids = null) {
   const idSet = ids ? new Set(getNodesWithDescendants(document, ids).map((node) => node.id)) : null;
   const nodes = document.nodes.filter(
-    (node) => node.type !== NODE_TYPES.GROUP && isNodeEffectivelyVisible(document, node) && (!idSet || idSet.has(node.id)),
+    (node) => node.type !== NODE_TYPES.GROUP &&
+      !getAncestors(document, node).some(isCompositeNode) &&
+      isNodeEffectivelyVisible(document, node) &&
+      (!idSet || idSet.has(node.id)),
   );
   if (!nodes.length) return { x: -160, y: -100, width: 320, height: 200 };
 
@@ -747,18 +791,46 @@ export function deleteNodes(document, ids) {
 }
 
 export function groupNodes(document, ids) {
+  return wrapNodes(document, ids, NODE_TYPES.GROUP);
+}
+
+export function booleanGroupNodes(document, ids, operation = BOOLEAN_OPERATIONS.UNION) {
+  if (!Object.values(BOOLEAN_OPERATIONS).includes(operation)) return null;
+  const boolean = wrapNodes(document, ids, NODE_TYPES.BOOLEAN, {
+    booleanOperation: operation,
+    name: booleanOperationName(operation),
+  }, 2);
+  if (!boolean) return null;
+  const source = getChildNodes(document, boolean.id)[0];
+  if (source) {
+    boolean.fill = source.fill;
+    boolean.fillType = source.fillType;
+    boolean.gradient = cloneValue(source.gradient);
+    boolean.stroke = source.stroke;
+    boolean.strokeWidth = source.strokeWidth;
+    boolean.shadow = cloneValue(source.shadow);
+  }
+  return boolean;
+}
+
+export function maskNodes(document, ids) {
+  return wrapNodes(document, ids, NODE_TYPES.MASK, {}, 2);
+}
+
+function wrapNodes(document, ids, type, overrides = {}, minimumCount = 1) {
   const roots = getTopLevelNodeIds(document, ids)
     .map((id) => getNode(document, id))
     .filter(Boolean);
-  if (!roots.length) return null;
+  if (roots.length < minimumCount) return null;
   const parentId = roots[0].parentId ?? null;
   if (roots.some((node) => (node.parentId ?? null) !== parentId)) return null;
 
   const bounds = combinedBounds(roots.map(getNodeAABB));
-  const group = createNode(NODE_TYPES.GROUP, bounds.x, bounds.y, {
+  const group = createNode(type, bounds.x, bounds.y, {
     width: bounds.width,
     height: bounds.height,
     parentId,
+    ...overrides,
   });
   const firstIndex = Math.min(...roots.map((node) => document.nodes.indexOf(node)));
   document.nodes.splice(firstIndex, 0, group);
@@ -770,7 +842,7 @@ export function groupNodes(document, ids) {
 export function ungroupNodes(document, ids) {
   const groups = getTopLevelNodeIds(document, ids)
     .map((id) => getNode(document, id))
-    .filter((node) => node?.type === NODE_TYPES.GROUP);
+    .filter((node) => [NODE_TYPES.GROUP, NODE_TYPES.BOOLEAN, NODE_TYPES.MASK].includes(node?.type));
   const released = [];
   for (const group of groups) {
     for (const child of getChildNodes(document, group.id)) {
@@ -787,7 +859,7 @@ export function ungroupNodes(document, ids) {
 
 export function syncGroupBounds(document) {
   const groups = document.nodes
-    .filter((node) => node.type === NODE_TYPES.GROUP)
+    .filter((node) => [NODE_TYPES.GROUP, NODE_TYPES.BOOLEAN, NODE_TYPES.MASK].includes(node.type))
     .sort((a, b) => getAncestors(document, b).length - getAncestors(document, a).length);
   for (const group of groups) {
     const children = getChildNodes(document, group.id);
@@ -799,6 +871,10 @@ export function syncGroupBounds(document) {
     group.height = Math.max(1, bounds.height);
     group.rotation = 0;
   }
+}
+
+function booleanOperationName(operation) {
+  return `${operation.slice(0, 1).toUpperCase()}${operation.slice(1)}`;
 }
 
 export function findContainingFrame(document, node, excludedIds = []) {
