@@ -4,6 +4,7 @@ import {
   createNode,
   createPage,
   createStarterDocument,
+  createVectorNodeFromWorldPoints,
   deleteNodes,
   duplicatePage,
   duplicateNodes,
@@ -24,6 +25,7 @@ import {
   localToWorld,
   NODE_TYPES,
   normalizeDocument,
+  normalizeVectorBounds,
   reorderNode,
   sortNodesByHierarchy,
   syncGroupBounds,
@@ -82,6 +84,9 @@ let selectedIds = [];
 let activeTool = "select";
 let interaction = null;
 let editingTextId = null;
+let penDraft = null;
+let vectorEdit = null;
+let suppressDoubleClickUntil = 0;
 let clipboardNodes = [];
 let guides = [];
 let spacePressed = false;
@@ -211,10 +216,12 @@ function bindPanels() {
     }
 
     if (event.shiftKey) {
+      vectorEdit = null;
       selectedIds = selectedIds.includes(id)
         ? selectedIds.filter((selectedId) => selectedId !== id)
         : [...selectedIds, id];
     } else {
+      if (vectorEdit?.nodeId !== id) vectorEdit = null;
       selectedIds = [id];
     }
     refreshUI();
@@ -334,6 +341,13 @@ function bindInspector() {
     if (property === "strokeWidth" || property === "cornerRadius") value = Math.max(0, value);
     if (property === "fontSize") value = Math.max(1, value);
     const previousValue = node[property];
+    if (node.type === NODE_TYPES.VECTOR && ["width", "height"].includes(property)) {
+      const scale = value / previousValue;
+      node.vectorPoints = node.vectorPoints.map((point) => ({
+        x: property === "width" ? point.x * scale : point.x,
+        y: property === "height" ? point.y * scale : point.y,
+      }));
+    }
     node[property] = value;
     if (isContainerNode(node) && ["x", "y"].includes(property)) {
       const delta = value - previousValue;
@@ -389,6 +403,21 @@ function bindInspector() {
     if (action === "fill-mode") node.fillType = button.dataset.value;
     if (action === "toggle-shadow") node.shadow.enabled = !node.shadow.enabled;
     if (action === "image-fit") node.imageFit = button.dataset.value;
+    if (action === "vector-closed") {
+      node.vectorClosed = button.dataset.value === "true" && node.vectorPoints.length >= 3;
+    }
+    if (action === "vector-fill-rule") node.vectorFillRule = button.dataset.value;
+    if (action === "reverse-vector") {
+      node.vectorPoints.reverse();
+      if (vectorEdit?.nodeId === node.id && Number.isInteger(vectorEdit.pointIndex)) {
+        vectorEdit.pointIndex = node.vectorPoints.length - 1 - vectorEdit.pointIndex;
+      }
+    }
+    if (action === "edit-vector") {
+      if (vectorEdit?.nodeId === node.id) exitVectorEdit();
+      else enterVectorEdit(node);
+      return;
+    }
     if (action === "replace-image") {
       openImagePicker(node.id);
       return;
@@ -445,7 +474,7 @@ function bindMenus() {
     if (action === "redo") redo();
     if (action === "fit") fitToContent();
     if (action === "shortcuts") {
-      showToast("V move · F frame · R rectangle · T text · ⌘G group · ⇧⌘G ungroup · ⌘D duplicate · ⌫ delete");
+      showToast("V select · P pen · Enter edit path · F frame · R rectangle · T text · ⌘G group · ⌘D duplicate");
     }
   });
 
@@ -518,6 +547,7 @@ function bindKeyboard() {
     }
     if (command && key === "a") {
       event.preventDefault();
+      exitVectorEdit(false);
       selectedIds = getChildNodes(currentPage(), null)
         .filter((node) => isNodeEffectivelyVisible(currentPage(), node))
         .map((node) => node.id);
@@ -527,12 +557,27 @@ function bindKeyboard() {
 
     if (event.key === "Delete" || event.key === "Backspace") {
       event.preventDefault();
+      if (penDraft) {
+        penDraft.points.pop();
+        if (!penDraft.points.length) penDraft = null;
+        else penDraft.hoverWorld = penDraft.points.at(-1);
+        requestRender();
+        return;
+      }
+      if (vectorEdit?.pointIndex !== null && vectorEdit?.pointIndex !== undefined) {
+        deleteSelectedVectorPoint();
+        return;
+      }
       deleteSelection();
       return;
     }
 
     if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
       event.preventDefault();
+      if (vectorEdit?.pointIndex !== null && vectorEdit?.pointIndex !== undefined) {
+        nudgeVectorPoint(event.key, event.shiftKey ? 10 : 1);
+        return;
+      }
       nudgeSelection(event.key, event.shiftKey ? 10 : 1);
       return;
     }
@@ -540,6 +585,8 @@ function bindKeyboard() {
     if (event.key === "Escape") {
       closePopovers();
       if (!elements.previewModal.hidden) closePreview();
+      else if (penDraft) cancelPenPath();
+      else if (vectorEdit) exitVectorEdit();
       else if (activeTool !== "select") setTool("select");
       else {
         selectedIds = [];
@@ -548,14 +595,24 @@ function bindKeyboard() {
       return;
     }
 
-    if (event.key === "Enter" && selectedIds.length === 1) {
+    if (event.key === "Enter") {
+      if (penDraft) {
+        finishPenPath(false);
+        return;
+      }
+      if (vectorEdit) {
+        exitVectorEdit();
+        return;
+      }
+      if (selectedIds.length !== 1) return;
       const node = getNode(currentPage(), selectedIds[0]);
       if (node?.type === NODE_TYPES.TEXT) startTextEditing(node);
+      if (node?.type === NODE_TYPES.VECTOR) enterVectorEdit(node);
       return;
     }
 
     if (!command && !event.altKey) {
-      const tools = { v: "select", h: "hand", f: "frame", r: "rectangle", o: "ellipse", t: "text" };
+      const tools = { v: "select", h: "hand", f: "frame", r: "rectangle", o: "ellipse", p: "pen", t: "text" };
       if (tools[key]) {
         event.preventDefault();
         setTool(tools[key]);
@@ -608,6 +665,11 @@ function onPointerDown(event) {
     return;
   }
 
+  if (activeTool === "pen") {
+    handlePenPointerDown(event, screen, world);
+    return;
+  }
+
   if (activeTool === "text") {
     const node = createNode(NODE_TYPES.TEXT, world.x, world.y, {
       width: 260,
@@ -640,6 +702,47 @@ function onPointerDown(event) {
   }
 
   if (activeTool !== "select") return;
+
+  if (vectorEdit) {
+    const vector = getNode(currentPage(), vectorEdit.nodeId);
+    if (!vector || vector.type !== NODE_TYPES.VECTOR || isNodeEffectivelyLocked(currentPage(), vector)) {
+      exitVectorEdit(false);
+    } else {
+      const pointIndex = renderer.getVectorPointAt(screen, vector, camera);
+      if (pointIndex !== null) {
+        vectorEdit.pointIndex = pointIndex;
+        interaction = {
+          type: "vector-point",
+          pointerId: event.pointerId,
+          nodeId: vector.id,
+          pointIndex,
+          original: cloneNode(vector),
+          startWorld: world,
+          originalWorld: localToWorld(vector, vector.vectorPoints[pointIndex]),
+        };
+        capturePointer(event);
+        refreshUI();
+        return;
+      }
+
+      const segment = renderer.getVectorSegmentAt(screen, vector, camera);
+      if (event.altKey && segment) {
+        vector.vectorPoints.splice(segment.index + 1, 0, segment.local);
+        vectorEdit.pointIndex = segment.index + 1;
+        commitDocument();
+        return;
+      }
+
+      const editHit = renderer.hitTest(currentPage(), screen, camera);
+      if (editHit?.id === vector.id) {
+        vectorEdit.pointIndex = null;
+        refreshUI();
+        return;
+      }
+      exitVectorEdit(false);
+    }
+  }
+
   const selectedNode = selectedIds.length === 1 ? getNode(currentPage(), selectedIds[0]) : null;
   const handle = selectedNode ? renderer.getHandleAt(screen, selectedNode, camera) : null;
 
@@ -696,6 +799,15 @@ function onPointerDown(event) {
 function onPointerMove(event) {
   const screen = eventPoint(event);
   if (!interaction) {
+    if (activeTool === "pen" && penDraft) {
+      penDraft.hoverWorld = constrainPenPoint(
+        penDraft.points.at(-1),
+        renderer.screenToWorld(screen, camera),
+        event.shiftKey,
+      );
+      requestRender();
+      return;
+    }
     updateHoverCursor(screen);
     return;
   }
@@ -713,6 +825,7 @@ function onPointerMove(event) {
   if (interaction.type === "move") updateMove(world, event);
   if (interaction.type === "resize") updateResize(world, event);
   if (interaction.type === "rotate") updateRotation(world, event);
+  if (interaction.type === "vector-point") updateVectorPoint(world, event);
   if (interaction.type === "marquee") updateMarquee(screen);
   requestRender();
 }
@@ -734,6 +847,11 @@ function onPointerUp(event) {
     setTool("select");
   } else if (["move", "resize", "rotate"].includes(completedType)) {
     if (completedType === "move") reparentMovedRoots(interaction.rootIds);
+    syncGroupBounds(currentPage());
+    commitDocument();
+  } else if (completedType === "vector-point") {
+    const node = getNode(currentPage(), interaction.nodeId);
+    if (node?.type === NODE_TYPES.VECTOR) normalizeVectorBounds(node);
     syncGroupBounds(currentPage());
     commitDocument();
   } else if (completedType === "marquee") {
@@ -771,6 +889,10 @@ function onPointerCancel(event) {
       if (node) Object.assign(node, original);
     }
   }
+  if (interaction.type === "vector-point") {
+    const node = getNode(currentPage(), interaction.nodeId);
+    if (node) Object.assign(node, interaction.original);
+  }
   syncGroupBounds(currentPage());
   releasePointer(event);
   interaction = null;
@@ -780,8 +902,27 @@ function onPointerCancel(event) {
 }
 
 function onDoubleClick(event) {
+  if (performance.now() < suppressDoubleClickUntil) return;
+  if (activeTool === "pen") {
+    if (penDraft) finishPenPath(false);
+    return;
+  }
   const screen = eventPoint(event);
   const node = renderer.hitTest(currentPage(), screen, camera);
+  if (vectorEdit && node?.id === vectorEdit.nodeId && node.type === NODE_TYPES.VECTOR) {
+    if (renderer.getVectorPointAt(screen, node, camera) !== null) return;
+    const segment = renderer.getVectorSegmentAt(screen, node, camera);
+    if (segment) {
+      node.vectorPoints.splice(segment.index + 1, 0, segment.local);
+      vectorEdit.pointIndex = segment.index + 1;
+      commitDocument();
+    }
+    return;
+  }
+  if (node?.type === NODE_TYPES.VECTOR && !isNodeEffectivelyLocked(currentPage(), node)) {
+    enterVectorEdit(node);
+    return;
+  }
   if (node?.type === NODE_TYPES.TEXT && !isNodeEffectivelyLocked(currentPage(), node)) {
     selectedIds = [node.id];
     refreshUI();
@@ -801,6 +942,131 @@ function onWheel(event) {
     requestRender();
     scheduleSave();
   }
+}
+
+function handlePenPointerDown(event, screen, world) {
+  event.preventDefault();
+  if (!penDraft) {
+    penDraft = { points: [world], hoverWorld: world };
+    requestRender();
+    return;
+  }
+
+  const point = constrainPenPoint(penDraft.points.at(-1), world, event.shiftKey);
+  const firstScreen = renderer.worldToScreen(penDraft.points[0], camera);
+  if (penDraft.points.length >= 3 && pointDistance(screen, firstScreen) <= 11) {
+    suppressDoubleClickUntil = performance.now() + 450;
+    finishPenPath(true);
+    return;
+  }
+
+  if (event.detail >= 2 && penDraft.points.length >= 2) {
+    suppressDoubleClickUntil = performance.now() + 450;
+    finishPenPath(false);
+    return;
+  }
+
+  if (pointDistance(point, penDraft.points.at(-1)) > 0.5 / camera.zoom) {
+    penDraft.points.push(point);
+  }
+  penDraft.hoverWorld = point;
+  requestRender();
+}
+
+function finishPenPath(closed, switchToSelect = true) {
+  const draft = penDraft;
+  penDraft = null;
+  if (!draft || draft.points.length < 2) {
+    if (switchToSelect) setTool("select");
+    else requestRender();
+    return;
+  }
+
+  const points = draft.points.filter((point, index, list) =>
+    index === 0 || pointDistance(point, list[index - 1]) > 0.001);
+  if (points.length < 2) {
+    if (switchToSelect) setTool("select");
+    return;
+  }
+  const node = createVectorNodeFromWorldPoints(points, closed, {
+    name: "Vector path",
+    fill: "#8b5cf6",
+    stroke: closed ? "#5b21b6" : "#a78bfa",
+    strokeWidth: 2,
+  });
+  currentPage().nodes.push(node);
+  assignNodeToFrame(currentPage(), node);
+  selectedIds = [node.id];
+  vectorEdit = null;
+  commitDocument();
+  if (switchToSelect) setTool("select");
+}
+
+function cancelPenPath() {
+  penDraft = null;
+  setTool("select");
+  requestRender();
+}
+
+function constrainPenPoint(origin, point, enabled) {
+  if (!enabled || !origin) return point;
+  const distanceFromOrigin = pointDistance(origin, point);
+  const angle = Math.atan2(point.y - origin.y, point.x - origin.x);
+  const constrainedAngle = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+  return {
+    x: origin.x + Math.cos(constrainedAngle) * distanceFromOrigin,
+    y: origin.y + Math.sin(constrainedAngle) * distanceFromOrigin,
+  };
+}
+
+function enterVectorEdit(node, pointIndex = null) {
+  if (node?.type !== NODE_TYPES.VECTOR || isNodeEffectivelyLocked(currentPage(), node)) return;
+  if (activeTool !== "select") setTool("select");
+  selectedIds = [node.id];
+  vectorEdit = { nodeId: node.id, pointIndex };
+  refreshUI();
+}
+
+function exitVectorEdit(refresh = true) {
+  vectorEdit = null;
+  if (refresh) refreshUI();
+  else requestRender();
+}
+
+function updateVectorPoint(world, event) {
+  const node = getNode(currentPage(), interaction.nodeId);
+  if (node?.type !== NODE_TYPES.VECTOR) return;
+  const target = constrainPenPoint(interaction.originalWorld, world, event.shiftKey);
+  node.vectorPoints[interaction.pointIndex] = worldToLocal(node, target);
+}
+
+function deleteSelectedVectorPoint() {
+  const node = getNode(currentPage(), vectorEdit?.nodeId);
+  const index = vectorEdit?.pointIndex;
+  if (node?.type !== NODE_TYPES.VECTOR || !Number.isInteger(index)) return;
+  if (node.vectorPoints.length <= 2) {
+    showToast("A path needs at least two points.");
+    return;
+  }
+  node.vectorPoints.splice(index, 1);
+  if (node.vectorPoints.length < 3) node.vectorClosed = false;
+  vectorEdit.pointIndex = Math.min(index, node.vectorPoints.length - 1);
+  normalizeVectorBounds(node);
+  commitDocument();
+}
+
+function nudgeVectorPoint(key, amount) {
+  const node = getNode(currentPage(), vectorEdit?.nodeId);
+  const index = vectorEdit?.pointIndex;
+  if (node?.type !== NODE_TYPES.VECTOR || !Number.isInteger(index)) return;
+  const world = localToWorld(node, node.vectorPoints[index]);
+  if (key === "ArrowLeft") world.x -= amount;
+  if (key === "ArrowRight") world.x += amount;
+  if (key === "ArrowUp") world.y -= amount;
+  if (key === "ArrowDown") world.y += amount;
+  node.vectorPoints[index] = worldToLocal(node, world);
+  normalizeVectorBounds(node);
+  commitDocument();
 }
 
 function updateDrawing(world, event) {
@@ -913,6 +1179,15 @@ function updateResize(world, event) {
   node.x = newCenter.x - width / 2;
   node.y = newCenter.y - height / 2;
 
+  if (node.type === NODE_TYPES.VECTOR) {
+    const scaleX = width / original.width;
+    const scaleY = height / original.height;
+    node.vectorPoints = original.vectorPoints.map((point) => ({
+      x: point.x * scaleX,
+      y: point.y * scaleY,
+    }));
+  }
+
   if (node.type === NODE_TYPES.GROUP) {
     const scaleX = width / original.width;
     const scaleY = height / original.height;
@@ -924,6 +1199,12 @@ function updateResize(world, event) {
       child.y = node.y + (snapshot.y - original.y) * scaleY;
       child.width = Math.max(1, snapshot.width * scaleX);
       child.height = Math.max(1, snapshot.height * scaleY);
+      if (child.type === NODE_TYPES.VECTOR) {
+        child.vectorPoints = snapshot.vectorPoints.map((point) => ({
+          x: point.x * scaleX,
+          y: point.y * scaleY,
+        }));
+      }
       if (child.type === NODE_TYPES.TEXT) {
         child.fontSize = Math.max(1, snapshot.fontSize * Math.min(scaleX, scaleY));
       }
@@ -1025,6 +1306,8 @@ function snapSelection(ids) {
 
 function setTool(tool) {
   if (editingTextId) finishTextEditing(true);
+  if (activeTool === "pen" && tool !== "pen" && penDraft) finishPenPath(false, false);
+  if (tool !== "select" && vectorEdit) vectorEdit = null;
   activeTool = tool;
   document.querySelectorAll("[data-tool]").forEach((button) => {
     button.classList.toggle("active", button.dataset.tool === activeTool);
@@ -1039,7 +1322,7 @@ function updateCanvasCursor(forced = null) {
   }
   if (interaction?.type === "pan") elements.canvas.dataset.cursor = "grabbing";
   else if (spacePressed || activeTool === "hand") elements.canvas.dataset.cursor = "grab";
-  else if (["frame", "rectangle", "ellipse"].includes(activeTool)) elements.canvas.dataset.cursor = "crosshair";
+  else if (["frame", "rectangle", "ellipse", "pen"].includes(activeTool)) elements.canvas.dataset.cursor = "crosshair";
   else if (activeTool === "text") elements.canvas.dataset.cursor = "text";
   else elements.canvas.dataset.cursor = "default";
   elements.canvas.style.cursor = "";
@@ -1051,6 +1334,12 @@ function updateHoverCursor(screen) {
     return;
   }
   const selected = selectedIds.length === 1 ? getNode(currentPage(), selectedIds[0]) : null;
+  if (vectorEdit && selected?.id === vectorEdit.nodeId) {
+    const pointIndex = renderer.getVectorPointAt(screen, selected, camera);
+    elements.canvas.style.cursor = "";
+    elements.canvas.dataset.cursor = pointIndex !== null ? "move" : "default";
+    return;
+  }
   const handle = selected ? renderer.getHandleAt(screen, selected, camera) : null;
   if (handle) {
     elements.canvas.dataset.cursor = "";
@@ -1108,6 +1397,7 @@ function deleteSelection() {
   const ids = getTopLevelNodeIds(currentPage(), selectedIds)
     .filter((id) => !isNodeEffectivelyLocked(currentPage(), id));
   deleteNodes(currentPage(), ids);
+  if (vectorEdit && !getNode(currentPage(), vectorEdit.nodeId)) vectorEdit = null;
   selectedIds = selectedIds.filter((id) => getNode(currentPage(), id));
   commitDocument();
 }
@@ -1171,6 +1461,7 @@ function nudgeSelection(key, amount) {
 
 function groupSelection() {
   if (!selectedIds.length) return;
+  vectorEdit = null;
   const group = groupNodes(currentPage(), selectedIds);
   if (!group) {
     showToast("Layers must share the same parent before they can be grouped.");
@@ -1182,6 +1473,7 @@ function groupSelection() {
 
 function ungroupSelection() {
   if (!selectedIds.length) return;
+  vectorEdit = null;
   const released = ungroupNodes(currentPage(), selectedIds);
   if (!released.length) {
     showToast("Select a group to ungroup it.");
@@ -1230,6 +1522,8 @@ function ensureActivePage() {
 
 function addPage() {
   finishTextEditing(true);
+  penDraft = null;
+  vectorEdit = null;
   rememberCurrentView();
   const page = createPage(nextPageName(), { background: currentPage().background });
   designDocument.pages.push(page);
@@ -1249,6 +1543,8 @@ function switchPage(pageId) {
     return;
   }
   finishTextEditing(true);
+  penDraft = null;
+  vectorEdit = null;
   rememberCurrentView();
   activePageId = pageId;
   selectedIds = [];
@@ -1277,6 +1573,8 @@ function renamePage(pageId) {
 
 function duplicateCurrentPage(pageId) {
   finishTextEditing(true);
+  penDraft = null;
+  vectorEdit = null;
   rememberCurrentView();
   const page = duplicatePage(designDocument, pageId);
   if (!page) return;
@@ -1352,6 +1650,8 @@ function liveDocumentChange() {
 
 function undo() {
   finishTextEditing(false);
+  penDraft = null;
+  vectorEdit = null;
   const previous = history.undo();
   if (!previous) {
     showToast("Nothing to undo");
@@ -1366,6 +1666,8 @@ function undo() {
 
 function redo() {
   finishTextEditing(false);
+  penDraft = null;
+  vectorEdit = null;
   const next = history.redo();
   if (!next) {
     showToast("Nothing to redo");
@@ -1497,22 +1799,23 @@ function renderInspector() {
         ${numberField("W", "width", node.width)}
         ${numberField("H", "height", node.height)}
         ${numberField("↻", "rotation", node.rotation)}
-        ${numberField("R", "cornerRadius", node.cornerRadius, node.type === NODE_TYPES.ELLIPSE || node.type === NODE_TYPES.TEXT)}
+        ${numberField("R", "cornerRadius", node.cornerRadius, [NODE_TYPES.ELLIPSE, NODE_TYPES.TEXT, NODE_TYPES.VECTOR].includes(node.type))}
       </div>
     </section>` : ""}
 
     ${node.type === NODE_TYPES.TEXT ? textInspector(node) : ""}
     ${node.type === NODE_TYPES.IMAGE ? imageInspector(node) : ""}
+    ${node.type === NODE_TYPES.VECTOR ? vectorInspector(node) : ""}
 
-    ${node.type !== NODE_TYPES.GROUP ? `<section class="inspector-section">
-      <p class="inspector-section-title">Fill</p>
-      ${fillInspector(node)}
-    </section>` : `
+    ${node.type === NODE_TYPES.GROUP ? `
       <section class="inspector-section">
         <p class="inspector-section-title">Group</p>
         <label class="field"><span class="field-label">%</span><input type="number" data-property="opacity" data-value-type="number" data-scale="0.01" min="0" max="100" value="${Math.round(node.opacity * 100)}" aria-label="Group opacity" /></label>
         <button class="button button-quiet" data-inspector-action="ungroup" style="width: 100%; margin-top: 8px">Ungroup layers</button>
-      </section>`}
+      </section>` : node.type === NODE_TYPES.VECTOR && !node.vectorClosed ? "" : `<section class="inspector-section">
+      <p class="inspector-section-title">Fill</p>
+      ${fillInspector(node)}
+    </section>`}
 
     ${node.type !== NODE_TYPES.TEXT && node.type !== NODE_TYPES.GROUP ? `
       <section class="inspector-section">
@@ -1571,6 +1874,31 @@ function imageInspector(node) {
       </div>
       <label class="field" style="margin-top: 6px"><span class="field-label">A</span><input data-property="altText" value="${escapeAttribute(node.altText)}" placeholder="Alt text" aria-label="Image alt text" /></label>
       <button class="button button-quiet" data-inspector-action="replace-image" style="width: 100%; margin-top: 8px">Replace image…</button>
+    </section>`;
+}
+
+function vectorInspector(node) {
+  const editing = vectorEdit?.nodeId === node.id;
+  return `
+    <section class="inspector-section">
+      <p class="inspector-section-title">Vector path</p>
+      <div class="vector-summary">
+        <span data-vector-point-count>${node.vectorPoints.length}</span>
+        <span>anchor${node.vectorPoints.length === 1 ? "" : "s"}</span>
+      </div>
+      <div class="icon-toggle-row" style="margin-top: 6px">
+        <button class="icon-toggle ${node.vectorClosed ? "" : "active"}" data-inspector-action="vector-closed" data-value="false">Open</button>
+        <button class="icon-toggle ${node.vectorClosed ? "active" : ""}" data-inspector-action="vector-closed" data-value="true" ${node.vectorPoints.length < 3 ? "disabled" : ""}>Closed</button>
+      </div>
+      ${node.vectorClosed ? `<div class="icon-toggle-row" style="margin-top: 6px">
+        <button class="icon-toggle ${node.vectorFillRule === "nonzero" ? "active" : ""}" data-inspector-action="vector-fill-rule" data-value="nonzero">Non-zero</button>
+        <button class="icon-toggle ${node.vectorFillRule === "evenodd" ? "active" : ""}" data-inspector-action="vector-fill-rule" data-value="evenodd">Even-odd</button>
+      </div>` : `<label class="field" style="margin-top: 6px"><span class="field-label">%</span><input type="number" data-property="opacity" data-value-type="number" data-scale="0.01" min="0" max="100" value="${Math.round(node.opacity * 100)}" aria-label="Path opacity" /></label>`}
+      <div class="field-grid one-column" style="margin-top: 8px">
+        <button class="button ${editing ? "button-primary" : "button-quiet"}" data-inspector-action="edit-vector">${editing ? "Done editing points" : "Edit points"}</button>
+        <button class="button button-quiet" data-inspector-action="reverse-vector">Reverse path direction</button>
+      </div>
+      <p class="inspector-hint">Double-click a segment to add an anchor. Alt-click also inserts one; Delete removes the selected anchor.</p>
     </section>`;
 }
 
@@ -1647,6 +1975,8 @@ function requestRender() {
       guides,
       marquee,
       editingId: editingTextId,
+      penDraft,
+      vectorEdit,
     });
     elements.zoomValue.textContent = `${Math.round(camera.zoom * 100)}%`;
   });
@@ -1799,6 +2129,8 @@ async function importDocument() {
     const content = await file.text();
     const imported = normalizeDocument(JSON.parse(content));
     designDocument = imported;
+    penDraft = null;
+    vectorEdit = null;
     history = new DocumentHistory(designDocument);
     activePageId = designDocument.pages[0].id;
     pageViews = {};
@@ -1817,6 +2149,8 @@ function newDocument() {
     return;
   }
   designDocument = createEmptyDocument();
+  penDraft = null;
+  vectorEdit = null;
   history = new DocumentHistory(designDocument);
   activePageId = designDocument.pages[0].id;
   pageViews = {};
@@ -1980,6 +2314,10 @@ function rectanglesIntersect(a, b) {
     a.y + a.height >= b.y;
 }
 
+function pointDistance(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
 function combinedBounds(bounds) {
   const minX = Math.min(...bounds.map((box) => box.x));
   const minY = Math.min(...bounds.map((box) => box.y));
@@ -2082,6 +2420,7 @@ function nodeIcon(type) {
     group: '<svg viewBox="0 0 20 20"><rect x="3" y="3" width="5" height="5" /><rect x="12" y="3" width="5" height="5" /><rect x="3" y="12" width="5" height="5" /><rect x="12" y="12" width="5" height="5" /></svg>',
     rectangle: '<svg viewBox="0 0 20 20"><rect x="3.5" y="4" width="13" height="12" rx="1" /></svg>',
     ellipse: '<svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5" /></svg>',
+    vector: '<svg viewBox="0 0 20 20"><path d="m3.5 15.5 4-11 9 5-5 7-8-1Z" /><circle cx="7.5" cy="4.5" r="1" /><circle cx="16.5" cy="9.5" r="1" /><circle cx="11.5" cy="16.5" r="1" /></svg>',
     text: '<svg viewBox="0 0 20 20"><path d="M4 4h12M10 4v12M7 16h6" /></svg>',
     image: '<svg viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="12" rx="1.5" /><circle cx="13.5" cy="7.5" r="1" /><path d="m5 14 3.5-3.5 2 2 1.5-1.5 3 3" /></svg>',
     multiple: '<svg viewBox="0 0 20 20"><rect x="3" y="3" width="9" height="9" /><rect x="8" y="8" width="9" height="9" /></svg>',

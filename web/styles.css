@@ -831,6 +831,32 @@ svg {
   color: var(--accent-bright);
 }
 
+.icon-toggle:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.vector-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.vector-summary span:first-child {
+  color: var(--accent-bright);
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.inspector-hint {
+  margin: 9px 1px 0;
+  color: var(--text-faint);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
 .paint-mode-row {
   margin-bottom: 8px;
 }

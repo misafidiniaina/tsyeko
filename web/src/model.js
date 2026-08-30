@@ -1,4 +1,4 @@
-export const DOCUMENT_VERSION = 4;
+export const DOCUMENT_VERSION = 5;
 const MAX_HIERARCHY_DEPTH = 256;
 
 const DEFAULT_SHADOW = Object.freeze({
@@ -23,6 +23,7 @@ export const NODE_TYPES = Object.freeze({
   GROUP: "group",
   RECTANGLE: "rectangle",
   ELLIPSE: "ellipse",
+  VECTOR: "vector",
   TEXT: "text",
   IMAGE: "image",
 });
@@ -66,6 +67,23 @@ const DEFAULTS = Object.freeze({
     stroke: "#000000",
     strokeWidth: 0,
     cornerRadius: 0,
+    shadow: DEFAULT_SHADOW,
+  },
+  vector: {
+    name: "Vector",
+    width: 120,
+    height: 120,
+    fill: "#8b5cf6",
+    stroke: "#5b21b6",
+    strokeWidth: 2,
+    cornerRadius: 0,
+    vectorPoints: [
+      { x: 60, y: 0 },
+      { x: 120, y: 120 },
+      { x: 0, y: 120 },
+    ],
+    vectorClosed: true,
+    vectorFillRule: "nonzero",
     shadow: DEFAULT_SHADOW,
   },
   text: {
@@ -211,6 +229,24 @@ export function createStarterDocument() {
         ],
       },
     }),
+    createNode(NODE_TYPES.VECTOR, 218, -86, {
+      name: "Spark",
+      width: 54,
+      height: 78,
+      fill: "#ffffff",
+      stroke: "#ffffff",
+      strokeWidth: 0,
+      vectorPoints: [
+        { x: 32, y: 0 },
+        { x: 4, y: 43 },
+        { x: 25, y: 43 },
+        { x: 16, y: 78 },
+        { x: 50, y: 31 },
+        { x: 29, y: 31 },
+      ],
+      vectorClosed: true,
+      rotation: -5,
+    }),
     createNode(NODE_TYPES.TEXT, -342, -190, {
       name: "Eyebrow",
       width: 260,
@@ -353,6 +389,69 @@ export function normalizeNode(input) {
     node.altText = cleanString(input.altText, "", 500);
   }
 
+  if (node.type === NODE_TYPES.VECTOR) {
+    node.vectorPoints = normalizeVectorPoints(input.vectorPoints, defaults.vectorPoints);
+    node.vectorClosed = input.vectorClosed !== false && node.vectorPoints.length >= 3;
+    node.vectorFillRule = input.vectorFillRule === "evenodd" ? "evenodd" : "nonzero";
+    normalizeVectorBounds(node);
+  }
+
+  return node;
+}
+
+export function createVectorNodeFromWorldPoints(points, closed = false, overrides = {}) {
+  const cleanPoints = Array.isArray(points)
+    ? points
+        .filter((point) => point && Number.isFinite(point.x) && Number.isFinite(point.y))
+        .slice(0, 5_000)
+    : [];
+  if (cleanPoints.length < 2) throw new Error("A vector path needs at least two points.");
+  const minX = Math.min(...cleanPoints.map((point) => point.x));
+  const minY = Math.min(...cleanPoints.map((point) => point.y));
+  const maxX = Math.max(...cleanPoints.map((point) => point.x));
+  const maxY = Math.max(...cleanPoints.map((point) => point.y));
+  const rawWidth = maxX - minX;
+  const rawHeight = maxY - minY;
+  const width = Math.max(1, rawWidth);
+  const height = Math.max(1, rawHeight);
+  const x = minX - (width - rawWidth) / 2;
+  const y = minY - (height - rawHeight) / 2;
+  return createNode(NODE_TYPES.VECTOR, x, y, {
+    ...overrides,
+    width,
+    height,
+    vectorPoints: cleanPoints.map((point) => ({ x: point.x - x, y: point.y - y })),
+    vectorClosed: closed && cleanPoints.length >= 3,
+  });
+}
+
+export function getVectorWorldPoints(node) {
+  if (node?.type !== NODE_TYPES.VECTOR) return [];
+  return node.vectorPoints.map((point) => localToWorld(node, point));
+}
+
+export function normalizeVectorBounds(node) {
+  if (node?.type !== NODE_TYPES.VECTOR || node.vectorPoints.length < 2) return node;
+  const minX = Math.min(...node.vectorPoints.map((point) => point.x));
+  const minY = Math.min(...node.vectorPoints.map((point) => point.y));
+  const maxX = Math.max(...node.vectorPoints.map((point) => point.x));
+  const maxY = Math.max(...node.vectorPoints.map((point) => point.y));
+  const rawWidth = maxX - minX;
+  const rawHeight = maxY - minY;
+  const width = Math.max(1, rawWidth);
+  const height = Math.max(1, rawHeight);
+  const localCenter = { x: minX + rawWidth / 2, y: minY + rawHeight / 2 };
+  const worldCenter = localToWorld(node, localCenter);
+  const paddingX = (width - rawWidth) / 2;
+  const paddingY = (height - rawHeight) / 2;
+  node.vectorPoints = node.vectorPoints.map((point) => ({
+    x: point.x - minX + paddingX,
+    y: point.y - minY + paddingY,
+  }));
+  node.width = width;
+  node.height = height;
+  node.x = worldCenter.x - width / 2;
+  node.y = worldCenter.y - height / 2;
   return node;
 }
 
@@ -775,6 +874,24 @@ function normalizeGradient(input, fallbackColor) {
     angle: normalizeAngle(finiteNumber(source.angle, 0, -36_000, 36_000)),
     stops,
   };
+}
+
+function normalizeVectorPoints(input, fallback) {
+  const fallbackPoints = Array.isArray(fallback) && fallback.length >= 2
+    ? fallback
+    : [{ x: 0, y: 0 }, { x: 1, y: 1 }];
+  const source = Array.isArray(input) ? input : fallbackPoints;
+  const points = source
+    .filter((point) => point && typeof point === "object")
+    .slice(0, 5_000)
+    .map((point, index) => {
+      const fallbackPoint = fallbackPoints[index % fallbackPoints.length];
+      return {
+        x: finiteNumber(point.x, fallbackPoint.x, -1_000_000, 1_000_000),
+        y: finiteNumber(point.y, fallbackPoint.y, -1_000_000, 1_000_000),
+      };
+    });
+  return (points.length >= 2 ? points : fallbackPoints).map((point) => ({ ...point }));
 }
 
 function normalizeShadow(input, defaults) {

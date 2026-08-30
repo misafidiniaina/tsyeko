@@ -85,11 +85,22 @@ export class CanvasRenderer {
       this.drawMarquee(options.marquee);
     }
 
+    if (options.penDraft) {
+      this.drawPenDraft(options.penDraft, camera);
+    }
+
     if (options.selection !== false) {
       const selectedNodes = document.nodes.filter(
         (node) => selectedSet.has(node.id) && isNodeEffectivelyVisible(document, node),
       );
-      this.drawSelection(selectedNodes, camera, document);
+      this.drawSelection(selectedNodes, camera, document, options.vectorEdit?.nodeId ?? null);
+    }
+
+    if (options.vectorEdit) {
+      const vector = document.nodes.find((node) => node.id === options.vectorEdit.nodeId);
+      if (vector?.type === NODE_TYPES.VECTOR && isNodeEffectivelyVisible(document, vector)) {
+        this.drawVectorEdit(vector, camera, options.vectorEdit);
+      }
     }
   }
 
@@ -157,7 +168,14 @@ export class CanvasRenderer {
 
     this.applyNodeShadow(node, zoom, options);
 
-    if (node.type === NODE_TYPES.ELLIPSE) {
+    if (node.type === NODE_TYPES.VECTOR) {
+      context.beginPath();
+      buildVectorPath(context, node, zoom);
+      this.paintPath(node, width, height, zoom, {
+        fill: node.vectorClosed,
+        fillRule: node.vectorFillRule,
+      });
+    } else if (node.type === NODE_TYPES.ELLIPSE) {
       context.beginPath();
       context.ellipse(0, 0, width / 2, height / 2, 0, 0, Math.PI * 2);
       this.paintPath(node, width, height, zoom);
@@ -198,16 +216,22 @@ export class CanvasRenderer {
     context.shadowOffsetY = Math.max(-10_000, Math.min(10_000, node.shadow.offsetY * zoom));
   }
 
-  paintPath(node, width, height, zoom) {
+  paintPath(node, width, height, zoom, options = {}) {
     const context = this.context;
-    context.fillStyle = createNodeFill(context, node, width, height);
-    context.fill();
-    context.shadowColor = "transparent";
+    const shouldFill = options.fill !== false;
+    if (shouldFill) {
+      context.fillStyle = createNodeFill(context, node, width, height);
+      context.fill(options.fillRule ?? "nonzero");
+      context.shadowColor = "transparent";
+    }
     if (node.strokeWidth > 0) {
       context.lineWidth = Math.max(0.5, node.strokeWidth * zoom);
       context.strokeStyle = node.stroke;
+      context.lineJoin = "round";
+      context.lineCap = "round";
       context.stroke();
     }
+    context.shadowColor = "transparent";
   }
 
   drawText(node, width, height, zoom) {
@@ -335,16 +359,80 @@ export class CanvasRenderer {
     context.restore();
   }
 
-  drawSelection(nodes, camera, document = null) {
+  drawSelection(nodes, camera, document = null, vectorEditId = null) {
     if (!nodes.length) return;
     for (const node of nodes) {
       this.drawSelectionOutline(
         node,
         camera,
-        nodes.length === 1,
+        nodes.length === 1 && node.id !== vectorEditId,
         document ? isNodeEffectivelyLocked(document, node) : node.locked,
       );
     }
+  }
+
+  drawVectorEdit(node, camera, editState = {}) {
+    const points = node.vectorPoints.map((point) =>
+      this.worldToScreen(localToWorld(node, point), camera));
+    if (points.length < 2) return;
+    const context = this.context;
+    context.save();
+    context.strokeStyle = "rgba(236, 72, 153, 0.95)";
+    context.lineWidth = 1.5;
+    context.lineJoin = "round";
+    context.lineCap = "round";
+    context.beginPath();
+    context.moveTo(points[0].x, points[0].y);
+    for (const point of points.slice(1)) context.lineTo(point.x, point.y);
+    if (node.vectorClosed) context.closePath();
+    context.stroke();
+
+    points.forEach((point, index) => {
+      const selected = editState.pointIndex === index;
+      const size = selected ? 9 : 7;
+      context.fillStyle = selected ? "#ec4899" : "#ffffff";
+      context.strokeStyle = selected ? "#ffffff" : "#7c3aed";
+      context.lineWidth = selected ? 2 : 1.5;
+      context.beginPath();
+      context.rect(point.x - size / 2, point.y - size / 2, size, size);
+      context.fill();
+      context.stroke();
+    });
+    context.restore();
+  }
+
+  drawPenDraft(draft, camera) {
+    if (!draft?.points?.length) return;
+    const context = this.context;
+    const points = draft.points.map((point) => this.worldToScreen(point, camera));
+    const hover = draft.hoverWorld ? this.worldToScreen(draft.hoverWorld, camera) : null;
+    context.save();
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    context.strokeStyle = "#c4b5fd";
+    context.lineWidth = 2;
+    context.beginPath();
+    context.moveTo(points[0].x, points[0].y);
+    for (const point of points.slice(1)) context.lineTo(point.x, point.y);
+    context.stroke();
+    if (hover && distance(points.at(-1), hover) > 0.5) {
+      context.setLineDash([5, 4]);
+      context.beginPath();
+      context.moveTo(points.at(-1).x, points.at(-1).y);
+      context.lineTo(hover.x, hover.y);
+      context.stroke();
+      context.setLineDash([]);
+    }
+    points.forEach((point, index) => {
+      context.fillStyle = index === 0 ? "#ec4899" : "#ffffff";
+      context.strokeStyle = "#7c3aed";
+      context.lineWidth = 1.5;
+      context.beginPath();
+      context.arc(point.x, point.y, index === 0 ? 5 : 4, 0, Math.PI * 2);
+      context.fill();
+      context.stroke();
+    });
+    context.restore();
   }
 
   drawSelectionOutline(node, camera, showHandles, locked = node.locked) {
@@ -454,7 +542,7 @@ export class CanvasRenderer {
 
   hitTest(document, screenPoint, camera) {
     const worldPoint = this.screenToWorld(screenPoint, camera);
-    const padding = 2 / camera.zoom;
+    const padding = 4 / camera.zoom;
     for (let index = document.nodes.length - 1; index >= 0; index -= 1) {
       const node = document.nodes[index];
       if (node.type === NODE_TYPES.GROUP || !isNodeEffectivelyVisible(document, node) || !pointInNode(node, worldPoint, padding)) continue;
@@ -468,9 +556,55 @@ export class CanvasRenderer {
         const y = (local.y - node.height / 2) / (node.height / 2 + padding);
         if (x * x + y * y > 1) continue;
       }
+      if (node.type === NODE_TYPES.VECTOR) {
+        const local = worldToLocal(node, worldPoint);
+        const inside = node.vectorClosed && (
+          node.vectorFillRule === "evenodd"
+            ? pointInPolygon(local, node.vectorPoints)
+            : pointInPolygonNonZero(local, node.vectorPoints)
+        );
+        const pathPadding = Math.max(padding, node.strokeWidth / 2 + padding);
+        const nearPath = vectorSegments(node).some(([start, end]) =>
+          distanceToSegment(local, start, end) <= pathPadding);
+        if (!inside && !nearPath) continue;
+      }
       return node;
     }
     return null;
+  }
+
+  getVectorPointAt(screenPoint, node, camera, radius = 9) {
+    if (node?.type !== NODE_TYPES.VECTOR) return null;
+    let best = null;
+    node.vectorPoints.forEach((point, index) => {
+      const screen = this.worldToScreen(localToWorld(node, point), camera);
+      const pointDistance = distance(screenPoint, screen);
+      if (pointDistance <= radius && (!best || pointDistance < best.distance)) {
+        best = { index, distance: pointDistance };
+      }
+    });
+    return best?.index ?? null;
+  }
+
+  getVectorSegmentAt(screenPoint, node, camera, radius = 8) {
+    if (node?.type !== NODE_TYPES.VECTOR) return null;
+    let best = null;
+    for (const [start, end, index] of vectorSegments(node, true)) {
+      const screenStart = this.worldToScreen(localToWorld(node, start), camera);
+      const screenEnd = this.worldToScreen(localToWorld(node, end), camera);
+      const projection = projectPointToSegment(screenPoint, screenStart, screenEnd);
+      const pointDistance = distance(screenPoint, projection);
+      if (pointDistance <= radius && (!best || pointDistance < best.distance)) {
+        const world = this.screenToWorld(projection, camera);
+        best = {
+          index,
+          distance: pointDistance,
+          world,
+          local: worldToLocal(node, world),
+        };
+      }
+    }
+    return best;
   }
 
   getHandleAt(screenPoint, node, camera) {
@@ -618,6 +752,76 @@ function roundedRect(context, x, y, width, height, radius) {
   context.quadraticCurveTo(x, y + height, x, y + height - radius);
   context.lineTo(x, y + radius);
   context.quadraticCurveTo(x, y, x + radius, y);
+}
+
+function buildVectorPath(context, node, zoom) {
+  const [first, ...rest] = node.vectorPoints;
+  if (!first) return;
+  const offsetX = (node.width * zoom) / 2;
+  const offsetY = (node.height * zoom) / 2;
+  context.moveTo(first.x * zoom - offsetX, first.y * zoom - offsetY);
+  for (const point of rest) {
+    context.lineTo(point.x * zoom - offsetX, point.y * zoom - offsetY);
+  }
+  if (node.vectorClosed) context.closePath();
+}
+
+function vectorSegments(node) {
+  const output = [];
+  for (let index = 0; index < node.vectorPoints.length - 1; index += 1) {
+    output.push([node.vectorPoints[index], node.vectorPoints[index + 1], index]);
+  }
+  if (node.vectorClosed && node.vectorPoints.length > 2) {
+    output.push([
+      node.vectorPoints[node.vectorPoints.length - 1],
+      node.vectorPoints[0],
+      node.vectorPoints.length - 1,
+    ]);
+  }
+  return output;
+}
+
+function pointInPolygon(point, polygon) {
+  let inside = false;
+  for (let index = 0, previous = polygon.length - 1; index < polygon.length; previous = index, index += 1) {
+    const currentPoint = polygon[index];
+    const previousPoint = polygon[previous];
+    const crosses = (currentPoint.y > point.y) !== (previousPoint.y > point.y) &&
+      point.x < ((previousPoint.x - currentPoint.x) * (point.y - currentPoint.y)) /
+        (previousPoint.y - currentPoint.y) + currentPoint.x;
+    if (crosses) inside = !inside;
+  }
+  return inside;
+}
+
+function pointInPolygonNonZero(point, polygon) {
+  let winding = 0;
+  for (let index = 0; index < polygon.length; index += 1) {
+    const start = polygon[index];
+    const end = polygon[(index + 1) % polygon.length];
+    const side = (end.x - start.x) * (point.y - start.y) -
+      (point.x - start.x) * (end.y - start.y);
+    if (start.y <= point.y && end.y > point.y && side > 0) winding += 1;
+    if (start.y > point.y && end.y <= point.y && side < 0) winding -= 1;
+  }
+  return winding !== 0;
+}
+
+function projectPointToSegment(point, start, end) {
+  const deltaX = end.x - start.x;
+  const deltaY = end.y - start.y;
+  const lengthSquared = deltaX * deltaX + deltaY * deltaY;
+  if (lengthSquared === 0) return { ...start };
+  const ratio = Math.max(0, Math.min(1,
+    ((point.x - start.x) * deltaX + (point.y - start.y) * deltaY) / lengthSquared));
+  return {
+    x: start.x + deltaX * ratio,
+    y: start.y + deltaY * ratio,
+  };
+}
+
+function distanceToSegment(point, start, end) {
+  return distance(point, projectPointToSegment(point, start, end));
 }
 
 function createNodeFill(context, node, width, height) {

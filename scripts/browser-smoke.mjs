@@ -49,13 +49,13 @@ try {
   await command("Runtime.enable");
 
   await waitFor(
-    `document.readyState === "complete" && document.querySelectorAll(".layer-row").length === 10`,
+    `document.readyState === "complete" && document.querySelectorAll(".layer-row").length === 11`,
     "starter document",
   );
 
   const svgPaintExport = await evaluate(`
     (async () => {
-      const { createNode, createPage, NODE_TYPES } = await import("/src/model.js");
+      const { createNode, createPage, createVectorNodeFromWorldPoints, NODE_TYPES } = await import("/src/model.js");
       const { documentToSVG } = await import("/src/export.js");
       const page = createPage("Paint export");
       page.nodes.push(createNode(NODE_TYPES.RECTANGLE, 0, 0, {
@@ -66,16 +66,22 @@ try {
         ] },
         shadow: { enabled: true, color: "#000000", opacity: 0.35, offsetX: 6, offsetY: 14, blur: 22 }
       }));
+      page.nodes.push(createVectorNodeFromWorldPoints([
+        { x: 180, y: 10 },
+        { x: 250, y: 40 },
+        { x: 200, y: 100 }
+      ], true));
       const svg = documentToSVG(page);
       const parsed = new DOMParser().parseFromString(svg, "image/svg+xml");
       return {
         valid: !parsed.querySelector("parsererror"),
         gradient: Boolean(parsed.querySelector("linearGradient")),
-        shadow: Boolean(parsed.querySelector("feDropShadow"))
+        shadow: Boolean(parsed.querySelector("feDropShadow")),
+        vector: Boolean(parsed.querySelector("path"))
       };
     })()
   `);
-  if (!svgPaintExport.valid || !svgPaintExport.gradient || !svgPaintExport.shadow) {
+  if (!svgPaintExport.valid || !svgPaintExport.gradient || !svgPaintExport.shadow || !svgPaintExport.vector) {
     throw new Error(`SVG paint export validation failed: ${JSON.stringify(svgPaintExport)}`);
   }
 
@@ -94,7 +100,7 @@ try {
   await evaluate(`document.querySelectorAll(".page-list-main")[0].click(); true`);
   await waitFor(
     `document.querySelector("#currentPageName").textContent === "Landing page" &&
-     document.querySelectorAll(".layer-row").length === 10`,
+     document.querySelectorAll(".layer-row").length === 11`,
     "switch to the starter page",
   );
 
@@ -185,6 +191,95 @@ try {
     "gradient and shadow inspector editing",
   );
 
+  await evaluate(`document.querySelector('[data-tool="pen"]').click(); true`);
+  const pathPoints = [
+    { x: canvas.left + canvas.width * 0.58, y: canvas.top + canvas.height * 0.3 },
+    { x: canvas.left + canvas.width * 0.72, y: canvas.top + canvas.height * 0.42 },
+    { x: canvas.left + canvas.width * 0.58, y: canvas.top + canvas.height * 0.55 },
+  ];
+  for (const point of [...pathPoints, pathPoints[0]]) {
+    await dispatchClick(command, point);
+  }
+  await waitFor(
+    `document.querySelectorAll(".layer-row").length === 2 &&
+     document.querySelector(".selection-summary input")?.value === "Vector path" &&
+     document.querySelector("[data-vector-point-count]")?.textContent === "3" &&
+     document.querySelector('[data-inspector-action="vector-closed"][data-value="true"]')?.classList.contains("active")`,
+    "closed path creation with the pen tool",
+  );
+
+  await evaluate(`
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
+    true;
+  `);
+  await waitFor(
+    `document.querySelector('[data-inspector-action="edit-vector"]')?.textContent.includes("Done editing")`,
+    "vector point edit mode",
+  );
+
+  const movedPoint = { x: pathPoints[1].x + 34, y: pathPoints[1].y - 18 };
+  await command("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: pathPoints[1].x,
+    y: pathPoints[1].y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
+  await command("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: movedPoint.x,
+    y: movedPoint.y,
+    button: "left",
+    buttons: 1,
+  });
+  await command("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: movedPoint.x,
+    y: movedPoint.y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+  await waitFor(
+    `document.querySelector("[data-vector-point-count]")?.textContent === "3" &&
+     document.querySelector("#saveState").textContent === "Saved locally"`,
+    "vector anchor dragging",
+  );
+
+  const segmentMidpoint = {
+    x: (movedPoint.x + pathPoints[2].x) / 2,
+    y: (movedPoint.y + pathPoints[2].y) / 2,
+  };
+  await dispatchClick(command, segmentMidpoint, 1);
+  await waitFor(
+    `document.querySelector("[data-vector-point-count]")?.textContent === "4"`,
+    "Alt-click anchor insertion",
+  );
+  await evaluate(`
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", code: "Delete", bubbles: true }));
+    true;
+  `);
+  await waitFor(
+    `document.querySelector("[data-vector-point-count]")?.textContent === "3"`,
+    "vector anchor deletion",
+  );
+
+  await evaluate(`document.querySelector('[data-inspector-action="vector-closed"][data-value="false"]').click(); true`);
+  await waitFor(
+    `document.querySelector('[data-inspector-action="vector-closed"][data-value="false"]')?.classList.contains("active")`,
+    "opening a vector path",
+  );
+  await evaluate(`document.querySelector('[data-inspector-action="vector-closed"][data-value="true"]').click(); true`);
+  await waitFor(
+    `document.querySelector('[data-inspector-action="vector-closed"][data-value="true"]')?.classList.contains("active")`,
+    "closing a vector path",
+  );
+  await evaluate(`
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
+    true;
+  `);
+
   const imagePath = path.join(profileDirectory, "smoke-image.png");
   writeFileSync(
     imagePath,
@@ -204,7 +299,7 @@ try {
     true;
   `);
   await waitFor(
-    `document.querySelectorAll(".layer-row").length === 2 &&
+    `document.querySelectorAll(".layer-row").length === 3 &&
      document.querySelector(".selection-summary input")?.value === "smoke-image" &&
      document.querySelector("#saveState").textContent === "Saved locally"`,
     "image import and IndexedDB autosave",
@@ -212,10 +307,12 @@ try {
 
   await evaluate(`
     (() => {
-      document.querySelectorAll(".layer-row")[0]
-        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      document.querySelectorAll(".layer-row")[1]
-        .dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true }));
+      const selectLayer = (name, shiftKey) => [...document.querySelectorAll(".layer-row")]
+        .find((row) => row.querySelector(".layer-name")?.textContent === name)
+        .dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey }));
+      selectLayer("smoke-image", false);
+      selectLayer("Vector path", true);
+      selectLayer("Rectangle", true);
       return true;
     })()
   `);
@@ -243,8 +340,8 @@ try {
     process.stdout.write(`Hierarchy debug: ${JSON.stringify(hierarchyState)}\n`);
   }
   await waitFor(
-    `document.querySelectorAll(".layer-row").length === 3 &&
-     document.querySelectorAll('.layer-row[style*="--layer-depth: 1"]').length === 2 &&
+    `document.querySelectorAll(".layer-row").length === 4 &&
+     document.querySelectorAll('.layer-row[style*="--layer-depth: 1"]').length === 3 &&
      document.querySelector(".selection-summary input")?.value === "Group" &&
      document.querySelector("#saveState").textContent === "Saved locally"`,
     "keyboard grouping and nested layers",
@@ -253,16 +350,28 @@ try {
   await evaluate(`document.querySelector('[data-layer-action="collapse"]').click(); true`);
   await waitFor(`document.querySelectorAll(".layer-row").length === 1`, "collapsed group");
   await evaluate(`document.querySelector('[data-layer-action="collapse"]').click(); true`);
-  await waitFor(`document.querySelectorAll(".layer-row").length === 3`, "expanded group");
+  await waitFor(`document.querySelectorAll(".layer-row").length === 4`, "expanded group");
 
   await command("Page.reload", { ignoreCache: true });
   await waitFor(
     `document.readyState === "complete" &&
      document.querySelector("#currentPageName")?.textContent === "Page 2" &&
      document.querySelectorAll(".page-list-row").length === 2 &&
-     document.querySelectorAll(".layer-row").length === 3 &&
-     document.querySelectorAll('.layer-row[style*="--layer-depth: 1"]').length === 2`,
+     document.querySelectorAll(".layer-row").length === 4 &&
+     document.querySelectorAll('.layer-row[style*="--layer-depth: 1"]').length === 3`,
     "hierarchical multi-page reload persistence",
+  );
+
+  await evaluate(`
+    [...document.querySelectorAll(".layer-row")]
+      .find((row) => row.querySelector(".layer-name")?.textContent === "Vector path")
+      .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    true;
+  `);
+  await waitFor(
+    `document.querySelector("[data-vector-point-count]")?.textContent === "3" &&
+     document.querySelector('[data-inspector-action="vector-closed"][data-value="true"]')?.classList.contains("active")`,
+    "vector path reload persistence",
   );
 
   await evaluate(`
@@ -390,6 +499,27 @@ async function waitForJSON(url, label) {
     await delay(100);
   }
   throw new Error(`Timed out while waiting for ${label}.`);
+}
+
+async function dispatchClick(command, point, modifiers = 0, clickCount = 1) {
+  await command("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: point.x,
+    y: point.y,
+    button: "left",
+    buttons: 1,
+    modifiers,
+    clickCount,
+  });
+  await command("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: point.x,
+    y: point.y,
+    button: "left",
+    buttons: 0,
+    modifiers,
+    clickCount,
+  });
 }
 
 function terminateProcess(child) {

@@ -28,7 +28,9 @@ export function documentToSVG(document, ids = null) {
     .join("");
   const paintDefinitions = nodes
     .flatMap((node) => [
-      node.fillType === "linear-gradient" ? gradientToSVG(node) : "",
+      node.fillType === "linear-gradient" && (node.type !== NODE_TYPES.VECTOR || node.vectorClosed)
+        ? gradientToSVG(node)
+        : "",
       node.shadow?.enabled && node.shadow.opacity > 0 ? shadowToSVG(node) : "",
     ])
     .join("");
@@ -85,6 +87,15 @@ function nodeToSVG(node, opacity = node.opacity) {
 
   if (node.type === NODE_TYPES.ELLIPSE) {
     return `<ellipse cx="${round(node.x + node.width / 2)}" cy="${round(node.y + node.height / 2)}" rx="${round(node.width / 2)}" ry="${round(node.height / 2)}" ${paint} ${common} />`;
+  }
+
+  if (node.type === NODE_TYPES.VECTOR) {
+    const path = node.vectorPoints.map((point, index) =>
+      `${index === 0 ? "M" : "L"} ${round(node.x + point.x)} ${round(node.y + point.y)}`,
+    ).join(" ");
+    const fillPaint = node.vectorClosed ? fill : "none";
+    const close = node.vectorClosed ? " Z" : "";
+    return `<path d="${path}${close}" fill="${escapeXML(fillPaint)}" fill-rule="${node.vectorFillRule}" stroke="${escapeXML(node.stroke)}" stroke-width="${round(node.strokeWidth)}" stroke-linecap="round" stroke-linejoin="round" ${common} />`;
   }
 
   if (node.type === NODE_TYPES.IMAGE) {

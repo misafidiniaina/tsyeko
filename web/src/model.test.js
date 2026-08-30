@@ -5,6 +5,7 @@ import {
   createEmptyDocument,
   createNode,
   createPage,
+  createVectorNodeFromWorldPoints,
   deleteNodes,
   duplicatePage,
   duplicateNodes,
@@ -12,11 +13,13 @@ import {
   getFirstPage,
   getNodesWithDescendants,
   getNodeVisualBounds,
+  getVectorWorldPoints,
   groupNodes,
   isNodeEffectivelyVisible,
   localToWorld,
   NODE_TYPES,
   normalizeDocument,
+  normalizeVectorBounds,
   pointInNode,
   ungroupNodes,
 } from "./model.js";
@@ -39,7 +42,7 @@ test("migrates v1 documents and clamps untrusted geometry", () => {
   });
 
   assert.equal(document.name, "Imported");
-  assert.equal(document.version, 4);
+  assert.equal(document.version, 5);
   assert.equal(document.pages.length, 1);
   assert.equal(document.pages[0].nodes[0].x, 12);
   assert.equal(document.pages[0].nodes[0].width, 1);
@@ -249,7 +252,7 @@ test("normalizes gradient paints and bounded shadow effects", () => {
   assert.deepEqual(getNodeVisualBounds(node), { x: -5, y: 8, width: 140, height: 90 });
 });
 
-test("migrates implicit frame shadows into explicit v4 effects", () => {
+test("migrates implicit frame shadows into explicit v5 effects", () => {
   const document = normalizeDocument({
     version: 3,
     name: "Legacy frame",
@@ -257,7 +260,7 @@ test("migrates implicit frame shadows into explicit v4 effects", () => {
   });
   const frame = getFirstPage(document).nodes[0];
 
-  assert.equal(document.version, 4);
+  assert.equal(document.version, 5);
   assert.equal(frame.fillType, "solid");
   assert.equal(frame.shadow.enabled, true);
   assert.equal(frame.shadow.blur, 16);
@@ -337,4 +340,83 @@ test("SVG export includes gradient and shadow definitions", () => {
   assert.match(svg, /fill="url\(#gradient-/);
   assert.match(svg, /filter="url\(#shadow-/);
   assert.match(svg, /<feDropShadow/);
+});
+
+test("normalizes vector paths and rejects invalid point data", () => {
+  const document = normalizeDocument({
+    version: 4,
+    name: "Vector migration",
+    pages: [{
+      name: "Page",
+      nodes: [{
+        id: "path",
+        type: "vector",
+        vectorPoints: [
+          { x: "10", y: -2_000_000 },
+          null,
+          { x: 40, y: 30 },
+        ],
+        vectorClosed: true,
+        vectorFillRule: "evenodd",
+      }],
+    }],
+  });
+  const vector = getFirstPage(document).nodes[0];
+
+  assert.equal(document.version, 5);
+  assert.equal(vector.type, NODE_TYPES.VECTOR);
+  assert.equal(vector.vectorPoints.length, 2);
+  assert.equal(vector.vectorClosed, false);
+  assert.equal(vector.vectorFillRule, "evenodd");
+  assert.equal(vector.width, 30);
+  assert.equal(vector.height, 1_000_030);
+});
+
+test("creates vectors from world points and preserves anchors when bounds normalize", () => {
+  const vector = createVectorNodeFromWorldPoints([
+    { x: 30, y: 20 },
+    { x: 110, y: 40 },
+    { x: 60, y: 100 },
+  ], true, { rotation: 0 });
+
+  assert.equal(vector.x, 30);
+  assert.equal(vector.y, 20);
+  assert.equal(vector.width, 80);
+  assert.equal(vector.height, 80);
+  assert.deepEqual(getVectorWorldPoints(vector), [
+    { x: 30, y: 20 },
+    { x: 110, y: 40 },
+    { x: 60, y: 100 },
+  ]);
+
+  vector.rotation = 32;
+  vector.vectorPoints[0] = { x: -25, y: 8 };
+  const worldBefore = getVectorWorldPoints(vector);
+  normalizeVectorBounds(vector);
+  const worldAfter = getVectorWorldPoints(vector);
+  worldAfter.forEach((point, index) => {
+    assert.ok(Math.abs(point.x - worldBefore[index].x) < 1e-9);
+    assert.ok(Math.abs(point.y - worldBefore[index].y) < 1e-9);
+  });
+});
+
+test("exports open and closed vectors as editable SVG paths", () => {
+  const page = createPage("Vectors");
+  page.nodes.push(
+    createVectorNodeFromWorldPoints([
+      { x: 0, y: 0 },
+      { x: 60, y: 20 },
+      { x: 20, y: 80 },
+    ], true, { vectorFillRule: "evenodd" }),
+    createVectorNodeFromWorldPoints([
+      { x: 100, y: 10 },
+      { x: 180, y: 70 },
+    ], false),
+  );
+  const svg = documentToSVG(page);
+
+  assert.match(svg, /<path d="M 0 0 L 60 20 L 20 80 Z"/);
+  assert.match(svg, /fill-rule="evenodd"/);
+  assert.match(svg, /<path d="M 100 10 L 180 70" fill="none"/);
+  assert.match(svg, /stroke-linecap="round"/);
 });
