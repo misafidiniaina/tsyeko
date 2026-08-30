@@ -37,7 +37,7 @@ GOCACHE=$PWD/.cache/go-build go run .
 - Hierarchical frame/group/Boolean/mask parenting with nested clipping and inherited visibility, locking, and opacity
 - Horizontal and vertical Auto Layout frames with ordered flow, per-side padding, gaps, primary/counter-axis alignment, hug sizing, and fill children
 - Flow/absolute child positioning plus left, right, center, stretch, and scale constraints for responsive frame resizing
-- Local reusable components with a main source, Assets browser, linked instances, visual/content overrides, reset, and detach
+- Local reusable components with main sources, grouped variant sets, Inspector variant switching, linked instances, visual/content overrides, reset, and detach
 - Embedded PNG, JPEG, WebP, and GIF image layers with cover/contain fitting
 - Solid and editable linear-gradient fills with angle and color stops
 - Data-driven drop shadows with color, opacity, offsets, and blur
@@ -53,7 +53,7 @@ GOCACHE=$PWD/.cache/go-build go run .
 - JSON import/export, SVG export, and high-resolution PNG export
 - Prototype preview surface
 - Responsive editor shell
-- Sanitized, cycle-safe v9 document imports with automatic v1–v8 migration
+- Sanitized, cycle-safe v10 document imports with automatic v1–v9 migration
 - Embedded Go server with a health endpoint and security headers
 
 ## Useful shortcuts
@@ -108,9 +108,11 @@ Select a child to choose fixed/fill sizing or switch it to absolute positioning.
 
 ## Component workflow
 
-Select one or more sibling layers and choose **Create component** from Assets, or press `Ctrl/Cmd+Alt+K`. The selected source stays on the canvas as the main component. Assets lists every local component; click a card to insert a linked instance at the viewport center.
+Select one or more sibling layers and choose **Create component** from Assets, or press `Ctrl/Cmd+Alt+K`. The selected source stays on the canvas as the main component. Assets lists every local component; click the main area of a card to insert a linked instance at the viewport center, or use its target action to reveal the main component.
 
-Edits to a main component propagate to its instances. Text, visibility, paints, effects, typography, image content, and supported layout settings can be changed on an instance as local overrides. Use **Reset all overrides** to return to the main source, or **Detach instance** to make an independent layer tree. Free resize, rotate, and structural edits remain intentionally unavailable on linked instances; make those changes on the main component or detach first. Components are local to the document for now—there are no variants, published libraries, or remote updates yet.
+Edits to a main component propagate to its instances. Text, visibility, paints, effects, typography, image content, and supported layout settings can be changed on an instance as local overrides. The Inspector lists each overridden layer/property, supports resetting one override or all overrides, and can swap the instance to another local component. A swap keeps outer placement and transfers overrides when the destination has a matching layer hierarchy, type, name, and sibling occurrence. Use **Detach instance** to make an independent layer tree. Free resize, rotate, and structural edits remain intentionally unavailable on linked instances; make those changes on the main component or detach first. Components and variants are local to the document for now—there are no published libraries or remote updates yet.
+
+To create variants, select at least two main components and choose **Combine as variants** in Assets or **Combine as variant set** in the multi-selection Inspector. Names such as `Button / Primary` create one `Variant` control. A complete matrix such as `Button / State=Hover, Size=Large` creates separate `State` and `Size` controls. Assets groups the members under one set, and instance Inspector controls switch to available combinations while preserving compatible overrides and placement. Variant sets can be dissolved back into independent local components.
 
 ## Test it
 
@@ -120,7 +122,7 @@ npm run check
 npm run test:browser
 ```
 
-The unit suite covers document migration and sanitization, component source/instance synchronization, overrides, reset, detach, nested Auto Layout, hug/fill sizing, alignment, frame constraints, SVG layout parity, cubic geometry, Boolean/mask geometry, hierarchy, history, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies the layout inspector, responsive resizing, undo/redo, v9 persistence, local component creation, linked updates, overrides, reset, detach, all four Boolean modes and mask intersection with Canvas and rasterized-SVG pixel samples, expanded strokes, pen-drag curves, paints, images, grouping, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
+The unit suite covers document migration and sanitization, component source/instance synchronization, override inspection and reset, semantic swaps, local variant matrices, detach, nested Auto Layout, hug/fill sizing, alignment, frame constraints, SVG layout parity, cubic geometry, Boolean/mask geometry, hierarchy, history, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies the layout inspector, responsive resizing, undo/redo, v10 persistence, local component/variant creation, linked updates, override reset, Assets navigation, instance swapping and variant switching, detach, all four Boolean modes and mask intersection with Canvas and rasterized-SVG pixel samples, expanded strokes, pen-drag curves, paints, images, grouping, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
 
 ## Project structure
 
@@ -153,7 +155,7 @@ The unit suite covers document migration and sanitization, component source/inst
 
 ## Current product boundary
 
-The MVP stores one hierarchical, multi-page document and embedded raster assets in the browser. Cubic paths, object-level non-destructive Booleans, silhouette masks, single-axis Auto Layout, frame constraints, and local linked components are implemented. Layout does not yet include wrapping, min/max dimensions, baseline alignment, intrinsic text measurement, or rotated Auto Layout frames. Components do not yet support variants, nested component composition, published libraries, remote updates, or component-property controls. True multi-contour path editing, destructive path flattening, precision offset curves, and a scalable cached/GPU compositor also remain future work. There is no account system, remote database, managed font asset pipeline, or multiplayer synchronization yet. These are explicit follow-on milestones described in [the architecture document](docs/ARCHITECTURE.md).
+The MVP stores one hierarchical, multi-page document and embedded raster assets in the browser. Cubic paths, object-level non-destructive Booleans, silhouette masks, single-axis Auto Layout, frame constraints, local linked components, and local variant sets are implemented. Layout does not yet include wrapping, min/max dimensions, baseline alignment, intrinsic text measurement, or rotated Auto Layout frames. Components do not yet support nested component composition, published libraries, remote updates, or typed component-property controls. True multi-contour path editing, destructive path flattening, precision offset curves, and a scalable cached/GPU compositor also remain future work. There is no account system, remote database, managed font asset pipeline, or multiplayer synchronization yet. These are explicit follow-on milestones described in [the architecture document](docs/ARCHITECTURE.md).
 
 ## Core design decision
 

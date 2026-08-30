@@ -965,8 +965,8 @@ try {
       request.addEventListener("error", () => reject(request.error), { once: true });
     })
   `);
-  if (storedDocumentVersion !== 9) {
-    throw new Error(`Expected persisted document v9, received ${storedDocumentVersion}.`);
+  if (storedDocumentVersion !== 10) {
+    throw new Error(`Expected persisted document v10, received ${storedDocumentVersion}.`);
   }
   await evaluate(`
     [...document.querySelectorAll(".layer-row")]
@@ -997,14 +997,14 @@ try {
      [...document.querySelectorAll(".layer-composite-role")].some((item) => item.textContent === "MAIN")`,
     "local component creation",
   );
-  await evaluate(`document.querySelector(".component-card").click(); true`);
+  await evaluate(`document.querySelector(".component-card-main").click(); true`);
   await waitFor(
     `document.querySelectorAll(".layer-row").length > ${layersBeforeComponents} &&
      [...document.querySelectorAll(".layer-composite-role")].filter((item) => item.textContent === "INSTANCE").length === 1 &&
      document.querySelector('[data-inspector-action="reset-component-overrides"]')`,
     "first linked component instance insertion",
   );
-  await evaluate(`document.querySelector(".component-card").click(); true`);
+  await evaluate(`document.querySelector(".component-card-main").click(); true`);
   await waitFor(
     `[...document.querySelectorAll(".layer-composite-role")].filter((item) => item.textContent === "INSTANCE").length === 2 &&
      document.querySelector("#saveState").textContent === "Saved locally"`,
@@ -1025,6 +1025,7 @@ try {
   `);
   await waitFor(
     `document.querySelector('[data-property="fill"][type="color"]')?.value === "#fef3c7" &&
+     document.querySelector('[data-inspector-action="reset-component-override"][data-component-property="fill"]') &&
      document.querySelector("#saveState").textContent === "Saved locally"`,
     "instance visual override",
   );
@@ -1057,11 +1058,11 @@ try {
      !document.querySelector('[data-inspector-action="reset-component-overrides"]')?.disabled`,
     "instance override survives a main component update",
   );
-  await evaluate(`document.querySelector('[data-inspector-action="reset-component-overrides"]').click(); true`);
+  await evaluate(`document.querySelector('[data-inspector-action="reset-component-override"][data-component-property="fill"]').click(); true`);
   await waitFor(
     `document.querySelector('[data-property="fill"][type="color"]')?.value === "#0f766e" &&
      document.querySelector('[data-inspector-action="reset-component-overrides"]')?.disabled === true`,
-    "instance override reset",
+    "single instance override reset",
   );
   await evaluate(`
     (() => {
@@ -1112,14 +1113,113 @@ try {
     "remaining linked instance receives source update",
   );
 
+  await evaluate(`
+    (() => {
+      const detached = [...document.querySelectorAll(".layer-row")]
+        .find((row) => row.querySelector(".layer-name")?.textContent === "Detached auto layout");
+      detached.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      document.querySelector("#createComponentButton").click();
+      return true;
+    })()
+  `);
+  await waitFor(
+    `document.querySelectorAll(".component-card").length === 2 &&
+     [...document.querySelectorAll(".component-card-copy strong")].some((item) => item.textContent === "Detached auto layout") &&
+     document.querySelector("#saveState").textContent === "Saved locally"`,
+    "second local component creation",
+  );
+  await evaluate(`
+    (() => {
+      const firstCard = [...document.querySelectorAll(".component-card")]
+        .find((card) => card.querySelector(".component-card-copy strong")?.textContent === "Auto layout");
+      firstCard.querySelector('[data-component-action="reveal"]').click();
+      return true;
+    })()
+  `);
+  await waitFor(
+    `document.querySelector(".layer-row.selected .layer-composite-role")?.textContent === "MAIN" &&
+     document.querySelector(".component-inspector-summary strong")?.textContent === "Auto layout"`,
+    "reveal main component from Assets",
+  );
+  await evaluate(`
+    (() => {
+      const instance = [...document.querySelectorAll(".layer-row")]
+        .find((row) => row.querySelector(".layer-composite-role")?.textContent === "INSTANCE");
+      instance.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      const swap = document.querySelector("[data-component-swap]");
+      const option = [...swap.options].find((item) => item.textContent === "Detached auto layout");
+      swap.value = option.value;
+      swap.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    })()
+  `);
+  await waitFor(
+    `document.querySelector(".component-inspector-summary strong")?.textContent === "Detached auto layout" &&
+     document.querySelector('[data-property="fill"][type="color"]')?.value === "#0f766e" &&
+     [...document.querySelectorAll(".component-card")].find((card) => card.querySelector("strong")?.textContent === "Auto layout")?.querySelector("small")?.textContent === "0 instances" &&
+     [...document.querySelectorAll(".component-card")].find((card) => card.querySelector("strong")?.textContent === "Detached auto layout")?.querySelector("small")?.textContent === "1 instance" &&
+     document.querySelector("#saveState").textContent === "Saved locally"`,
+    "linked component instance swap",
+  );
+
+  await evaluate(`
+    (() => {
+      const findMain = (name) => [...document.querySelectorAll(".layer-row")]
+        .find((row) => row.querySelector(".layer-composite-role")?.textContent === "MAIN" &&
+          row.querySelector(".layer-name")?.textContent === name);
+      findMain("Auto layout").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      findMain("Detached auto layout").dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true }));
+      document.querySelector("#createVariantSetButton").click();
+      return true;
+    })()
+  `);
+  await waitFor(
+    `document.querySelectorAll(".component-set-card").length === 1 &&
+     document.querySelector(".component-set-heading strong")?.textContent === "Local variants" &&
+     [...document.querySelectorAll(".layer-composite-role")].filter((item) => item.textContent === "VARIANT").length === 2 &&
+     document.querySelector("#saveState").textContent === "Saved locally"`,
+    "local component variant-set creation",
+  );
+  await evaluate(`
+    (() => {
+      const instance = [...document.querySelectorAll(".layer-row")]
+        .find((row) => row.querySelector(".layer-composite-role")?.textContent === "INSTANCE");
+      instance.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      const variant = document.querySelector('[data-component-variant][data-variant-property="Variant"]');
+      variant.value = "Auto layout";
+      variant.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    })()
+  `);
+  await waitFor(
+    `document.querySelector(".component-inspector-summary strong")?.textContent === "Local variants" &&
+     document.querySelector('[data-component-variant][data-variant-property="Variant"]')?.value === "Auto layout" &&
+     document.querySelector('[data-property="fill"][type="color"]')?.value === "#dc2626" &&
+     [...document.querySelectorAll(".component-card")].find((card) => card.querySelector("strong")?.textContent === "Auto layout")?.querySelector("small")?.textContent === "1 instance" &&
+     [...document.querySelectorAll(".component-card")].find((card) => card.querySelector("strong")?.textContent === "Detached auto layout")?.querySelector("small")?.textContent === "0 instances" &&
+     document.querySelector("#saveState").textContent === "Saved locally"`,
+    "component variant switch",
+  );
+
   await command("Page.reload", { ignoreCache: true });
   await waitFor(
     `document.readyState === "complete" &&
-     document.querySelectorAll(".component-card").length === 1 &&
-     document.querySelector(".component-card-copy small")?.textContent === "1 instance" &&
-     [...document.querySelectorAll(".layer-name")].some((item) => item.textContent === "Detached auto layout") &&
+     document.querySelectorAll(".component-set-card").length === 1 &&
+     document.querySelectorAll(".component-card").length === 2 &&
+     [...document.querySelectorAll(".component-card")].find((card) => card.querySelector("strong")?.textContent === "Auto layout")?.querySelector("small")?.textContent === "1 instance" &&
+     [...document.querySelectorAll(".component-card")].find((card) => card.querySelector("strong")?.textContent === "Detached auto layout")?.querySelector("small")?.textContent === "0 instances" &&
      [...document.querySelectorAll(".layer-composite-role")].some((item) => item.textContent === "INSTANCE")`,
-    "component and detach persistence",
+    "component variant persistence",
+  );
+  await evaluate(`
+    [...document.querySelectorAll(".layer-row")]
+      .find((row) => row.querySelector(".layer-composite-role")?.textContent === "INSTANCE")
+      .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    true
+  `);
+  await waitFor(
+    `document.querySelector('[data-component-variant][data-variant-property="Variant"]')?.value === "Auto layout"`,
+    "variant Inspector reload persistence",
   );
   if (process.env.TSYAIKO_COMPONENT_SCREENSHOT) {
     await evaluate(`

@@ -3,7 +3,7 @@ import {
   VECTOR_HANDLE_MODES,
 } from "./vector.js";
 
-export const DOCUMENT_VERSION = 9;
+export const DOCUMENT_VERSION = 10;
 const MAX_HIERARCHY_DEPTH = 256;
 
 export const COMPONENT_ROLES = Object.freeze({
@@ -293,6 +293,7 @@ export function createEmptyDocument(name = "Untitled design") {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     components: [],
+    componentSets: [],
     pages: [createPage("Page 1")],
   };
 }
@@ -465,7 +466,8 @@ export function normalizeDocument(input) {
   if (!document.pages.length) document.pages.push(createPage("Page 1", { background: document.background }));
   ensureUniqueIds(document);
   for (const page of document.pages) repairPageHierarchy(page);
-  document.components = normalizeComponentRecords(input.components, document);
+  document.componentSets = normalizeComponentSetRecords(input.componentSets);
+  document.components = normalizeComponentRecords(input.components, document, document.componentSets);
   repairComponentMetadata(document);
   return document;
 }
@@ -1143,7 +1145,9 @@ export function clearComponentMetadata(node) {
 // become safe before the editor's component synchronization runs.
 export function repairComponentMetadata(document) {
   if (!document || !Array.isArray(document.pages)) return document;
-  const components = normalizeComponentRecords(document.components, document);
+  const componentSets = normalizeComponentSetRecords(document.componentSets);
+  const components = normalizeComponentRecords(document.components, document, componentSets);
+  const repairedComponentSets = repairComponentSetMembership(componentSets, components);
   const componentById = new Map(components.map((component) => [component.id, component]));
   const sourceIdsByComponent = new Map();
   const sourceMembership = new Set();
@@ -1193,6 +1197,7 @@ export function repairComponentMetadata(document) {
   }
 
   document.components = components;
+  document.componentSets = repairedComponentSets;
   return document;
 }
 
@@ -1223,10 +1228,11 @@ function ensureUniqueIds(document) {
   }
 }
 
-function normalizeComponentRecords(input, document) {
+function normalizeComponentRecords(input, document, componentSets = []) {
   const components = [];
   const usedIds = new Set();
   const usedSources = new Set();
+  const componentSetById = new Map(componentSets.map((set) => [set.id, set]));
   const source = Array.isArray(input) ? input.slice(0, 5_000) : [];
   for (const raw of source) {
     if (!raw || typeof raw !== "object") continue;
@@ -1240,16 +1246,102 @@ function normalizeComponentRecords(input, document) {
     usedIds.add(id);
     usedSources.add(sourceKey);
     const now = new Date().toISOString();
+    const componentSet = componentSetById.get(cleanString(raw.componentSetId, "", 160)) ?? null;
     components.push({
       id,
       name: cleanString(raw.name, node.name || "Component", 120),
       sourcePageId,
       sourceNodeId,
+      componentSetId: componentSet?.id ?? null,
+      variantProperties: componentSet
+        ? normalizeVariantProperties(raw.variantProperties, componentSet.propertyNames)
+        : {},
       createdAt: cleanString(raw.createdAt, now, 64),
       updatedAt: cleanString(raw.updatedAt, now, 64),
     });
   }
   return components;
+}
+
+function normalizeComponentSetRecords(input) {
+  const sets = [];
+  const usedIds = new Set();
+  const source = Array.isArray(input) ? input.slice(0, 2_500) : [];
+  for (const raw of source) {
+    if (!raw || typeof raw !== "object") continue;
+    const id = cleanString(raw.id, "", 160);
+    if (!id || usedIds.has(id)) continue;
+    const propertyNames = [];
+    const usedNames = new Set();
+    const rawNames = Array.isArray(raw.propertyNames) ? raw.propertyNames.slice(0, 12) : [];
+    for (const value of rawNames) {
+      const name = cleanString(value, "", 80);
+      if (!name || usedNames.has(name.toLowerCase())) continue;
+      usedNames.add(name.toLowerCase());
+      propertyNames.push(name);
+    }
+    if (!propertyNames.length) propertyNames.push("Variant");
+    usedIds.add(id);
+    const now = new Date().toISOString();
+    sets.push({
+      id,
+      name: cleanString(raw.name, "Component set", 120),
+      propertyNames,
+      createdAt: cleanString(raw.createdAt, now, 64),
+      updatedAt: cleanString(raw.updatedAt, now, 64),
+    });
+  }
+  return sets;
+}
+
+function normalizeVariantProperties(input, propertyNames) {
+  const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  return Object.fromEntries(propertyNames.map((name) => [
+    name,
+    cleanString(source[name], "Default", 120),
+  ]));
+}
+
+function repairComponentSetMembership(componentSets, components) {
+  const componentsBySet = new Map();
+  for (const component of components) {
+    if (!component.componentSetId) continue;
+    if (!componentsBySet.has(component.componentSetId)) componentsBySet.set(component.componentSetId, []);
+    componentsBySet.get(component.componentSetId).push(component);
+  }
+
+  const repairedSets = [];
+  for (const componentSet of componentSets) {
+    const members = componentsBySet.get(componentSet.id) ?? [];
+    if (members.length < 2) {
+      for (const component of members) {
+        component.componentSetId = null;
+        component.variantProperties = {};
+      }
+      continue;
+    }
+    const combinations = new Set();
+    const lastProperty = componentSet.propertyNames.at(-1);
+    for (const component of members) {
+      let combination = variantCombinationKey(componentSet, component.variantProperties);
+      if (combinations.has(combination)) {
+        const base = component.variantProperties[lastProperty] || "Default";
+        let suffix = 2;
+        while (combinations.has(combination)) {
+          component.variantProperties[lastProperty] = cleanString(`${base} ${suffix}`, `Variant ${suffix}`, 120);
+          combination = variantCombinationKey(componentSet, component.variantProperties);
+          suffix += 1;
+        }
+      }
+      combinations.add(combination);
+    }
+    repairedSets.push(componentSet);
+  }
+  return repairedSets;
+}
+
+function variantCombinationKey(componentSet, properties) {
+  return JSON.stringify(componentSet.propertyNames.map((name) => properties[name]));
 }
 
 function normalizeComponentOverrides(input) {

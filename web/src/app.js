@@ -54,18 +54,26 @@ import {
 import {
   createComponent,
   createComponentInstance,
+  createComponentSet,
   detachComponentInstance,
+  dissolveComponentSet,
   getComponentDefinition,
   getComponentInstanceCount,
   getComponentInstanceRoot,
+  getComponentOverrideEntries,
+  getComponentSet,
+  getComponentSetComponents,
   getComponentSource,
-  hasComponentOverrides,
+  getComponentVariantControls,
   isComponentInstanceMember,
   isComponentInstanceRoot,
   isComponentSource,
   isMainComponent,
   recordComponentOverride,
+  resetComponentOverride,
   resetComponentOverrides,
+  selectComponentVariant,
+  swapComponentInstance,
   syncDocumentComponents,
 } from "./components.js";
 import { DocumentHistory } from "./history.js";
@@ -104,6 +112,7 @@ const elements = {
   assetsSearch: document.querySelector("#assetsSearch"),
   componentsList: document.querySelector("#componentsList"),
   emptyComponents: document.querySelector("#emptyComponents"),
+  createVariantSetButton: document.querySelector("#createVariantSetButton"),
   inspector: document.querySelector("#inspector"),
   zoomValue: document.querySelector("#zoomValue"),
   mainMenuButton: document.querySelector("#mainMenuButton"),
@@ -202,6 +211,7 @@ function bindToolbar() {
   document.querySelector("#addPageButton").addEventListener("click", addPage);
   document.querySelector("#importImageButton").addEventListener("click", () => openImagePicker());
   document.querySelector("#createComponentButton").addEventListener("click", createComponentFromSelection);
+  elements.createVariantSetButton.addEventListener("click", createVariantSetFromSelection);
 }
 
 function bindCanvas() {
@@ -284,9 +294,14 @@ function bindPanels() {
 
   elements.assetsSearch.addEventListener("input", renderAssets);
   elements.componentsList.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-component-action='insert']");
+    const button = event.target.closest("[data-component-action]");
     if (!button) return;
-    insertComponentInstance(button.dataset.componentId);
+    if (button.dataset.componentAction === "insert") {
+      insertComponentInstance(button.dataset.componentId);
+    }
+    if (button.dataset.componentAction === "reveal") {
+      revealMainComponent(button.dataset.componentId);
+    }
   });
 
   elements.pageSwitcher.addEventListener("click", (event) => {
@@ -488,6 +503,16 @@ function bindInspector() {
   });
 
   elements.inspector.addEventListener("change", (event) => {
+    const variantSelect = event.target.closest("[data-component-variant]");
+    if (variantSelect) {
+      changeSelectedComponentVariant(variantSelect.dataset.variantProperty, variantSelect.value);
+      return;
+    }
+    const swapSelect = event.target.closest("[data-component-swap]");
+    if (swapSelect) {
+      swapSelectedComponent(swapSelect.value);
+      return;
+    }
     if (event.target.closest("[data-property], [data-page-property], [data-gradient-stop], [data-gradient-property], [data-shadow-property], [data-layout-property]")) commitDocument();
   });
 
@@ -498,6 +523,30 @@ function bindInspector() {
     if (!node) return;
     const action = button.dataset.inspectorAction;
 
+    if (action === "dissolve-component-set") {
+      const component = getComponentDefinition(designDocument, node.componentId);
+      const componentSet = component ? getComponentSet(designDocument, component.componentSetId) : null;
+      if (!componentSet) return;
+      dissolveComponentSet(designDocument, componentSet.id);
+      commitDocument();
+      showToast(`${componentSet.name} variant set dissolved`);
+      return;
+    }
+    if (action === "reset-component-override") {
+      const selectedId = node.id;
+      const root = resetComponentOverride(
+        designDocument,
+        currentPage(),
+        node,
+        button.dataset.sourceNodeId,
+        button.dataset.componentProperty,
+      );
+      if (!root) return;
+      selectedIds = [getNode(currentPage(), selectedId)?.id ?? root.id];
+      commitDocument();
+      showToast(`${componentPropertyLabel(button.dataset.componentProperty)} override reset`);
+      return;
+    }
     if (action === "reset-component-overrides") {
       const root = resetComponentOverrides(designDocument, currentPage(), node);
       if (!root) return;
@@ -2328,7 +2377,7 @@ function renderLayers() {
           : ({ union: "ADD", subtract: "CUT", intersect: "AND", exclude: "XOR" }[parent.booleanOperation] ?? "SOURCE")
         : "";
     if (isMainComponent(node)) {
-      layerRole = "MAIN";
+      layerRole = getComponentDefinition(designDocument, node.componentId)?.componentSetId ? "VARIANT" : "MAIN";
     } else if (isComponentInstanceRoot(node)) {
       layerRole = "INSTANCE";
     } else if (isComponentInstanceMember(node) && componentNodeHasOverride(page, node)) {
@@ -2364,22 +2413,56 @@ function renderAssets() {
   if (!elements.componentsList || !elements.emptyComponents) return;
   const query = (elements.assetsSearch?.value ?? "").trim().toLowerCase();
   const allComponents = designDocument.components ?? [];
-  const components = allComponents.filter((component) => component.name.toLowerCase().includes(query));
+  const matchingSetIds = new Set((designDocument.componentSets ?? [])
+    .filter((componentSet) => componentSet.name.toLowerCase().includes(query))
+    .map((componentSet) => componentSet.id));
+  const components = allComponents.filter((component) =>
+    component.name.toLowerCase().includes(query) || matchingSetIds.has(component.componentSetId));
   elements.emptyComponents.hidden = allComponents.length > 0;
+  const selectedComponents = selectedMainComponentIds();
+  elements.createVariantSetButton.disabled = selectedComponents.length < 2 ||
+    selectedComponents.some((componentId) => getComponentDefinition(designDocument, componentId)?.componentSetId);
+  elements.createVariantSetButton.title = elements.createVariantSetButton.disabled
+    ? "Select at least two main components that are not already in a variant set"
+    : "Combine selected main components into one local variant set";
   if (!components.length) {
     elements.componentsList.innerHTML = allComponents.length
       ? '<p class="assets-empty-result">No local components match that search.</p>'
       : "";
     return;
   }
+  const visibleIds = new Set(components.map((component) => component.id));
+  const renderedSetIds = new Set();
   elements.componentsList.innerHTML = components.map((component) => {
-    const count = getComponentInstanceCount(designDocument, component.id);
-    return `<button class="component-card" data-component-action="insert" data-component-id="${escapeAttribute(component.id)}" title="Insert ${escapeAttribute(component.name)}">
-      <span class="component-card-preview">${componentIcon()}</span>
-      <span class="component-card-copy"><strong>${escapeHTML(component.name)}</strong><small>${count} instance${count === 1 ? "" : "s"}</small></span>
-      <span class="component-card-add">+</span>
-    </button>`;
+    const componentSet = getComponentSet(designDocument, component.componentSetId);
+    if (!componentSet) return componentAssetCard(component);
+    if (renderedSetIds.has(componentSet.id)) return "";
+    renderedSetIds.add(componentSet.id);
+    const members = getComponentSetComponents(designDocument, componentSet.id)
+      .filter((member) => visibleIds.has(member.id));
+    return `<section class="component-set-card">
+      <div class="component-set-heading">
+        <span>${variantSetIcon()}<strong>${escapeHTML(componentSet.name)}</strong></span>
+        <small>${members.length} variant${members.length === 1 ? "" : "s"}</small>
+      </div>
+      <div class="component-set-members">${members.map(componentAssetCard).join("")}</div>
+    </section>`;
   }).join("");
+}
+
+function componentAssetCard(component) {
+  const count = getComponentInstanceCount(designDocument, component.id);
+  const variant = Object.values(component.variantProperties ?? {}).join(" · ");
+  return `<div class="component-card ${component.componentSetId ? "component-card-variant" : ""}">
+    <button class="component-card-main" data-component-action="insert" data-component-id="${escapeAttribute(component.id)}" title="Insert ${escapeAttribute(component.name)}">
+      <span class="component-card-preview">${componentIcon()}</span>
+      <span class="component-card-copy"><strong>${escapeHTML(variant || component.name)}</strong><small>${count} instance${count === 1 ? "" : "s"}</small></span>
+      <span class="component-card-add">+</span>
+    </button>
+    <button class="component-card-reveal" data-component-action="reveal" data-component-id="${escapeAttribute(component.id)}" title="Reveal main component" aria-label="Reveal ${escapeAttribute(component.name)} main component">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3" /><path d="M10 2v3M10 15v3M2 10h3M15 10h3" /></svg>
+    </button>
+  </div>`;
 }
 
 function createComponentFromSelection() {
@@ -2394,6 +2477,23 @@ function createComponentFromSelection() {
   collapsedLayerIds.delete(result.source.id);
   commitDocument();
   showToast(`${result.component.name} is now a local component`);
+}
+
+function createVariantSetFromSelection() {
+  const result = createComponentSet(designDocument, selectedMainComponentIds());
+  if (result.error || !result.componentSet) {
+    showToast(result.error ?? "Could not create that variant set.");
+    return;
+  }
+  commitDocument();
+  showToast(`${result.componentSet.name} created with ${result.components.length} variants`);
+}
+
+function selectedMainComponentIds() {
+  return getTopLevelNodeIds(currentPage(), selectedIds)
+    .map((id) => getNode(currentPage(), id))
+    .filter(isMainComponent)
+    .map((node) => node.componentId);
 }
 
 function insertComponentInstance(componentId) {
@@ -2432,6 +2532,49 @@ function revealMainComponent(componentId) {
   collapsedLayerIds.delete(source.node.id);
   refreshUI();
   fitToContent([source.node.id]);
+}
+
+function swapSelectedComponent(componentId) {
+  if (selectedIds.length !== 1) return;
+  const node = getNode(currentPage(), selectedIds[0]);
+  const result = swapComponentInstance(designDocument, currentPage(), node, componentId);
+  if (result.error || !result.root) {
+    showToast(result.error ?? "Could not swap that component instance.");
+    renderInspector();
+    return;
+  }
+  selectedIds = [result.root.id];
+  collapsedLayerIds.delete(result.root.id);
+  commitDocument();
+  const component = getComponentDefinition(designDocument, componentId);
+  const kept = result.transferredOverrides;
+  const dropped = result.droppedOverrides;
+  const overrideSummary = kept || dropped
+    ? ` · ${kept} kept${dropped ? `, ${dropped} removed` : ""}`
+    : "";
+  showToast(`Swapped to ${component?.name ?? "component"}${overrideSummary}`);
+}
+
+function changeSelectedComponentVariant(propertyName, value) {
+  if (selectedIds.length !== 1) return;
+  const node = getNode(currentPage(), selectedIds[0]);
+  const result = selectComponentVariant(
+    designDocument,
+    currentPage(),
+    node,
+    propertyName,
+    value,
+  );
+  if (result.error || !result.root || !result.component) {
+    showToast(result.error ?? "Could not switch that variant.");
+    renderInspector();
+    return;
+  }
+  selectedIds = [result.root.id];
+  collapsedLayerIds.delete(result.root.id);
+  commitDocument();
+  const removed = result.droppedOverrides ? ` · ${result.droppedOverrides} incompatible override${result.droppedOverrides === 1 ? "" : "s"} removed` : "";
+  showToast(`${propertyName} changed to ${value}${removed}`);
 }
 
 function componentNodeHasOverride(page, node) {
@@ -2480,6 +2623,11 @@ function renderInspector() {
   }
 
   if (selectedIds.length > 1) {
+    const selectedRoots = getTopLevelNodeIds(currentPage(), selectedIds);
+    const variantCandidates = selectedMainComponentIds();
+    const canCreateVariants = variantCandidates.length >= 2 &&
+      variantCandidates.length === selectedRoots.length &&
+      variantCandidates.every((componentId) => !getComponentDefinition(designDocument, componentId)?.componentSetId);
     elements.inspector.innerHTML = `
       <div class="selection-summary">
         <span class="selection-summary-icon">${nodeIcon("multiple")}</span>
@@ -2492,6 +2640,11 @@ function renderInspector() {
           <button class="button button-quiet" data-multi-action="duplicate">Duplicate selection</button>
         </div>
       </div>
+      ${canCreateVariants ? `<div class="inspector-section component-inspector">
+        <p class="inspector-section-title">${variantSetIcon()} Component variants</p>
+        <button class="button button-primary" data-multi-action="create-variants" style="width: 100%">Combine as variant set</button>
+        <p class="inspector-hint">Names like “Button / State=Hover, Size=Large” create matching variant controls automatically.</p>
+      </div>` : ""}
       <div class="inspector-section">
         <p class="inspector-section-title">Auto Layout</p>
         <div class="icon-toggle-row">
@@ -2510,6 +2663,7 @@ function renderInspector() {
       </div>`;
     elements.inspector.querySelector("[data-multi-action='group']")?.addEventListener("click", groupSelection);
     elements.inspector.querySelector("[data-multi-action='duplicate']")?.addEventListener("click", duplicateSelection);
+    elements.inspector.querySelector("[data-multi-action='create-variants']")?.addEventListener("click", createVariantSetFromSelection);
     elements.inspector.querySelectorAll("[data-multi-action='auto-layout']").forEach((button) => {
       button.addEventListener("click", () => autoLayoutSelection(button.dataset.mode));
     });
@@ -2597,11 +2751,17 @@ function renderInspector() {
 function componentInspector(node) {
   const component = node?.componentId ? getComponentDefinition(designDocument, node.componentId) : null;
   if (!component) return "";
+  const componentSet = getComponentSet(designDocument, component.componentSetId);
+  const variantLabel = Object.entries(component.variantProperties ?? {})
+    .map(([name, value]) => `${name}=${value}`)
+    .join(" · ");
   if (isMainComponent(node)) {
     const count = getComponentInstanceCount(designDocument, component.id);
     return `<section class="inspector-section component-inspector">
-      <p class="inspector-section-title">${componentIcon()} Main component</p>
-      <div class="component-inspector-summary"><strong>${escapeHTML(component.name)}</strong><span>${count} linked instance${count === 1 ? "" : "s"}</span></div>
+      <p class="inspector-section-title">${componentSet ? variantSetIcon() : componentIcon()} ${componentSet ? "Variant component" : "Main component"}</p>
+      <div class="component-inspector-summary"><strong>${escapeHTML(componentSet?.name ?? component.name)}</strong><span>${count} linked instance${count === 1 ? "" : "s"}</span></div>
+      ${componentSet ? `<div class="component-variant-summary"><span>${escapeHTML(component.name)}</span><small>${escapeHTML(variantLabel)}</small></div>
+        <button class="button button-quiet" data-inspector-action="dissolve-component-set" style="width: 100%; margin-top: 8px">Dissolve variant set</button>` : ""}
       <p class="inspector-hint">Changes to this source update every linked instance.</p>
     </section>`;
   }
@@ -2614,10 +2774,27 @@ function componentInspector(node) {
   }
   const root = getComponentInstanceRoot(currentPage(), node);
   if (!root) return "";
-  const overridden = hasComponentOverrides(currentPage(), root);
+  const overrides = getComponentOverrideEntries(designDocument, currentPage(), root);
+  const overridden = overrides.length > 0;
+  const variantControls = getComponentVariantControls(designDocument, component.id);
+  const componentOptions = (designDocument.components ?? []).map((item) =>
+    `<option value="${escapeAttribute(item.id)}" ${item.id === component.id ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("");
   return `<section class="inspector-section component-inspector">
-    <p class="inspector-section-title">${componentIcon()} ${root.id === node.id ? "Instance" : "Instance layer"}</p>
-    <div class="component-inspector-summary"><strong>${escapeHTML(component.name)}</strong><span>${componentNodeHasOverride(currentPage(), node) ? "Local override" : "Linked to main"}</span></div>
+    <p class="inspector-section-title">${componentSet ? variantSetIcon() : componentIcon()} ${root.id === node.id ? "Instance" : "Instance layer"}</p>
+    <div class="component-inspector-summary"><strong>${escapeHTML(componentSet?.name ?? component.name)}</strong><span>${overridden ? `${overrides.length} local override${overrides.length === 1 ? "" : "s"}` : "Linked to main"}</span></div>
+    ${variantControls.length ? `<div class="component-variant-controls">
+      ${variantControls.map((control) => `<label class="component-variant-field"><span>${escapeHTML(control.propertyName)}</span><select data-component-variant data-variant-property="${escapeAttribute(control.propertyName)}" aria-label="${escapeAttribute(control.propertyName)} variant">
+        ${control.options.map((option) => `<option value="${escapeAttribute(option.value)}" ${option.value === control.value ? "selected" : ""}>${escapeHTML(option.value)}</option>`).join("")}
+      </select></label>`).join("")}
+    </div>` : ""}
+    <label class="field component-swap-field" style="margin-top: 8px"><span class="field-label">Swap</span><select data-component-swap aria-label="Swap component" ${designDocument.components.length < 2 ? "disabled" : ""}>${componentOptions}</select></label>
+    ${overridden ? `<div class="component-overrides">
+      <div class="component-overrides-heading"><span>Overrides</span><small>${overrides.length}</small></div>
+      ${overrides.map((entry) => `<div class="component-override-row">
+        <span class="component-override-copy"><strong title="${escapeAttribute(entry.nodeName)}">${escapeHTML(entry.nodeName)}</strong><small title="${escapeAttribute(formatComponentOverrideValue(entry.value))}">${escapeHTML(componentPropertyLabel(entry.property))} · ${escapeHTML(formatComponentOverrideValue(entry.value))}</small></span>
+        <button class="component-override-reset" data-inspector-action="reset-component-override" data-source-node-id="${escapeAttribute(entry.sourceNodeId)}" data-component-property="${escapeAttribute(entry.property)}" title="Reset ${escapeAttribute(componentPropertyLabel(entry.property))} override" aria-label="Reset ${escapeAttribute(componentPropertyLabel(entry.property))} override on ${escapeAttribute(entry.nodeName)}">↶</button>
+      </div>`).join("")}
+    </div>` : ""}
     <div class="field-grid one-column" style="margin-top: 8px">
       ${root.id === node.id ? "" : '<button class="button button-quiet" data-inspector-action="select-component-instance">Select instance</button>'}
       <button class="button button-quiet" data-inspector-action="reveal-main-component">Go to main component</button>
@@ -2626,6 +2803,43 @@ function componentInspector(node) {
     </div>
     <p class="inspector-hint">Visual and content edits become local overrides. Geometry stays linked until you detach.</p>
   </section>`;
+}
+
+function componentPropertyLabel(property) {
+  const labels = {
+    altText: "Alt text",
+    fillType: "Fill mode",
+    fontFamily: "Font family",
+    fontSize: "Font size",
+    fontWeight: "Font weight",
+    imageData: "Image",
+    imageFit: "Image fit",
+    layoutGap: "Layout gap",
+    layoutMode: "Layout mode",
+    lineHeight: "Line height",
+    primaryAxisAlign: "Primary alignment",
+    counterAxisAlign: "Counter alignment",
+    strokeWidth: "Stroke width",
+    textAlign: "Text alignment",
+    vectorClosed: "Path closure",
+    vectorFillRule: "Fill rule",
+    vectorPoints: "Vector geometry",
+  };
+  return labels[property] ?? capitalize(String(property).replace(/([a-z])([A-Z])/g, "$1 $2"));
+}
+
+function formatComponentOverrideValue(value) {
+  if (value === null || value === undefined) return "None";
+  if (typeof value === "boolean") return value ? "On" : "Off";
+  if (typeof value === "number") return String(formatNumber(value));
+  if (typeof value === "string") {
+    if (value.startsWith("data:image/")) return "Embedded image";
+    return value.length > 34 ? `${value.slice(0, 31)}…` : value || "Empty";
+  }
+  if (Array.isArray(value)) return `${value.length} point${value.length === 1 ? "" : "s"}`;
+  if (value?.stops) return "Gradient";
+  if (Object.prototype.hasOwnProperty.call(value, "blur")) return "Shadow";
+  return "Custom value";
 }
 
 function autoLayoutInspector(frame) {
@@ -3398,6 +3612,10 @@ function nodeIcon(type) {
 
 function componentIcon() {
   return '<svg class="component-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m10 2.8 3 4.2 4.2 3-4.2 3-3 4.2-3-4.2-4.2-3 4.2-3 3-4.2Z" /></svg>';
+}
+
+function variantSetIcon() {
+  return '<svg class="component-icon variant-set-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m7 2.8 3 4.2-3 4.2L4 7l3-4.2Zm6 6 3 4.2-3 4.2-3-4.2 3-4.2Z" /></svg>';
 }
 
 function componentLayerIcon(node) {

@@ -2,6 +2,7 @@ import {
   COMPONENT_ROLES,
   clearComponentMetadata,
   getAncestors,
+  getChildNodes,
   getNode,
   getNodesWithDescendants,
   getPage,
@@ -48,6 +49,33 @@ export function getComponentDefinition(document, componentId) {
   return document?.components?.find((component) => component.id === componentId) ?? null;
 }
 
+export function getComponentSet(document, componentSetId) {
+  return document?.componentSets?.find((componentSet) => componentSet.id === componentSetId) ?? null;
+}
+
+export function getComponentSetComponents(document, componentSetId) {
+  return (document?.components ?? []).filter((component) => component.componentSetId === componentSetId);
+}
+
+export function getComponentVariantControls(document, componentId) {
+  const component = getComponentDefinition(document, componentId);
+  const componentSet = component ? getComponentSet(document, component.componentSetId) : null;
+  if (!component || !componentSet) return [];
+  const members = getComponentSetComponents(document, componentSet.id);
+  return componentSet.propertyNames.map((propertyName) => {
+    const candidates = members.filter((candidate) => componentSet.propertyNames.every((name) =>
+      name === propertyName || candidate.variantProperties[name] === component.variantProperties[name]));
+    return {
+      propertyName,
+      value: component.variantProperties[propertyName],
+      options: candidates.map((candidate) => ({
+        value: candidate.variantProperties[propertyName],
+        componentId: candidate.id,
+      })),
+    };
+  });
+}
+
 export function getComponentSource(document, componentId) {
   const component = getComponentDefinition(document, componentId);
   if (!component) return null;
@@ -86,6 +114,42 @@ export function hasComponentOverrides(page, target) {
     properties && Object.keys(properties).length));
 }
 
+export function getComponentOverrideEntries(document, page, target) {
+  const root = getComponentInstanceRoot(page, target);
+  const source = root ? getComponentSource(document, root.componentId) : null;
+  if (!root || !source) return [];
+
+  const instanceBySourceId = new Map(getNodesWithDescendants(page, [root.id])
+    .filter((node) => node.componentSourceId)
+    .map((node) => [node.componentSourceId, node]));
+  const sourceNodes = getNodesWithDescendants(source.page, [source.node.id]);
+  const sourceOrder = new Map(sourceNodes.map((node, index) => [node.id, index]));
+  const entries = [];
+
+  for (const [sourceNodeId, properties] of Object.entries(root.componentOverrides ?? {})) {
+    const sourceNode = getNode(source.page, sourceNodeId);
+    if (!sourceNode || !properties || typeof properties !== "object") continue;
+    const instanceNode = instanceBySourceId.get(sourceNodeId) ?? null;
+    const normalizedSource = normalizeNode(cloneValue(sourceNode));
+    for (const [property, value] of Object.entries(properties)) {
+      if (!isComponentOverrideProperty(property)) continue;
+      entries.push({
+        sourceNodeId,
+        nodeId: instanceNode?.id ?? null,
+        nodeName: sourceNode.name || instanceNode?.name || "Layer",
+        property,
+        value: cloneValue(value),
+        sourceValue: cloneValue(normalizedSource[property]),
+      });
+    }
+  }
+
+  return entries.sort((left, right) =>
+    (sourceOrder.get(left.sourceNodeId) ?? Number.MAX_SAFE_INTEGER) -
+      (sourceOrder.get(right.sourceNodeId) ?? Number.MAX_SAFE_INTEGER) ||
+    left.property.localeCompare(right.property));
+}
+
 export function createComponent(document, pageId, ids) {
   const page = getPage(document, pageId);
   if (!page) return { component: null, source: null, error: "Choose a page before creating a component." };
@@ -114,6 +178,8 @@ export function createComponent(document, pageId, ids) {
     name: source.name || "Component",
     sourcePageId: page.id,
     sourceNodeId: source.id,
+    componentSetId: null,
+    variantProperties: {},
     createdAt: now,
     updatedAt: now,
   };
@@ -122,6 +188,57 @@ export function createComponent(document, pageId, ids) {
   tagSourceBranch(page, source, component.id);
   sortNodesByHierarchy(page);
   return { component, source, error: null };
+}
+
+export function createComponentSet(document, componentIds, options = {}) {
+  const components = [...new Set(componentIds ?? [])]
+    .map((id) => getComponentDefinition(document, id))
+    .filter(Boolean);
+  if (components.length < 2) {
+    return { componentSet: null, components: [], error: "Select at least two main components." };
+  }
+  if (components.some((component) => component.componentSetId)) {
+    return {
+      componentSet: null,
+      components: [],
+      error: "One or more selected components already belong to a variant set.",
+    };
+  }
+
+  const inferred = inferVariantDefinition(components);
+  const now = new Date().toISOString();
+  const componentSet = {
+    id: makeId("component-set"),
+    name: cleanVariantLabel(options.name, inferred.name, 120),
+    propertyNames: inferred.propertyNames,
+    createdAt: now,
+    updatedAt: now,
+  };
+  document.componentSets ??= [];
+  document.componentSets.push(componentSet);
+  for (const [index, component] of components.entries()) {
+    component.componentSetId = componentSet.id;
+    component.variantProperties = inferred.variants[index];
+    component.updatedAt = now;
+  }
+  repairComponentMetadata(document);
+  return {
+    componentSet: getComponentSet(document, componentSet.id),
+    components: getComponentSetComponents(document, componentSet.id),
+    error: null,
+  };
+}
+
+export function dissolveComponentSet(document, componentSetId) {
+  const componentSet = getComponentSet(document, componentSetId);
+  if (!componentSet) return [];
+  const members = getComponentSetComponents(document, componentSetId);
+  for (const component of members) {
+    component.componentSetId = null;
+    component.variantProperties = {};
+  }
+  document.componentSets = document.componentSets.filter((item) => item.id !== componentSetId);
+  return members;
 }
 
 export function createComponentInstance(document, componentId, pageId, position = {}) {
@@ -208,6 +325,132 @@ export function resetComponentOverrides(document, page, target) {
   root.componentOverrides = {};
   syncDocumentComponents(document);
   return getNode(page, root.id);
+}
+
+export function resetComponentOverride(document, page, target, sourceNodeId, property) {
+  const root = getComponentInstanceRoot(page, target);
+  if (!root || !isComponentOverrideProperty(property) ||
+      !Object.prototype.hasOwnProperty.call(root.componentOverrides?.[sourceNodeId] ?? {}, property)) {
+    return null;
+  }
+  const rootId = root.id;
+  const overrides = cloneValue(root.componentOverrides);
+  delete overrides[sourceNodeId][property];
+  if (!Object.keys(overrides[sourceNodeId]).length) delete overrides[sourceNodeId];
+  root.componentOverrides = overrides;
+  syncDocumentComponents(document);
+  return getNode(page, rootId);
+}
+
+export function swapComponentInstance(document, page, target, nextComponentId) {
+  const root = getComponentInstanceRoot(page, target);
+  const previousSource = root ? getComponentSource(document, root.componentId) : null;
+  const nextSource = getComponentSource(document, nextComponentId);
+  if (!root || !previousSource || !nextSource) {
+    return {
+      root: null,
+      transferredOverrides: 0,
+      droppedOverrides: 0,
+      error: "That component instance or source is no longer available.",
+    };
+  }
+  if (root.componentId === nextComponentId) {
+    return {
+      root,
+      transferredOverrides: countOverrideProperties(root.componentOverrides),
+      droppedOverrides: 0,
+      error: null,
+    };
+  }
+
+  const previousPaths = buildSemanticPaths(previousSource.page, previousSource.node);
+  const nextPaths = buildSemanticPaths(nextSource.page, nextSource.node);
+  const nextSourceIdByPath = new Map([...nextPaths.entries()].map(([sourceId, path]) => [path, sourceId]));
+  const nextSourceById = new Map(getNodesWithDescendants(nextSource.page, [nextSource.node.id])
+    .map((node) => [node.id, node]));
+  const nextSourceIdByPreviousId = new Map();
+  for (const [previousSourceId, path] of previousPaths) {
+    const nextSourceId = nextSourceIdByPath.get(path);
+    if (nextSourceId) nextSourceIdByPreviousId.set(previousSourceId, nextSourceId);
+  }
+
+  const remappedOverrides = {};
+  let transferredOverrides = 0;
+  let droppedOverrides = 0;
+  for (const [previousSourceId, properties] of Object.entries(root.componentOverrides ?? {})) {
+    const nextSourceId = nextSourceIdByPreviousId.get(previousSourceId);
+    const nextSourceNode = nextSourceById.get(nextSourceId);
+    for (const [property, value] of Object.entries(properties ?? {})) {
+      const nextValue = normalizeOverrideForNode(nextSourceNode, property, value);
+      if (nextValue === undefined) {
+        droppedOverrides += 1;
+        continue;
+      }
+      const sourceValue = normalizeNode(cloneValue(nextSourceNode))[property];
+      if (sameValue(nextValue, sourceValue)) {
+        droppedOverrides += 1;
+        continue;
+      }
+      remappedOverrides[nextSourceId] ??= {};
+      remappedOverrides[nextSourceId][property] = cloneValue(nextValue);
+      transferredOverrides += 1;
+    }
+  }
+
+  for (const node of getNodesWithDescendants(page, [root.id])) {
+    const nextSourceId = nextSourceIdByPreviousId.get(node.componentSourceId);
+    if (!nextSourceId) continue;
+    node.componentId = nextComponentId;
+    node.componentSourceId = nextSourceId;
+  }
+  root.componentId = nextComponentId;
+  root.componentSourceId = nextSource.node.id;
+  root.componentOverrides = remappedOverrides;
+  const materialized = materializeInstance(
+    page,
+    nextSource.page,
+    nextSource.component,
+    nextSource.node,
+    root,
+  );
+  return {
+    root: materialized?.root ?? null,
+    transferredOverrides,
+    droppedOverrides,
+    error: materialized ? null : "Could not swap that component instance.",
+  };
+}
+
+export function selectComponentVariant(document, page, target, propertyName, value) {
+  const root = getComponentInstanceRoot(page, target);
+  const component = root ? getComponentDefinition(document, root.componentId) : null;
+  const componentSet = component ? getComponentSet(document, component.componentSetId) : null;
+  if (!root || !component || !componentSet || !componentSet.propertyNames.includes(propertyName)) {
+    return {
+      root: null,
+      component: null,
+      transferredOverrides: 0,
+      droppedOverrides: 0,
+      error: "That variant control is no longer available.",
+    };
+  }
+  const nextComponent = getComponentSetComponents(document, componentSet.id).find((candidate) =>
+    componentSet.propertyNames.every((name) => candidate.variantProperties[name] === (
+      name === propertyName ? value : component.variantProperties[name]
+    )));
+  if (!nextComponent) {
+    return {
+      root: null,
+      component: null,
+      transferredOverrides: 0,
+      droppedOverrides: 0,
+      error: `No ${propertyName}=${value} variant exists for the current combination.`,
+    };
+  }
+  return {
+    ...swapComponentInstance(document, page, root, nextComponent.id),
+    component: nextComponent,
+  };
 }
 
 export function detachComponentInstance(page, target) {
@@ -312,6 +555,110 @@ function applyOverrides(node, properties) {
   }
 }
 
+function buildSemanticPaths(page, sourceRoot) {
+  const paths = new Map([[sourceRoot.id, JSON.stringify([])]]);
+  const visit = (parent, parentPath) => {
+    const occurrences = new Map();
+    for (const child of getChildNodes(page, parent.id)) {
+      const identity = `${child.type}\u0000${child.name}`;
+      const occurrence = occurrences.get(identity) ?? 0;
+      occurrences.set(identity, occurrence + 1);
+      const path = [...parentPath, [child.type, child.name, occurrence]];
+      paths.set(child.id, JSON.stringify(path));
+      visit(child, path);
+    }
+  };
+  visit(sourceRoot, []);
+  return paths;
+}
+
+function inferVariantDefinition(components) {
+  const splitNames = components.map((component) => {
+    const parts = component.name.split(/\s+\/\s+/);
+    return parts.length > 1
+      ? { prefix: parts.shift().trim(), value: parts.join(" / ").trim() }
+      : { prefix: null, value: component.name.trim() };
+  });
+  const sharedPrefix = splitNames[0].prefix && splitNames.every((item) => item.prefix === splitNames[0].prefix)
+    ? splitNames[0].prefix
+    : null;
+  const labels = splitNames.map((item, index) => item.value || components[index].name || `Variant ${index + 1}`);
+  const parsed = labels.map(parseVariantLabel);
+  const propertyNames = parsed[0]?.propertyNames ?? [];
+  const hasStructuredLabels = propertyNames.length > 0 && parsed.every((item) =>
+    sameValue(item.propertyNames, propertyNames));
+  if (hasStructuredLabels) {
+    return {
+      name: sharedPrefix ?? "Local variants",
+      propertyNames,
+      variants: makeVariantCombinationsUnique(parsed.map((item) => item.properties), propertyNames),
+    };
+  }
+  return {
+    name: sharedPrefix ?? "Local variants",
+    propertyNames: ["Variant"],
+    variants: makeVariantCombinationsUnique(
+      labels.map((label, index) => ({ Variant: cleanVariantLabel(label, `Variant ${index + 1}`, 120) })),
+      ["Variant"],
+    ),
+  };
+}
+
+function parseVariantLabel(label) {
+  const properties = {};
+  const propertyNames = [];
+  for (const token of label.split(/\s*,\s*/)) {
+    const separator = token.indexOf("=");
+    if (separator <= 0) return { propertyNames: [], properties: {} };
+    const propertyName = cleanVariantLabel(token.slice(0, separator), "", 80);
+    const value = cleanVariantLabel(token.slice(separator + 1), "Default", 120);
+    if (!propertyName || propertyNames.some((name) => name.toLowerCase() === propertyName.toLowerCase())) {
+      return { propertyNames: [], properties: {} };
+    }
+    propertyNames.push(propertyName);
+    properties[propertyName] = value;
+  }
+  return { propertyNames, properties };
+}
+
+function makeVariantCombinationsUnique(variants, propertyNames) {
+  const seen = new Set();
+  const lastProperty = propertyNames.at(-1);
+  return variants.map((variant, index) => {
+    const result = cloneValue(variant);
+    const base = result[lastProperty] || `Variant ${index + 1}`;
+    let key = JSON.stringify(propertyNames.map((name) => result[name]));
+    let suffix = 2;
+    while (seen.has(key)) {
+      result[lastProperty] = cleanVariantLabel(`${base} ${suffix}`, `Variant ${index + 1}`, 120);
+      key = JSON.stringify(propertyNames.map((name) => result[name]));
+      suffix += 1;
+    }
+    seen.add(key);
+    return result;
+  });
+}
+
+function cleanVariantLabel(value, fallback, maximumLength) {
+  const normalized = String(value ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim();
+  return (normalized || fallback).slice(0, maximumLength);
+}
+
+function normalizeOverrideForNode(node, property, value) {
+  if (!node || !isComponentOverrideProperty(property)) return undefined;
+  const normalizedSource = normalizeNode(cloneValue(node));
+  if (!Object.prototype.hasOwnProperty.call(normalizedSource, property)) return undefined;
+  const normalized = normalizeNode({ ...cloneValue(node), [property]: cloneValue(value) });
+  return cloneValue(normalized[property]);
+}
+
+function countOverrideProperties(overrides) {
+  return Object.values(overrides ?? {}).reduce(
+    (count, properties) => count + Object.keys(properties ?? {}).length,
+    0,
+  );
+}
+
 function replaceBranch(page, existingBranch, nextNodes, rootId) {
   if (!existingBranch.length) {
     page.nodes.push(...nextNodes);
@@ -345,6 +692,7 @@ function sameValue(left, right) {
 }
 
 function cloneValue(value) {
+  if (value === undefined) return undefined;
   return globalThis.structuredClone
     ? globalThis.structuredClone(value)
     : JSON.parse(JSON.stringify(value));

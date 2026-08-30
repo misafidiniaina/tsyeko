@@ -87,20 +87,29 @@ Avoid introducing every distributed component on day one. PostgreSQL, Redis, obj
 
 ## 5. Document model
 
-The current v9 file format is a versioned, multi-page JSON document with flat storage, explicit parent relationships, responsive-layout metadata, paint definitions, effects, cubic Bézier vector paths, ordered Boolean/mask containers, and local component records. Versions 1–8 migrate automatically. Imports repair dangling parents, reject non-container parents, break cycles, sanitize layout/anchor/control/paint/effect/composite/component values, and restore parent-before-child ordering:
+The current v10 file format is a versioned, multi-page JSON document with flat storage, explicit parent relationships, responsive-layout metadata, paint definitions, effects, cubic Bézier vector paths, ordered Boolean/mask containers, and local component/variant records. Versions 1–9 migrate automatically. Imports repair dangling parents, reject non-container parents, break cycles, sanitize layout/anchor/control/paint/effect/composite/component values, dissolve undersized variant sets, make duplicate variant combinations deterministic, and restore parent-before-child ordering:
 
 ```json
 {
-  "version": 9,
+  "version": 10,
   "id": "document_…",
   "name": "Untitled design",
   "background": "#101114",
+  "componentSets": [
+    {
+      "id": "component-set_…",
+      "name": "Button",
+      "propertyNames": ["State", "Size"]
+    }
+  ],
   "components": [
     {
       "id": "component_…",
       "name": "Button / Primary",
       "sourcePageId": "page_…",
       "sourceNodeId": "frame_…",
+      "componentSetId": "component-set_…",
+      "variantProperties": { "State": "Default", "Size": "Large" },
       "createdAt": "2026-08-30T00:00:00.000Z",
       "updatedAt": "2026-08-30T00:00:00.000Z"
     }
@@ -230,7 +239,11 @@ The current v9 file format is a versioned, multi-page JSON document with flat st
 
 Components reuse the normal scene-node types rather than introducing a separate renderer type. A component record identifies a main source root by page and node ID. Its root is tagged `componentRole: "main"`; descendants are tagged `"source"`. An inserted instance is a concrete cloned subtree with stable local IDs, `componentRole: "instance"` on the root, `"instance-child"` on descendants, and `componentSourceId` links back to source nodes.
 
-The instance root owns a sparse `componentOverrides` map keyed by source-node ID. Supported visual/content properties are sanitized, compared to the source, and applied after source synchronization. Source edits—including adding or removing source descendants—are rebuilt into every instance while the instance root retains its external placement and parent-layout relationship. Reset clears the map; detach strips component metadata while preserving rendered geometry. This provides Canvas, SVG, PNG, hit testing, Auto Layout, history, and persistence compatibility without a parallel scene graph.
+The instance root owns a sparse `componentOverrides` map keyed by source-node ID. Supported visual/content properties are sanitized, compared to the source, exposed as individual Inspector entries, and applied after source synchronization. Source edits—including adding or removing source descendants—are rebuilt into every instance while the instance root retains its external placement and parent-layout relationship. A property can be reset independently or the entire map can be cleared; detach strips component metadata while preserving rendered geometry.
+
+An instance can swap to another local component without changing the document schema. The swap preserves its outer placement and reuses local instance IDs where source layers match by hierarchy, node type, layer name, and same-name sibling occurrence. Compatible overrides are remapped to the destination source IDs; overrides without a semantic destination are discarded and reported to the UI. This provides Canvas, SVG, PNG, hit testing, Auto Layout, history, and persistence compatibility without a parallel scene graph.
+
+A local component set records an ordered list of variant property names; each member component stores one value per property. Combining names such as `Button / Primary` produces a one-dimensional `Variant` set, while names such as `Button / State=Hover, Size=Large` infer a multi-property matrix. Inspector controls expose only values that have a valid component for the current values on every other axis. Switching a variant delegates to semantic instance swapping, so placement and compatible overrides survive. Assets groups members by set, and dissolving the set removes only variant metadata.
 
 ### 5.2 Composite node semantics
 
@@ -268,7 +281,7 @@ Production evolution:
 - Extend vectors with editable compound contours, destructive flattening, and precision offset/outline geometry
 - Add multiple paint stacks, radial/angular gradients, and blur effects
 - Add rich-text ranges and font references
-- Add component properties, variants, nested composition, and library publication
+- Add typed component properties, nested composition, richer variant authoring, and library publication
 - Extend Auto Layout with wrapping, min/max dimensions, baseline alignment, and intrinsic text measurement
 - Add prototype edges separately from visual nodes
 - Add explicit schema migrations for every document version
@@ -439,7 +452,7 @@ Every mutation is authorized server-side. Client UI permissions are convenience,
 
 ## 12. Auto layout and constraints
 
-The v9 client implements layout as a deterministic function of document properties. A frame with horizontal or vertical Auto Layout flows its visible direct children in sibling order; hidden and absolute children are excluded. The implemented contract includes:
+The v10 client implements layout as a deterministic function of document properties. A frame with horizontal or vertical Auto Layout flows its visible direct children in sibling order; hidden and absolute children are excluded. The implemented contract includes:
 
 - Independent top, right, bottom, and left padding
 - Fixed gaps or primary-axis space-between distribution
@@ -464,14 +477,15 @@ The implemented local component slice includes:
 - Source and instance metadata on ordinary scene nodes, with stable source-node identity
 - Linked instance synchronization across pages and document persistence
 - Sparse, sanitized visual/content override maps
-- Reset and detach workflows
-- Assets-panel insertion, Layers labels, inspector navigation, and transform/structural-edit guards
+- Per-property and full reset, semantic instance swapping, and detach workflows
+- Local one- or multi-property variant sets with inferred controls, valid-combination switching, grouped Assets display, and dissolution
+- Assets-panel insertion/source navigation, Layers labels, inspector navigation, and transform/structural-edit guards
 
-The current scope deliberately excludes nested component composition, variants, component properties, swappable instances, published libraries, and remote library updates. Main-source geometry and structure remain authoritative; instances preserve only their outer placement/layout relationship until detached.
+The current scope deliberately excludes nested component composition, typed component properties, custom variant-axis editing, published libraries, and remote library updates. Main-source geometry and structure remain authoritative; instances preserve only their outer placement/layout relationship until detached.
 
 Production design systems still need:
 
-- Component properties and variants
+- Typed component properties and richer variant authoring
 - Published library versions and deliberate upgrades
 - Variables with types, collections, modes, aliases, and scopes
 - Remote dependencies, permissions, and immutable publication history
@@ -558,7 +572,7 @@ Every document schema change needs forward-migration tests and fixtures from old
 ### Milestone 0 — implemented foundation
 
 - Canvas editor and basic nodes
-- Multi-page documents, page operations, and v1–v8 schema migration into v9
+- Multi-page documents, page operations, and v1–v9 schema migration into v10
 - Hierarchical frames and groups with recursive editing and cycle-safe imports
 - Nested layers, frame clipping, and inherited visibility, locking, and opacity
 - Linear-gradient fills and explicit drop-shadow effects with Canvas/SVG parity
@@ -568,7 +582,7 @@ Every document schema change needs forward-migration tests and fixtures from old
 - Composite creation, operation switching, source-order labels, release workflows, keyboard commands, persistence, and browser pixel tests
 - Horizontal/vertical Auto Layout, Shift+A wrapping, padding, gaps, alignment, fixed/hug/fill sizing, absolute children, and Layers feedback
 - Responsive frame constraints with nested evaluation, resize snapshots, undo/redo, persistence, and Canvas/SVG geometry parity
-- Local components with source records, linked instances, visual/content overrides, reset, detach, Assets insertion, and v9 persistence
+- Local components with source records, linked instances, visible/property-level overrides, semantic swapping, local variant matrices, reset, detach, Assets insertion/navigation, and v10 persistence
 - Per-page canvas appearance and view state
 - Embedded raster image layers with cover/contain fitting
 - IndexedDB persistence and compact localStorage recovery copies
@@ -602,7 +616,7 @@ Exit criterion: a team can safely co-edit a file and recover from disconnects or
 
 ### Milestone 3 — professional design systems
 
-- Component properties, variants, nested composition, and remote library dependencies
+- Typed component properties, advanced variant authoring, nested composition, and remote library dependencies
 - Variables, modes, and published libraries
 - Developer inspection and asset download
 

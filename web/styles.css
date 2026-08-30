@@ -561,21 +561,124 @@ svg {
   width: 100%;
   min-height: 52px;
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr) 20px;
+  grid-template-columns: minmax(0, 1fr) 28px;
   align-items: center;
-  gap: 8px;
-  padding: 7px 8px;
+  gap: 2px;
+  padding: 3px;
   border: 1px solid var(--border-soft);
   border-radius: 6px;
   background: #202020;
   color: var(--text);
-  text-align: left;
-  cursor: pointer;
 }
 
 .component-card:hover {
   border-color: var(--accent);
   background: var(--accent-soft);
+}
+
+.component-set-card {
+  display: grid;
+  gap: 4px;
+  padding: 5px;
+  border: 1px solid rgba(167, 139, 250, 0.32);
+  border-radius: 7px;
+  background: rgba(124, 58, 237, 0.07);
+}
+
+.component-set-heading,
+.component-set-heading > span {
+  display: flex;
+  align-items: center;
+}
+
+.component-set-heading {
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 4px 5px;
+}
+
+.component-set-heading > span {
+  min-width: 0;
+  gap: 5px;
+}
+
+.component-set-heading strong {
+  overflow: hidden;
+  color: var(--accent-bright);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.component-set-heading small {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.component-set-members {
+  display: grid;
+  gap: 3px;
+}
+
+.component-card-variant {
+  min-height: 46px;
+  border-color: transparent;
+  background: rgba(20, 20, 20, 0.62);
+}
+
+.component-card-variant .component-card-main {
+  min-height: 38px;
+}
+
+.component-card-main {
+  min-width: 0;
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 20px;
+  align-items: center;
+  gap: 8px;
+  padding: 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.component-card-main:hover {
+  background: rgba(139, 92, 246, 0.12);
+}
+
+.component-card-reveal,
+.component-override-reset {
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.component-card-reveal {
+  width: 26px;
+  height: 30px;
+}
+
+.component-card-reveal:hover,
+.component-override-reset:hover {
+  color: var(--accent-bright);
+  background: rgba(139, 92, 246, 0.18);
+}
+
+.component-card-reveal svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
 }
 
 .component-card-preview {
@@ -640,6 +743,10 @@ svg {
 .assets-actions .button {
   min-width: 0;
   padding: 0 8px;
+}
+
+#createVariantSetButton {
+  grid-column: 1 / -1;
 }
 
 .workspace {
@@ -839,6 +946,146 @@ svg {
   flex: 0 0 auto;
   color: var(--text-faint);
   font-size: 10px;
+}
+
+.component-variant-summary {
+  display: grid;
+  gap: 2px;
+  margin-top: 7px;
+  padding: 7px;
+  border-radius: 5px;
+  background: rgba(139, 92, 246, 0.09);
+}
+
+.component-variant-summary span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.component-variant-summary small {
+  color: var(--accent-bright);
+  font-size: 9px;
+}
+
+.component-variant-controls {
+  display: grid;
+  gap: 5px;
+  margin-top: 9px;
+  padding: 7px;
+  border: 1px solid rgba(167, 139, 250, 0.25);
+  border-radius: 6px;
+  background: rgba(139, 92, 246, 0.06);
+}
+
+.component-variant-field {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+}
+
+.component-variant-field span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.component-variant-field select {
+  min-width: 0;
+  width: 100%;
+  height: 27px;
+  padding: 0 7px;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  outline: 0;
+  background: #1d1d1d;
+  color: var(--text);
+}
+
+.component-variant-field select:focus {
+  border-color: var(--accent);
+}
+
+.component-swap-field {
+  grid-template-columns: 42px minmax(0, 1fr);
+}
+
+.component-swap-field .field-label {
+  width: auto;
+}
+
+.component-overrides {
+  display: grid;
+  gap: 3px;
+  margin-top: 10px;
+  padding: 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.component-overrides-heading,
+.component-override-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.component-overrides-heading {
+  padding: 1px 3px 4px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.component-overrides-heading small {
+  color: var(--accent-bright);
+}
+
+.component-override-row {
+  min-width: 0;
+  min-height: 34px;
+  padding: 3px 3px 3px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.component-override-copy {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.component-override-copy strong,
+.component-override-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.component-override-copy strong {
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.component-override-copy small {
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.component-override-reset {
+  flex: 0 0 auto;
+  width: 25px;
+  height: 25px;
+  font-size: 15px;
 }
 
 .inspector-section-title button {
