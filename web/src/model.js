@@ -1,5 +1,22 @@
-export const DOCUMENT_VERSION = 3;
+export const DOCUMENT_VERSION = 4;
 const MAX_HIERARCHY_DEPTH = 256;
+
+const DEFAULT_SHADOW = Object.freeze({
+  enabled: false,
+  color: "#000000",
+  opacity: 0.24,
+  offsetX: 0,
+  offsetY: 8,
+  blur: 24,
+});
+
+const DEFAULT_FRAME_SHADOW = Object.freeze({
+  ...DEFAULT_SHADOW,
+  enabled: true,
+  opacity: 0.28,
+  offsetY: 7,
+  blur: 16,
+});
 
 export const NODE_TYPES = Object.freeze({
   FRAME: "frame",
@@ -19,6 +36,7 @@ const DEFAULTS = Object.freeze({
     stroke: "transparent",
     strokeWidth: 0,
     cornerRadius: 0,
+    shadow: DEFAULT_SHADOW,
   },
   frame: {
     name: "Frame",
@@ -28,6 +46,7 @@ const DEFAULTS = Object.freeze({
     stroke: "#d8d8de",
     strokeWidth: 1,
     cornerRadius: 0,
+    shadow: DEFAULT_FRAME_SHADOW,
   },
   rectangle: {
     name: "Rectangle",
@@ -37,6 +56,7 @@ const DEFAULTS = Object.freeze({
     stroke: "#000000",
     strokeWidth: 0,
     cornerRadius: 12,
+    shadow: DEFAULT_SHADOW,
   },
   ellipse: {
     name: "Ellipse",
@@ -46,6 +66,7 @@ const DEFAULTS = Object.freeze({
     stroke: "#000000",
     strokeWidth: 0,
     cornerRadius: 0,
+    shadow: DEFAULT_SHADOW,
   },
   text: {
     name: "Text",
@@ -61,6 +82,7 @@ const DEFAULTS = Object.freeze({
     fontWeight: 600,
     lineHeight: 1.2,
     textAlign: "left",
+    shadow: DEFAULT_SHADOW,
   },
   image: {
     name: "Image",
@@ -73,6 +95,7 @@ const DEFAULTS = Object.freeze({
     imageData: "",
     imageFit: "cover",
     altText: "",
+    shadow: DEFAULT_SHADOW,
   },
 });
 
@@ -163,6 +186,14 @@ export function createStarterDocument() {
       strokeWidth: 2,
       cornerRadius: 24,
       rotation: -5,
+      shadow: {
+        enabled: true,
+        color: "#24153d",
+        opacity: 0.3,
+        offsetX: 0,
+        offsetY: 18,
+        blur: 32,
+      },
     }),
     createNode(NODE_TYPES.RECTANGLE, 132, -147, {
       name: "Preview panel",
@@ -171,6 +202,14 @@ export function createStarterDocument() {
       fill: "#8b5cf6",
       cornerRadius: 15,
       rotation: -5,
+      fillType: "linear-gradient",
+      gradient: {
+        angle: 135,
+        stops: [
+          { position: 0, color: "#a78bfa" },
+          { position: 1, color: "#6366f1" },
+        ],
+      },
     }),
     createNode(NODE_TYPES.TEXT, -342, -190, {
       name: "Eyebrow",
@@ -208,6 +247,14 @@ export function createStarterDocument() {
       height: 48,
       fill: "#7c3aed",
       cornerRadius: 12,
+      fillType: "linear-gradient",
+      gradient: {
+        angle: 0,
+        stops: [
+          { position: 0, color: "#7c3aed" },
+          { position: 1, color: "#a855f7" },
+        ],
+      },
     }),
     createNode(NODE_TYPES.TEXT, -315, 144, {
       name: "Button label",
@@ -285,6 +332,9 @@ export function normalizeNode(input) {
     strokeWidth: finiteNumber(input.strokeWidth, defaults.strokeWidth, 0, 200),
     cornerRadius: finiteNumber(input.cornerRadius, defaults.cornerRadius, 0, 50_000),
   };
+  node.fillType = input.fillType === "linear-gradient" ? "linear-gradient" : "solid";
+  node.gradient = normalizeGradient(input.gradient, node.fill);
+  node.shadow = normalizeShadow(input.shadow, defaults.shadow ?? DEFAULT_SHADOW);
 
   if (node.type === NODE_TYPES.TEXT) {
     node.text = cleanString(input.text, defaults.text, 20_000, true);
@@ -472,6 +522,21 @@ export function getNodeAABB(node) {
   };
 }
 
+export function getNodeVisualBounds(node) {
+  const bounds = getNodeAABB(node);
+  if (!node.shadow?.enabled || node.shadow.opacity <= 0) return bounds;
+  const extent = node.shadow.blur * 2;
+  const shadowLeft = bounds.x + node.shadow.offsetX - extent;
+  const shadowTop = bounds.y + node.shadow.offsetY - extent;
+  const shadowRight = bounds.x + bounds.width + node.shadow.offsetX + extent;
+  const shadowBottom = bounds.y + bounds.height + node.shadow.offsetY + extent;
+  const minX = Math.min(bounds.x, shadowLeft);
+  const minY = Math.min(bounds.y, shadowTop);
+  const maxX = Math.max(bounds.x + bounds.width, shadowRight);
+  const maxY = Math.max(bounds.y + bounds.height, shadowBottom);
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
 export function getDocumentBounds(document, ids = null) {
   const idSet = ids ? new Set(getNodesWithDescendants(document, ids).map((node) => node.id)) : null;
   const nodes = document.nodes.filter(
@@ -479,7 +544,7 @@ export function getDocumentBounds(document, ids = null) {
   );
   if (!nodes.length) return { x: -160, y: -100, width: 320, height: 200 };
 
-  const bounds = nodes.map(getNodeAABB);
+  const bounds = nodes.map(getNodeVisualBounds);
   const minX = Math.min(...bounds.map((box) => box.x));
   const minY = Math.min(...bounds.map((box) => box.y));
   const maxX = Math.max(...bounds.map((box) => box.x + box.width));
@@ -689,6 +754,41 @@ function combinedBounds(bounds) {
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
+function normalizeGradient(input, fallbackColor) {
+  const source = input && typeof input === "object" ? input : {};
+  const fallbackStops = [
+    { position: 0, color: fallbackColor },
+    { position: 1, color: "#ec4899" },
+  ];
+  let stops = Array.isArray(source.stops)
+    ? source.stops
+        .filter((stop) => stop && typeof stop === "object")
+        .slice(0, 8)
+        .map((stop, index) => ({
+          position: finiteNumber(stop.position, index, 0, 1),
+          color: cleanColor(stop.color, fallbackStops[Math.min(index, 1)]?.color ?? fallbackColor),
+        }))
+    : [];
+  if (stops.length < 2) stops = fallbackStops;
+  stops.sort((a, b) => a.position - b.position);
+  return {
+    angle: normalizeAngle(finiteNumber(source.angle, 0, -36_000, 36_000)),
+    stops,
+  };
+}
+
+function normalizeShadow(input, defaults) {
+  const source = input && typeof input === "object" ? input : {};
+  return {
+    enabled: typeof source.enabled === "boolean" ? source.enabled : defaults.enabled,
+    color: cleanOpaqueColor(source.color, defaults.color),
+    opacity: finiteNumber(source.opacity, defaults.opacity, 0, 1),
+    offsetX: finiteNumber(source.offsetX, defaults.offsetX, -10_000, 10_000),
+    offsetY: finiteNumber(source.offsetY, defaults.offsetY, -10_000, 10_000),
+    blur: finiteNumber(source.blur, defaults.blur, 0, 500),
+  };
+}
+
 function cleanString(value, fallback, maxLength, preserveNewlines = false) {
   if (typeof value !== "string") return fallback;
   const cleaned = preserveNewlines
@@ -704,6 +804,12 @@ function cleanColor(value, fallback) {
   if (/^(rgba?|hsla?)\([\d\s.,%+-]+\)$/i.test(color)) return color;
   if (color === "transparent") return color;
   return fallback;
+}
+
+function cleanOpaqueColor(value, fallback) {
+  if (typeof value !== "string") return fallback;
+  const color = value.trim();
+  return /^#(?:[\da-f]{3}|[\da-f]{6})$/i.test(color) ? color : fallback;
 }
 
 function cleanImageData(value) {
@@ -722,4 +828,8 @@ function finiteNumber(value, fallback, minimum, maximum) {
 function normalizeRotation(degrees) {
   const normalized = ((degrees % 360) + 360) % 360;
   return normalized > 180 ? normalized - 360 : normalized;
+}
+
+function normalizeAngle(degrees) {
+  return ((degrees % 360) + 360) % 360;
 }

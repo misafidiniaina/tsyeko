@@ -2,8 +2,8 @@ const DATABASE_NAME = "tsyaiko-editor";
 const DATABASE_VERSION = 1;
 const STORE_NAME = "workspaces";
 const ACTIVE_WORKSPACE_KEY = "active";
-const STORAGE_KEY = "tsyaiko.workspace.v3";
-const LEGACY_STORAGE_KEYS = ["tsyaiko.workspace.v2", "tsyaiko.workspace.v1"];
+const STORAGE_KEY = "tsyaiko.workspace.v4";
+const LEGACY_STORAGE_KEYS = ["tsyaiko.workspace.v3", "tsyaiko.workspace.v2", "tsyaiko.workspace.v1"];
 const MAX_RECOVERY_COPY_LENGTH = 2_000_000;
 
 let databasePromise = null;

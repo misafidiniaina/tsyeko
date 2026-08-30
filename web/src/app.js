@@ -263,6 +263,54 @@ function bindInspector() {
       return;
     }
 
+    const gradientStopInput = event.target.closest("[data-gradient-stop]");
+    if (gradientStopInput && selectedIds.length === 1) {
+      const node = getNode(currentPage(), selectedIds[0]);
+      if (!node?.gradient?.stops?.length) return;
+      const index = gradientStopInput.dataset.gradientStop === "last"
+        ? node.gradient.stops.length - 1
+        : Number.parseInt(gradientStopInput.dataset.gradientStop, 10);
+      const value = normalizeInspectorColor(gradientStopInput.value);
+      if (!node.gradient.stops[index] || !isRenderableColor(value)) return;
+      node.gradient.stops[index].color = value;
+      liveDocumentChange();
+      return;
+    }
+
+    const gradientInput = event.target.closest("[data-gradient-property]");
+    if (gradientInput && selectedIds.length === 1) {
+      const node = getNode(currentPage(), selectedIds[0]);
+      if (!node?.gradient) return;
+      let value = Number.parseFloat(gradientInput.value);
+      if (!Number.isFinite(value)) return;
+      if (gradientInput.dataset.gradientProperty === "angle") value = ((value % 360) + 360) % 360;
+      node.gradient[gradientInput.dataset.gradientProperty] = value;
+      liveDocumentChange();
+      return;
+    }
+
+    const shadowInput = event.target.closest("[data-shadow-property]");
+    if (shadowInput && selectedIds.length === 1) {
+      const node = getNode(currentPage(), selectedIds[0]);
+      if (!node?.shadow) return;
+      const property = shadowInput.dataset.shadowProperty;
+      let value = shadowInput.value;
+      if (property === "color") {
+        value = normalizeInspectorColor(value);
+        if (!/^#(?:[\da-f]{3}|[\da-f]{6})$/i.test(value)) return;
+      } else {
+        value = Number.parseFloat(value);
+        if (!Number.isFinite(value)) return;
+        value *= Number.parseFloat(shadowInput.dataset.scale || "1");
+        if (property === "opacity") value = clamp(value, 0, 1);
+        if (property === "blur") value = clamp(value, 0, 500);
+        if (["offsetX", "offsetY"].includes(property)) value = clamp(value, -10_000, 10_000);
+      }
+      node.shadow[property] = value;
+      liveDocumentChange();
+      return;
+    }
+
     const input = event.target.closest("[data-property]");
     if (!input || selectedIds.length !== 1) return;
     const node = getNode(currentPage(), selectedIds[0]);
@@ -315,7 +363,7 @@ function bindInspector() {
   });
 
   elements.inspector.addEventListener("change", (event) => {
-    if (event.target.closest("[data-property], [data-page-property]")) commitDocument();
+    if (event.target.closest("[data-property], [data-page-property], [data-gradient-stop], [data-gradient-property], [data-shadow-property]")) commitDocument();
   });
 
   elements.inspector.addEventListener("click", (event) => {
@@ -338,6 +386,8 @@ function bindInspector() {
       return;
     }
     if (action === "align") node.textAlign = button.dataset.value;
+    if (action === "fill-mode") node.fillType = button.dataset.value;
+    if (action === "toggle-shadow") node.shadow.enabled = !node.shadow.enabled;
     if (action === "image-fit") node.imageFit = button.dataset.value;
     if (action === "replace-image") {
       openImagePicker(node.id);
@@ -1456,7 +1506,7 @@ function renderInspector() {
 
     ${node.type !== NODE_TYPES.GROUP ? `<section class="inspector-section">
       <p class="inspector-section-title">Fill</p>
-      ${colorField("fill", node.fill, node.opacity)}
+      ${fillInspector(node)}
     </section>` : `
       <section class="inspector-section">
         <p class="inspector-section-title">Group</p>
@@ -1473,6 +1523,8 @@ function renderInspector() {
           <div class="field"><span class="field-label">W</span><input type="number" data-property="strokeWidth" data-value-type="number" min="0" step="1" value="${formatNumber(node.strokeWidth)}" aria-label="Stroke width" /></div>
         </div>
       </section>` : ""}
+
+    ${node.type !== NODE_TYPES.GROUP ? shadowInspector(node) : ""}
 
     <section class="inspector-section">
       <p class="inspector-section-title">Layer</p>
@@ -1532,6 +1584,55 @@ function colorField(property, color, opacity) {
     <div class="field"><span class="field-label">#</span><input data-property="${property}" value="${escapeAttribute(stripHash(color))}" aria-label="Fill hex color" /></div>
     <div class="field"><span class="field-label">%</span><input type="number" data-property="opacity" data-value-type="number" data-scale="0.01" min="0" max="100" value="${Math.round(opacity * 100)}" aria-label="Opacity" /></div>
   </div>`;
+}
+
+function fillInspector(node) {
+  const isGradient = node.fillType === "linear-gradient";
+  const firstStop = node.gradient.stops[0];
+  const lastStop = node.gradient.stops[node.gradient.stops.length - 1];
+  const previewAngle = (node.gradient.angle + 90) % 360;
+  return `
+    <div class="icon-toggle-row paint-mode-row">
+      <button class="icon-toggle ${isGradient ? "" : "active"}" data-inspector-action="fill-mode" data-value="solid">Solid</button>
+      <button class="icon-toggle ${isGradient ? "active" : ""}" data-inspector-action="fill-mode" data-value="linear-gradient">Linear</button>
+    </div>
+    ${isGradient ? `
+      <div class="gradient-preview" style="background: linear-gradient(${formatNumber(previewAngle)}deg, ${escapeAttribute(firstStop.color)}, ${escapeAttribute(lastStop.color)})"></div>
+      <div class="gradient-color-row">
+        <span class="color-swatch"><input type="color" data-gradient-stop="0" value="${toHexColor(firstStop.color)}" aria-label="Gradient start color" /></span>
+        <label class="field"><span class="field-label">A</span><input data-gradient-stop="0" value="${escapeAttribute(stripHash(firstStop.color))}" aria-label="Gradient start hex color" /></label>
+      </div>
+      <div class="gradient-color-row">
+        <span class="color-swatch"><input type="color" data-gradient-stop="last" value="${toHexColor(lastStop.color)}" aria-label="Gradient end color" /></span>
+        <label class="field"><span class="field-label">B</span><input data-gradient-stop="last" value="${escapeAttribute(stripHash(lastStop.color))}" aria-label="Gradient end hex color" /></label>
+      </div>
+      <div class="field-grid paint-settings-grid">
+        <label class="field"><span class="field-label">°</span><input type="number" data-gradient-property="angle" step="1" value="${formatNumber(node.gradient.angle)}" aria-label="Gradient angle" /></label>
+        <label class="field"><span class="field-label">%</span><input type="number" data-property="opacity" data-value-type="number" data-scale="0.01" min="0" max="100" value="${Math.round(node.opacity * 100)}" aria-label="Opacity" /></label>
+      </div>` : colorField("fill", node.fill, node.opacity)}
+  `;
+}
+
+function shadowInspector(node) {
+  const shadow = node.shadow;
+  return `
+    <section class="inspector-section">
+      <p class="inspector-section-title">Effects</p>
+      <button class="effect-toggle ${shadow.enabled ? "active" : ""}" data-inspector-action="toggle-shadow" aria-pressed="${shadow.enabled}">
+        <span>Drop shadow</span><span>${shadow.enabled ? "On" : "Off"}</span>
+      </button>
+      ${shadow.enabled ? `
+        <div class="gradient-color-row effect-color-row">
+          <span class="color-swatch"><input type="color" data-shadow-property="color" value="${toHexColor(shadow.color)}" aria-label="Shadow color" /></span>
+          <label class="field"><span class="field-label">#</span><input data-shadow-property="color" value="${escapeAttribute(stripHash(shadow.color))}" aria-label="Shadow hex color" /></label>
+        </div>
+        <div class="field-grid paint-settings-grid">
+          <label class="field"><span class="field-label">X</span><input type="number" data-shadow-property="offsetX" step="1" value="${formatNumber(shadow.offsetX)}" aria-label="Shadow horizontal offset" /></label>
+          <label class="field"><span class="field-label">Y</span><input type="number" data-shadow-property="offsetY" step="1" value="${formatNumber(shadow.offsetY)}" aria-label="Shadow vertical offset" /></label>
+          <label class="field"><span class="field-label">B</span><input type="number" data-shadow-property="blur" min="0" step="1" value="${formatNumber(shadow.blur)}" aria-label="Shadow blur" /></label>
+          <label class="field"><span class="field-label">%</span><input type="number" data-shadow-property="opacity" data-scale="0.01" min="0" max="100" value="${Math.round(shadow.opacity * 100)}" aria-label="Shadow opacity" /></label>
+        </div>` : ""}
+    </section>`;
 }
 
 function requestRender() {
@@ -1938,7 +2039,12 @@ function normalizeInspectorColor(value) {
 }
 
 function toHexColor(value) {
-  return /^#[\da-f]{6}$/i.test(value) ? value : "#000000";
+  if (/^#[\da-f]{6}$/i.test(value)) return value;
+  if (/^#[\da-f]{8}$/i.test(value)) return value.slice(0, 7);
+  if (/^#[\da-f]{3,4}$/i.test(value)) {
+    return `#${[...value.slice(1, 4)].map((character) => character + character).join("")}`;
+  }
+  return "#000000";
 }
 
 function stripHash(value) {

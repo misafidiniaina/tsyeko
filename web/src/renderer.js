@@ -155,21 +155,15 @@ export class CanvasRenderer {
     context.rotate((node.rotation * Math.PI) / 180);
     context.globalAlpha = options.effectiveOpacity ?? node.opacity;
 
-    if (node.type === NODE_TYPES.FRAME && options.shadows !== false) {
-      context.shadowColor = "rgba(0,0,0,0.28)";
-      context.shadowBlur = Math.min(28, 16 * zoom);
-      context.shadowOffsetY = Math.min(12, 7 * zoom);
-    }
+    this.applyNodeShadow(node, zoom, options);
 
     if (node.type === NODE_TYPES.ELLIPSE) {
       context.beginPath();
       context.ellipse(0, 0, width / 2, height / 2, 0, 0, Math.PI * 2);
-      this.paintPath(node, zoom);
+      this.paintPath(node, width, height, zoom);
     } else if (node.type === NODE_TYPES.IMAGE) {
-      context.shadowColor = "transparent";
       this.drawImageNode(node, width, height, zoom);
     } else if (node.type === NODE_TYPES.TEXT) {
-      context.shadowColor = "transparent";
       this.drawText(node, width, height, zoom);
     } else {
       const radius = Math.min(
@@ -179,7 +173,7 @@ export class CanvasRenderer {
       );
       context.beginPath();
       roundedRect(context, -width / 2, -height / 2, width, height, radius);
-      this.paintPath(node, zoom);
+      this.paintPath(node, width, height, zoom);
     }
     context.restore();
 
@@ -192,9 +186,21 @@ export class CanvasRenderer {
     }
   }
 
-  paintPath(node, zoom) {
+  applyNodeShadow(node, zoom, options = {}) {
     const context = this.context;
-    context.fillStyle = node.fill;
+    if (options.shadows === false || !node.shadow?.enabled || node.shadow.opacity <= 0) {
+      context.shadowColor = "transparent";
+      return;
+    }
+    context.shadowColor = colorWithOpacity(node.shadow.color, node.shadow.opacity);
+    context.shadowBlur = Math.min(250, node.shadow.blur * zoom);
+    context.shadowOffsetX = Math.max(-10_000, Math.min(10_000, node.shadow.offsetX * zoom));
+    context.shadowOffsetY = Math.max(-10_000, Math.min(10_000, node.shadow.offsetY * zoom));
+  }
+
+  paintPath(node, width, height, zoom) {
+    const context = this.context;
+    context.fillStyle = createNodeFill(context, node, width, height);
     context.fill();
     context.shadowColor = "transparent";
     if (node.strokeWidth > 0) {
@@ -209,10 +215,7 @@ export class CanvasRenderer {
     const fontSize = node.fontSize * zoom;
     if (fontSize < 2) return;
 
-    context.beginPath();
-    context.rect(-width / 2, -height / 2, width, height);
-    context.clip();
-    context.fillStyle = node.fill;
+    context.fillStyle = createNodeFill(context, node, width, height);
     context.font = `${node.fontWeight} ${fontSize}px ${node.fontFamily}`;
     context.textBaseline = "top";
     context.textAlign = node.textAlign;
@@ -242,8 +245,9 @@ export class CanvasRenderer {
     context.save();
     context.beginPath();
     roundedRect(context, x, y, width, height, radius);
-    context.fillStyle = node.fill;
+    context.fillStyle = createNodeFill(context, node, width, height);
     context.fill();
+    context.shadowColor = "transparent";
     context.clip();
 
     const entry = node.imageData ? getImageEntry(node.imageData) : null;
@@ -614,6 +618,38 @@ function roundedRect(context, x, y, width, height, radius) {
   context.quadraticCurveTo(x, y + height, x, y + height - radius);
   context.lineTo(x, y + radius);
   context.quadraticCurveTo(x, y, x + radius, y);
+}
+
+function createNodeFill(context, node, width, height) {
+  if (node.fillType !== "linear-gradient" || !node.gradient?.stops?.length) return node.fill;
+  const radians = ((node.gradient.angle ?? 0) * Math.PI) / 180;
+  const directionX = Math.cos(radians);
+  const directionY = Math.sin(radians);
+  const halfLength = Math.max(
+    0.5,
+    (Math.abs(width * directionX) + Math.abs(height * directionY)) / 2,
+  );
+  const gradient = context.createLinearGradient(
+    -directionX * halfLength,
+    -directionY * halfLength,
+    directionX * halfLength,
+    directionY * halfLength,
+  );
+  for (const stop of node.gradient.stops) {
+    gradient.addColorStop(stop.position, stop.color);
+  }
+  return gradient;
+}
+
+function colorWithOpacity(color, opacity) {
+  const normalized = String(color).replace("#", "");
+  const expanded = normalized.length === 3
+    ? [...normalized].map((character) => character + character).join("")
+    : normalized;
+  const red = Number.parseInt(expanded.slice(0, 2), 16);
+  const green = Number.parseInt(expanded.slice(2, 4), 16);
+  const blue = Number.parseInt(expanded.slice(4, 6), 16);
+  return `rgba(${red}, ${green}, ${blue}, ${opacity})`;
 }
 
 function distance(a, b) {

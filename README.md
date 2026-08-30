@@ -31,19 +31,21 @@ GOCACHE=$PWD/.cache/go-build go run .
 - Frames, groups, rectangles, ellipses, and editable text
 - Hierarchical frame/group parenting with nested clipping and inherited visibility, locking, and opacity
 - Embedded PNG, JPEG, WebP, and GIF image layers with cover/contain fitting
+- Solid and editable linear-gradient fills with angle and color stops
+- Data-driven drop shadows with color, opacity, offsets, and blur
 - Selection, marquee selection, multi-selection, movement, resize, and rotation
 - Shift-constrained drawing and transforms
 - Alt-centered shape drawing and resizing
 - Smart edge and center snapping while moving layers
 - Collapsible nested layers panel with visibility and locking
-- Inspector for geometry, color, opacity, stroke, corners, and typography
+- Inspector for geometry, paints, effects, opacity, stroke, corners, and typography
 - Recursive layer ordering, grouping/ungrouping, duplication, copy/paste, nudging, and deletion
 - Undo and redo with a bounded document history
 - Local-first autosave through IndexedDB, with automatic localStorage migration and fallback
 - JSON import/export, SVG export, and high-resolution PNG export
 - Prototype preview surface
 - Responsive editor shell
-- Sanitized, cycle-safe v3 document imports with automatic v1/v2 migration
+- Sanitized, cycle-safe v4 document imports with automatic v1/v2/v3 migration
 - Embedded Go server with a health endpoint and security headers
 
 ## Useful shortcuts
@@ -77,7 +79,7 @@ npm run check
 npm run test:browser
 ```
 
-The unit suite covers document migration and sanitization, cycle-safe hierarchy, subtree operations, multi-page identity, geometry, rotated hit testing, history, SVG clipping/export, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies page creation, drawing, image import, grouping, nested layer collapse/expand, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
+The unit suite covers document migration and sanitization, gradient/effect bounds, cycle-safe hierarchy, subtree operations, multi-page identity, geometry, rotated hit testing, history, SVG paint/clipping export, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies page creation, drawing, gradient and shadow editing, image import, grouping, nested layer collapse/expand, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
 
 ## Project structure
 

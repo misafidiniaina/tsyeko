@@ -11,6 +11,7 @@ import {
   getDocumentBounds,
   getFirstPage,
   getNodesWithDescendants,
+  getNodeVisualBounds,
   groupNodes,
   isNodeEffectivelyVisible,
   localToWorld,
@@ -38,7 +39,7 @@ test("migrates v1 documents and clamps untrusted geometry", () => {
   });
 
   assert.equal(document.name, "Imported");
-  assert.equal(document.version, 3);
+  assert.equal(document.version, 4);
   assert.equal(document.pages.length, 1);
   assert.equal(document.pages[0].nodes[0].x, 12);
   assert.equal(document.pages[0].nodes[0].width, 1);
@@ -218,6 +219,50 @@ test("accepts embedded raster images and rejects unsafe image sources", () => {
   assert.equal(unsafe.imageData, "");
 });
 
+test("normalizes gradient paints and bounded shadow effects", () => {
+  const node = createNode(NODE_TYPES.RECTANGLE, 10, 20, {
+    width: 100,
+    height: 50,
+    fillType: "linear-gradient",
+    gradient: {
+      angle: 450,
+      stops: [
+        { position: 1, color: "#112233" },
+        { position: -2, color: "not-a-color" },
+      ],
+    },
+    shadow: {
+      enabled: true,
+      color: "javascript:bad",
+      opacity: 4,
+      offsetX: 5,
+      offsetY: 8,
+      blur: 10,
+    },
+  });
+
+  assert.equal(node.fillType, "linear-gradient");
+  assert.equal(node.gradient.angle, 90);
+  assert.deepEqual(node.gradient.stops.map((stop) => stop.position), [0, 1]);
+  assert.equal(node.shadow.color, "#000000");
+  assert.equal(node.shadow.opacity, 1);
+  assert.deepEqual(getNodeVisualBounds(node), { x: -5, y: 8, width: 140, height: 90 });
+});
+
+test("migrates implicit frame shadows into explicit v4 effects", () => {
+  const document = normalizeDocument({
+    version: 3,
+    name: "Legacy frame",
+    pages: [{ name: "Page", nodes: [{ id: "frame", type: "frame" }] }],
+  });
+  const frame = getFirstPage(document).nodes[0];
+
+  assert.equal(document.version, 4);
+  assert.equal(frame.fillType, "solid");
+  assert.equal(frame.shadow.enabled, true);
+  assert.equal(frame.shadow.blur, 16);
+});
+
 test("exports visible content to SVG", () => {
   const document = createEmptyDocument("Example & test");
   const page = getFirstPage(document);
@@ -263,4 +308,33 @@ test("SVG export clips descendants to frames", () => {
 
   assert.match(svg, /<clipPath id="frame-clip-/);
   assert.match(svg, /clip-path="url\(#frame-clip-/);
+});
+
+test("SVG export includes gradient and shadow definitions", () => {
+  const page = createPage("Paints");
+  page.nodes.push(createNode(NODE_TYPES.RECTANGLE, 0, 0, {
+    fillType: "linear-gradient",
+    gradient: {
+      angle: 30,
+      stops: [
+        { position: 0, color: "#7c3aed" },
+        { position: 1, color: "#ec4899" },
+      ],
+    },
+    shadow: {
+      enabled: true,
+      color: "#000000",
+      opacity: 0.25,
+      offsetX: 2,
+      offsetY: 10,
+      blur: 20,
+    },
+  }));
+  const svg = documentToSVG(page);
+
+  assert.match(svg, /<linearGradient id="gradient-/);
+  assert.match(svg, /<filter id="shadow-/);
+  assert.match(svg, /fill="url\(#gradient-/);
+  assert.match(svg, /filter="url\(#shadow-/);
+  assert.match(svg, /<feDropShadow/);
 });

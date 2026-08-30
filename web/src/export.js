@@ -26,6 +26,13 @@ export function documentToSVG(document, ids = null) {
     .filter((node) => frameIds.has(node.id))
     .map(frameClipToSVG)
     .join("");
+  const paintDefinitions = nodes
+    .flatMap((node) => [
+      node.fillType === "linear-gradient" ? gradientToSVG(node) : "",
+      node.shadow?.enabled && node.shadow.opacity > 0 ? shadowToSVG(node) : "",
+    ])
+    .join("");
+  const definitions = `${frameClips}${paintDefinitions}`;
   const body = nodes.map((node) => {
     let output = nodeToSVG(node, getEffectiveOpacity(document, node));
     for (const frame of getAncestors(document, node).filter((ancestor) => ancestor.type === NODE_TYPES.FRAME)) {
@@ -38,7 +45,7 @@ export function documentToSVG(document, ids = null) {
     `<?xml version="1.0" encoding="UTF-8"?>`,
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="${round(bounds.x)} ${round(bounds.y)} ${round(bounds.width)} ${round(bounds.height)}">`,
     `  <title>${escapeXML(document.name)}</title>`,
-    frameClips ? `  <defs>${frameClips}</defs>` : "",
+    definitions ? `  <defs>${definitions}</defs>` : "",
     `  ${body}`,
     `</svg>`,
   ].join("\n");
@@ -67,8 +74,14 @@ function nodeToSVG(node, opacity = node.opacity) {
   const common = [
     `opacity="${round(opacity)}"`,
     `transform="rotate(${round(node.rotation)} ${round(node.x + node.width / 2)} ${round(node.y + node.height / 2)})"`,
-  ].join(" ");
-  const paint = `fill="${escapeXML(node.fill)}" stroke="${escapeXML(node.stroke)}" stroke-width="${round(node.strokeWidth)}"`;
+    node.shadow?.enabled && node.shadow.opacity > 0
+      ? `filter="url(#shadow-${safeId(node.id)})"`
+      : "",
+  ].filter(Boolean).join(" ");
+  const fill = node.fillType === "linear-gradient"
+    ? `url(#gradient-${safeId(node.id)})`
+    : node.fill;
+  const paint = `fill="${escapeXML(fill)}" stroke="${escapeXML(node.stroke)}" stroke-width="${round(node.strokeWidth)}"`;
 
   if (node.type === NODE_TYPES.ELLIPSE) {
     return `<ellipse cx="${round(node.x + node.width / 2)}" cy="${round(node.y + node.height / 2)}" rx="${round(node.width / 2)}" ry="${round(node.height / 2)}" ${paint} ${common} />`;
@@ -81,7 +94,7 @@ function nodeToSVG(node, opacity = node.opacity) {
     const image = node.imageData
       ? `<image x="${round(node.x)}" y="${round(node.y)}" width="${round(node.width)}" height="${round(node.height)}" href="${escapeXML(node.imageData)}" preserveAspectRatio="${fit}" clip-path="url(#${clipId})" />`
       : "";
-    return `<g ${common}><defs><clipPath id="${clipId}"><rect x="${round(node.x)}" y="${round(node.y)}" width="${round(node.width)}" height="${round(node.height)}" rx="${round(radius)}" /></clipPath></defs><rect x="${round(node.x)}" y="${round(node.y)}" width="${round(node.width)}" height="${round(node.height)}" rx="${round(radius)}" fill="${escapeXML(node.fill)}" />${image}<rect x="${round(node.x)}" y="${round(node.y)}" width="${round(node.width)}" height="${round(node.height)}" rx="${round(radius)}" fill="none" stroke="${escapeXML(node.stroke)}" stroke-width="${round(node.strokeWidth)}" /></g>`;
+    return `<g ${common}><defs><clipPath id="${clipId}"><rect x="${round(node.x)}" y="${round(node.y)}" width="${round(node.width)}" height="${round(node.height)}" rx="${round(radius)}" /></clipPath></defs><rect x="${round(node.x)}" y="${round(node.y)}" width="${round(node.width)}" height="${round(node.height)}" rx="${round(radius)}" fill="${escapeXML(fill)}" />${image}<rect x="${round(node.x)}" y="${round(node.y)}" width="${round(node.width)}" height="${round(node.height)}" rx="${round(radius)}" fill="none" stroke="${escapeXML(node.stroke)}" stroke-width="${round(node.strokeWidth)}" /></g>`;
   }
 
   if (node.type === NODE_TYPES.TEXT) {
@@ -96,7 +109,7 @@ function nodeToSVG(node, opacity = node.opacity) {
     const tspans = lines.map((line, index) =>
       `<tspan x="${round(x)}" dy="${index === 0 ? round(node.fontSize) : round(lineHeight)}">${escapeXML(line)}</tspan>`,
     ).join("");
-    return `<text x="${round(x)}" y="${round(node.y)}" width="${round(node.width)}" fill="${escapeXML(node.fill)}" opacity="${round(opacity)}" text-anchor="${anchor}" font-family="${escapeXML(node.fontFamily)}" font-size="${round(node.fontSize)}" font-weight="${round(node.fontWeight)}" transform="rotate(${round(node.rotation)} ${round(node.x + node.width / 2)} ${round(node.y + node.height / 2)})">${tspans}</text>`;
+    return `<text x="${round(x)}" y="${round(node.y)}" width="${round(node.width)}" fill="${escapeXML(fill)}" text-anchor="${anchor}" font-family="${escapeXML(node.fontFamily)}" font-size="${round(node.fontSize)}" font-weight="${round(node.fontWeight)}" ${common}>${tspans}</text>`;
   }
 
   const radius = Math.min(node.cornerRadius, node.width / 2, node.height / 2);
@@ -108,6 +121,30 @@ function frameClipToSVG(frame) {
   const centerX = frame.x + frame.width / 2;
   const centerY = frame.y + frame.height / 2;
   return `<clipPath id="frame-clip-${safeId(frame.id)}" clipPathUnits="userSpaceOnUse"><rect x="${round(frame.x)}" y="${round(frame.y)}" width="${round(frame.width)}" height="${round(frame.height)}" rx="${round(radius)}" transform="rotate(${round(frame.rotation)} ${round(centerX)} ${round(centerY)})" /></clipPath>`;
+}
+
+function gradientToSVG(node) {
+  const radians = ((node.gradient?.angle ?? 0) * Math.PI) / 180;
+  const directionX = Math.cos(radians);
+  const directionY = Math.sin(radians);
+  const halfLength = (
+    Math.abs(node.width * directionX) + Math.abs(node.height * directionY)
+  ) / 2;
+  const normalizedX = (directionX * halfLength) / node.width;
+  const normalizedY = (directionY * halfLength) / node.height;
+  const stops = (node.gradient?.stops ?? []).map((stop) =>
+    `<stop offset="${round(stop.position * 100)}%" stop-color="${escapeXML(stop.color)}" />`,
+  ).join("");
+  return `<linearGradient id="gradient-${safeId(node.id)}" x1="${round(0.5 - normalizedX)}" y1="${round(0.5 - normalizedY)}" x2="${round(0.5 + normalizedX)}" y2="${round(0.5 + normalizedY)}">${stops}</linearGradient>`;
+}
+
+function shadowToSVG(node) {
+  const extent = node.shadow.blur * 2;
+  const x = node.x + Math.min(0, node.shadow.offsetX) - extent;
+  const y = node.y + Math.min(0, node.shadow.offsetY) - extent;
+  const width = node.width + Math.abs(node.shadow.offsetX) + extent * 2;
+  const height = node.height + Math.abs(node.shadow.offsetY) + extent * 2;
+  return `<filter id="shadow-${safeId(node.id)}" x="${round(x)}" y="${round(y)}" width="${round(width)}" height="${round(height)}" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feDropShadow dx="${round(node.shadow.offsetX)}" dy="${round(node.shadow.offsetY)}" stdDeviation="${round(node.shadow.blur / 2)}" flood-color="${escapeXML(node.shadow.color)}" flood-opacity="${round(node.shadow.opacity)}" /></filter>`;
 }
 
 function safeId(value) {

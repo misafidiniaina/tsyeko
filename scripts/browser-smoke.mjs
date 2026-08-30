@@ -53,6 +53,32 @@ try {
     "starter document",
   );
 
+  const svgPaintExport = await evaluate(`
+    (async () => {
+      const { createNode, createPage, NODE_TYPES } = await import("/src/model.js");
+      const { documentToSVG } = await import("/src/export.js");
+      const page = createPage("Paint export");
+      page.nodes.push(createNode(NODE_TYPES.RECTANGLE, 0, 0, {
+        fillType: "linear-gradient",
+        gradient: { angle: 32, stops: [
+          { position: 0, color: "#2563eb" },
+          { position: 1, color: "#ec4899" }
+        ] },
+        shadow: { enabled: true, color: "#000000", opacity: 0.35, offsetX: 6, offsetY: 14, blur: 22 }
+      }));
+      const svg = documentToSVG(page);
+      const parsed = new DOMParser().parseFromString(svg, "image/svg+xml");
+      return {
+        valid: !parsed.querySelector("parsererror"),
+        gradient: Boolean(parsed.querySelector("linearGradient")),
+        shadow: Boolean(parsed.querySelector("feDropShadow"))
+      };
+    })()
+  `);
+  if (!svgPaintExport.valid || !svgPaintExport.gradient || !svgPaintExport.shadow) {
+    throw new Error(`SVG paint export validation failed: ${JSON.stringify(svgPaintExport)}`);
+  }
+
   await evaluate(`
     document.querySelector("#pageSwitcher").click();
     document.querySelector("[data-add-page]").click();
@@ -118,6 +144,45 @@ try {
     `document.querySelectorAll(".layer-row").length === 1 &&
      document.querySelector("#saveState").textContent === "Saved locally"`,
     "drawing and autosave on page 2",
+  );
+
+  await evaluate(`
+    document.querySelector('[data-inspector-action="fill-mode"][data-value="linear-gradient"]').click();
+    (() => {
+      const startColor = document.querySelector('[data-gradient-stop="0"][type="color"]');
+      const endColor = document.querySelector('[data-gradient-stop="last"][type="color"]');
+      const angle = document.querySelector('[data-gradient-property="angle"]');
+      startColor.value = "#2563eb";
+      startColor.dispatchEvent(new Event("input", { bubbles: true }));
+      endColor.value = "#ec4899";
+      endColor.dispatchEvent(new Event("input", { bubbles: true }));
+      angle.value = "32";
+      angle.dispatchEvent(new Event("input", { bubbles: true }));
+      angle.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    })()
+  `);
+  await evaluate(`document.querySelector('[data-inspector-action="toggle-shadow"]').click(); true`);
+  await evaluate(`
+    (() => {
+      const values = { offsetX: "6", offsetY: "14", blur: "22", opacity: "35" };
+      for (const [property, value] of Object.entries(values)) {
+        const input = document.querySelector('[data-shadow-property="' + property + '"]');
+        input.value = value;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      document.querySelector('[data-shadow-property="blur"]')
+        .dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    })()
+  `);
+  await waitFor(
+    `document.querySelector('[data-inspector-action="fill-mode"][data-value="linear-gradient"]')?.classList.contains("active") &&
+     document.querySelector('[data-gradient-property="angle"]')?.value === "32" &&
+     document.querySelector('[data-inspector-action="toggle-shadow"]')?.classList.contains("active") &&
+     document.querySelector('[data-shadow-property="blur"]')?.value === "22" &&
+     document.querySelector("#saveState").textContent === "Saved locally"`,
+    "gradient and shadow inspector editing",
   );
 
   const imagePath = path.join(profileDirectory, "smoke-image.png");
@@ -200,11 +265,29 @@ try {
     "hierarchical multi-page reload persistence",
   );
 
+  await evaluate(`
+    [...document.querySelectorAll(".layer-row")]
+      .find((row) => row.querySelector(".layer-name")?.textContent === "Rectangle")
+      .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    true;
+  `);
+  await waitFor(
+    `document.querySelector('[data-inspector-action="fill-mode"][data-value="linear-gradient"]')?.classList.contains("active") &&
+     document.querySelector('[data-gradient-property="angle"]')?.value === "32" &&
+     document.querySelector('[data-inspector-action="toggle-shadow"]')?.classList.contains("active") &&
+     document.querySelector('[data-shadow-property="offsetX"]')?.value === "6" &&
+     document.querySelector('[data-shadow-property="offsetY"]')?.value === "14" &&
+     document.querySelector('[data-shadow-property="opacity"]')?.value === "35"`,
+    "paint and effect reload persistence",
+  );
+
   const result = await evaluate(`({
     currentPage: document.querySelector("#currentPageName").textContent,
     pageCount: document.querySelectorAll(".page-list-row").length,
     layerCount: document.querySelectorAll(".layer-row").length,
-    saved: document.querySelector("#saveState").textContent
+    saved: document.querySelector("#saveState").textContent,
+    gradient: document.querySelector('[data-gradient-property="angle"]')?.value,
+    shadowBlur: document.querySelector('[data-shadow-property="blur"]')?.value
   })`);
   if (process.env.TSYAIKO_SCREENSHOT) {
     const screenshot = await command("Page.captureScreenshot", { format: "png" });

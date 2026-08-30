@@ -83,11 +83,11 @@ Avoid introducing every distributed component on day one. PostgreSQL, Redis, obj
 
 ## 5. Document model
 
-The current v3 file format is a versioned, multi-page JSON document with flat storage and explicit parent relationships. Version 1 files with a root-level `nodes` array and version 2 multi-page files migrate automatically. Imports repair dangling parents, reject non-container parents, break cycles, and restore parent-before-child ordering:
+The current v4 file format is a versioned, multi-page JSON document with flat storage, explicit parent relationships, paint definitions, and effects. Version 1 root-node files, version 2 multi-page files, and version 3 hierarchical files migrate automatically. Imports repair dangling parents, reject non-container parents, break cycles, sanitize paint/effect values, and restore parent-before-child ordering:
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "id": "document_…",
   "name": "Untitled design",
   "background": "#101114",
@@ -129,9 +129,25 @@ The current v3 file format is a versioned, multi-page JSON document with flat st
           "visible": true,
           "locked": false,
           "fill": "#ffffff",
+          "fillType": "linear-gradient",
+          "gradient": {
+            "angle": 30,
+            "stops": [
+              { "position": 0, "color": "#7c3aed" },
+              { "position": 1, "color": "#ec4899" }
+            ]
+          },
           "stroke": "#d8d8de",
           "strokeWidth": 1,
-          "cornerRadius": 16
+          "cornerRadius": 16,
+          "shadow": {
+            "enabled": true,
+            "color": "#000000",
+            "opacity": 0.24,
+            "offsetX": 0,
+            "offsetY": 8,
+            "blur": 24
+          }
         }
       ]
     }
@@ -143,7 +159,7 @@ Production evolution:
 
 - Move from world-space child geometry to consistently decomposed local transforms or matrices
 - Add explicit sibling ordering when collaboration requires ordering independent of array position
-- Add vector paths, boolean operations, masks, gradients, effects, and image paints
+- Add vector paths, boolean operations, masks, multiple paint stacks, radial/angular gradients, and blur effects
 - Add rich-text ranges and font references
 - Add component definitions, instances, override maps, and variant properties
 - Add constraints and auto-layout properties
@@ -419,9 +435,10 @@ Every document schema change needs forward-migration tests and fixtures from old
 ### Milestone 0 — implemented foundation
 
 - Canvas editor and basic nodes
-- Multi-page documents, page operations, and v1/v2 schema migration
+- Multi-page documents, page operations, and v1/v2/v3 schema migration
 - Hierarchical frames and groups with recursive editing and cycle-safe imports
 - Nested layers, frame clipping, and inherited visibility, locking, and opacity
+- Linear-gradient fills and explicit drop-shadow effects with Canvas/SVG parity
 - Per-page canvas appearance and view state
 - Embedded raster image layers with cover/contain fitting
 - IndexedDB persistence and compact localStorage recovery copies
@@ -433,7 +450,7 @@ Every document schema change needs forward-migration tests and fixtures from old
 
 ### Milestone 1 — structured editor
 
-- Gradients, effects, masks, and boolean geometry
+- Multiple paint stacks, radial/angular gradients, blur effects, masks, and boolean geometry
 - Vector pen and path editing
 - Better text shaping and rich-text ranges
 - Command-based history
