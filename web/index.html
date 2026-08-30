@@ -69,15 +69,17 @@
           <div id="assetsPanel" class="panel-content">
             <div class="assets-search">
               <svg viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="4.5" /><path d="m12 12 4 4" /></svg>
-              <input placeholder="Search assets" aria-label="Search assets" />
+              <input id="assetsSearch" placeholder="Search components" aria-label="Search local components" />
             </div>
             <p class="panel-label">Local components</p>
-            <div class="empty-panel compact">
+            <div class="components-list" id="componentsList"></div>
+            <div class="empty-panel compact" id="emptyComponents">
               <span class="empty-panel-icon">▧</span>
-              <p>Bring raster assets onto the current page.</p>
-              <button class="button button-primary" id="importImageButton">Import image</button>
-              <p style="margin-top: 22px">Create reusable components from your selection.</p>
-              <button class="button button-quiet" id="createComponentButton">Create component</button>
+              <p>Create a reusable component from the selected layer or layers.</p>
+            </div>
+            <div class="assets-actions">
+              <button class="button button-quiet" id="importImageButton">Import image</button>
+              <button class="button button-primary" id="createComponentButton">Create component</button>
             </div>
           </div>
         </aside>

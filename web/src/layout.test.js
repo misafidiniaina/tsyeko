@@ -29,7 +29,7 @@ function pageWith(...nodes) {
   return page;
 }
 
-test("v8 migration adds safe responsive layout defaults", () => {
+test("v9 migration preserves safe responsive layout defaults", () => {
   const document = normalizeDocument({
     version: 7,
     name: "Legacy layout",
@@ -44,7 +44,7 @@ test("v8 migration adds safe responsive layout defaults", () => {
   });
   const [frame, child, rotated] = document.pages[0].nodes;
 
-  assert.equal(document.version, 8);
+  assert.equal(document.version, 9);
   assert.equal(frame.layoutMode, LAYOUT_MODES.NONE);
   assert.equal(frame.layoutGap, 0);
   assert.equal(frame.paddingLeft, 16);

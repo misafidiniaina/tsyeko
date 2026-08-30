@@ -551,6 +551,97 @@ svg {
   font-weight: 600;
 }
 
+.components-list {
+  display: grid;
+  gap: 6px;
+  padding: 2px 10px 10px;
+}
+
+.component-card {
+  width: 100%;
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 20px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: #202020;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.component-card:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.component-card-preview {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  color: var(--accent-bright);
+  background: rgba(139, 92, 246, 0.18);
+}
+
+.component-card-preview svg {
+  width: 17px;
+  height: 17px;
+}
+
+.component-card-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.component-card-copy strong,
+.component-card-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.component-card-copy strong {
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.component-card-copy small,
+.assets-empty-result {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.component-card-add {
+  color: var(--accent-bright);
+  font-size: 18px;
+  line-height: 1;
+  text-align: center;
+}
+
+.assets-empty-result {
+  margin: 16px 12px;
+  text-align: center;
+}
+
+.assets-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.assets-actions .button {
+  min-width: 0;
+  padding: 0 8px;
+}
+
 .workspace {
   position: relative;
   overflow: hidden;
@@ -715,6 +806,39 @@ svg {
   color: #d3d3d3;
   font-size: 11px;
   font-weight: 650;
+}
+
+.component-inspector .inspector-section-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--accent-bright);
+}
+
+.component-icon {
+  width: 13px;
+  height: 13px;
+  color: var(--accent-bright);
+}
+
+.component-inspector-summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.component-inspector-summary strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.component-inspector-summary span {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 10px;
 }
 
 .inspector-section-title button {

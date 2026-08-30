@@ -34,6 +34,7 @@ Browser
 │   └── IndexedDB autosave with localStorage migration/fallback
 ├── Versioned hierarchical document model
 ├── Deterministic Auto Layout and frame-constraint engine
+├── Local component source/instance synchronizer
 ├── Snapshot history
 ├── Hierarchy-aware Canvas 2D renderer
 │   ├── Porter–Duff Boolean composition
@@ -86,14 +87,24 @@ Avoid introducing every distributed component on day one. PostgreSQL, Redis, obj
 
 ## 5. Document model
 
-The current v8 file format is a versioned, multi-page JSON document with flat storage, explicit parent relationships, responsive-layout metadata, paint definitions, effects, cubic Bézier vector paths, and ordered Boolean/mask containers. Versions 1–7 migrate automatically. Imports repair dangling parents, reject non-container parents, break cycles, sanitize layout/anchor/control/paint/effect/composite values, and restore parent-before-child ordering:
+The current v9 file format is a versioned, multi-page JSON document with flat storage, explicit parent relationships, responsive-layout metadata, paint definitions, effects, cubic Bézier vector paths, ordered Boolean/mask containers, and local component records. Versions 1–8 migrate automatically. Imports repair dangling parents, reject non-container parents, break cycles, sanitize layout/anchor/control/paint/effect/composite/component values, and restore parent-before-child ordering:
 
 ```json
 {
-  "version": 8,
+  "version": 9,
   "id": "document_…",
   "name": "Untitled design",
   "background": "#101114",
+  "components": [
+    {
+      "id": "component_…",
+      "name": "Button / Primary",
+      "sourcePageId": "page_…",
+      "sourceNodeId": "frame_…",
+      "createdAt": "2026-08-30T00:00:00.000Z",
+      "updatedAt": "2026-08-30T00:00:00.000Z"
+    }
+  ],
   "pages": [
     {
       "id": "page_…",
@@ -215,7 +226,13 @@ The current v8 file format is a versioned, multi-page JSON document with flat st
 }
 ```
 
-### 5.1 Composite node semantics
+### 5.1 Local component semantics
+
+Components reuse the normal scene-node types rather than introducing a separate renderer type. A component record identifies a main source root by page and node ID. Its root is tagged `componentRole: "main"`; descendants are tagged `"source"`. An inserted instance is a concrete cloned subtree with stable local IDs, `componentRole: "instance"` on the root, `"instance-child"` on descendants, and `componentSourceId` links back to source nodes.
+
+The instance root owns a sparse `componentOverrides` map keyed by source-node ID. Supported visual/content properties are sanitized, compared to the source, and applied after source synchronization. Source edits—including adding or removing source descendants—are rebuilt into every instance while the instance root retains its external placement and parent-layout relationship. Reset clears the map; detach strips component metadata while preserving rendered geometry. This provides Canvas, SVG, PNG, hit testing, Auto Layout, history, and persistence compatibility without a parallel scene graph.
+
+### 5.2 Composite node semantics
 
 Boolean and mask results are saved as scene structure, never flattened pixels:
 
@@ -251,7 +268,7 @@ Production evolution:
 - Extend vectors with editable compound contours, destructive flattening, and precision offset/outline geometry
 - Add multiple paint stacks, radial/angular gradients, and blur effects
 - Add rich-text ranges and font references
-- Add component definitions, instances, override maps, and variant properties
+- Add component properties, variants, nested composition, and library publication
 - Extend Auto Layout with wrapping, min/max dimensions, baseline alignment, and intrinsic text measurement
 - Add prototype edges separately from visual nodes
 - Add explicit schema migrations for every document version
@@ -422,7 +439,7 @@ Every mutation is authorized server-side. Client UI permissions are convenience,
 
 ## 12. Auto layout and constraints
 
-The v8 client implements layout as a deterministic function of document properties. A frame with horizontal or vertical Auto Layout flows its visible direct children in sibling order; hidden and absolute children are excluded. The implemented contract includes:
+The v9 client implements layout as a deterministic function of document properties. A frame with horizontal or vertical Auto Layout flows its visible direct children in sibling order; hidden and absolute children are excluded. The implemented contract includes:
 
 - Independent top, right, bottom, and left padding
 - Fixed gaps or primary-axis space-between distribution
@@ -441,15 +458,23 @@ The current engine is single-axis and axis-aligned. Wrapping, baseline alignment
 
 ## 13. Components and design systems
 
-The minimum useful model includes:
+The implemented local component slice includes:
 
-- Component definition node
-- Instance node referencing a component version
-- Stable descendant identity across definition and instance
-- Explicit override map
+- A component registry record with a main source page and root node
+- Source and instance metadata on ordinary scene nodes, with stable source-node identity
+- Linked instance synchronization across pages and document persistence
+- Sparse, sanitized visual/content override maps
+- Reset and detach workflows
+- Assets-panel insertion, Layers labels, inspector navigation, and transform/structural-edit guards
+
+The current scope deliberately excludes nested component composition, variants, component properties, swappable instances, published libraries, and remote library updates. Main-source geometry and structure remain authoritative; instances preserve only their outer placement/layout relationship until detached.
+
+Production design systems still need:
+
 - Component properties and variants
-- Published library versions
+- Published library versions and deliberate upgrades
 - Variables with types, collections, modes, aliases, and scopes
+- Remote dependencies, permissions, and immutable publication history
 
 Library publication must be immutable. A file consumes a specific published version and deliberately upgrades to a newer one.
 
@@ -533,7 +558,7 @@ Every document schema change needs forward-migration tests and fixtures from old
 ### Milestone 0 — implemented foundation
 
 - Canvas editor and basic nodes
-- Multi-page documents, page operations, and v1–v7 schema migration into v8
+- Multi-page documents, page operations, and v1–v8 schema migration into v9
 - Hierarchical frames and groups with recursive editing and cycle-safe imports
 - Nested layers, frame clipping, and inherited visibility, locking, and opacity
 - Linear-gradient fills and explicit drop-shadow effects with Canvas/SVG parity
@@ -543,6 +568,7 @@ Every document schema change needs forward-migration tests and fixtures from old
 - Composite creation, operation switching, source-order labels, release workflows, keyboard commands, persistence, and browser pixel tests
 - Horizontal/vertical Auto Layout, Shift+A wrapping, padding, gaps, alignment, fixed/hug/fill sizing, absolute children, and Layers feedback
 - Responsive frame constraints with nested evaluation, resize snapshots, undo/redo, persistence, and Canvas/SVG geometry parity
+- Local components with source records, linked instances, visual/content overrides, reset, detach, Assets insertion, and v9 persistence
 - Per-page canvas appearance and view state
 - Embedded raster image layers with cover/contain fitting
 - IndexedDB persistence and compact localStorage recovery copies
@@ -576,7 +602,7 @@ Exit criterion: a team can safely co-edit a file and recover from disconnects or
 
 ### Milestone 3 — professional design systems
 
-- Components, instances, variants, and overrides
+- Component properties, variants, nested composition, and remote library dependencies
 - Variables, modes, and published libraries
 - Developer inspection and asset download
 

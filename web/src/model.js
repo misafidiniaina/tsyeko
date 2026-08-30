@@ -3,8 +3,54 @@ import {
   VECTOR_HANDLE_MODES,
 } from "./vector.js";
 
-export const DOCUMENT_VERSION = 8;
+export const DOCUMENT_VERSION = 9;
 const MAX_HIERARCHY_DEPTH = 256;
+
+export const COMPONENT_ROLES = Object.freeze({
+  MAIN: "main",
+  SOURCE: "source",
+  INSTANCE: "instance",
+  INSTANCE_CHILD: "instance-child",
+});
+
+// These are deliberately limited to properties that can be represented as a
+// local change without changing an instance's structure or free transform.
+// Geometry stays linked to the main component until the instance is detached.
+export const COMPONENT_OVERRIDE_PROPERTIES = Object.freeze([
+  "name",
+  "visible",
+  "opacity",
+  "fill",
+  "fillType",
+  "gradient",
+  "stroke",
+  "strokeWidth",
+  "cornerRadius",
+  "shadow",
+  "text",
+  "fontFamily",
+  "fontSize",
+  "fontWeight",
+  "lineHeight",
+  "textAlign",
+  "imageData",
+  "imageFit",
+  "altText",
+  "vectorPoints",
+  "vectorClosed",
+  "vectorFillRule",
+  "booleanOperation",
+  "layoutMode",
+  "layoutGap",
+  "paddingTop",
+  "paddingRight",
+  "paddingBottom",
+  "paddingLeft",
+  "primaryAxisAlign",
+  "counterAxisAlign",
+]);
+const COMPONENT_ROLE_VALUES = new Set(Object.values(COMPONENT_ROLES));
+const COMPONENT_OVERRIDE_PROPERTY_SET = new Set(COMPONENT_OVERRIDE_PROPERTIES);
 
 export const BOOLEAN_OPERATIONS = Object.freeze({
   UNION: "union",
@@ -246,6 +292,7 @@ export function createEmptyDocument(name = "Untitled design") {
     background: "#101114",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    components: [],
     pages: [createPage("Page 1")],
   };
 }
@@ -418,6 +465,8 @@ export function normalizeDocument(input) {
   if (!document.pages.length) document.pages.push(createPage("Page 1", { background: document.background }));
   ensureUniqueIds(document);
   for (const page of document.pages) repairPageHierarchy(page);
+  document.components = normalizeComponentRecords(input.components, document);
+  repairComponentMetadata(document);
   return document;
 }
 
@@ -472,6 +521,16 @@ export function normalizeNode(input) {
     constraintVertical: Object.values(VERTICAL_CONSTRAINTS).includes(input.constraintVertical)
       ? input.constraintVertical
       : VERTICAL_CONSTRAINTS.TOP,
+    componentId: typeof input.componentId === "string"
+      ? cleanString(input.componentId, "", 160) || null
+      : null,
+    componentRole: COMPONENT_ROLE_VALUES.has(input.componentRole)
+      ? input.componentRole
+      : null,
+    componentSourceId: typeof input.componentSourceId === "string"
+      ? cleanString(input.componentSourceId, "", 160) || null
+      : null,
+    componentOverrides: normalizeComponentOverrides(input.componentOverrides),
   };
   node.fillType = input.fillType === "linear-gradient" ? "linear-gradient" : "solid";
   node.gradient = normalizeGradient(input.gradient, node.fill);
@@ -640,6 +699,7 @@ export function duplicatePage(document, id) {
   if (index < 0) return null;
   const source = document.pages[index];
   const idMap = new Map(source.nodes.map((node) => [node.id, makeId(node.type)]));
+  const sourceNodesByCopyId = new Map(source.nodes.map((node) => [idMap.get(node.id), node]));
   const copy = {
     ...cloneValue(source),
     id: makeId("page"),
@@ -650,6 +710,12 @@ export function duplicatePage(document, id) {
       parentId: node.parentId ? idMap.get(node.parentId) ?? null : null,
     })),
   };
+  for (const node of copy.nodes) {
+    const sourceNode = sourceNodesByCopyId.get(node.id);
+    if ([COMPONENT_ROLES.MAIN, COMPONENT_ROLES.SOURCE].includes(sourceNode?.componentRole)) {
+      clearComponentMetadata(node);
+    }
+  }
   document.pages.splice(index + 1, 0, copy);
   return copy;
 }
@@ -887,6 +953,18 @@ export function duplicateNodes(document, ids, offset = 20) {
       y: node.y + offset,
       locked: false,
     }));
+  const copiedSourceIds = new Set(sourceNodes.map((node) => node.id));
+  for (let index = 0; index < copies.length; index += 1) {
+    const source = sourceNodes[index];
+    const copy = copies[index];
+    if ([COMPONENT_ROLES.MAIN, COMPONENT_ROLES.SOURCE].includes(source.componentRole)) {
+      clearComponentMetadata(copy);
+      continue;
+    }
+    if (![COMPONENT_ROLES.INSTANCE, COMPONENT_ROLES.INSTANCE_CHILD].includes(source.componentRole)) continue;
+    const instanceRoot = getInstanceRootInPage(document, source);
+    if (!instanceRoot || !copiedSourceIds.has(instanceRoot.id)) clearComponentMetadata(copy);
+  }
   document.nodes.push(...copies);
   sortNodesByHierarchy(document);
   return copies;
@@ -1048,6 +1126,76 @@ export function sortNodesByHierarchy(document) {
   document.nodes = sorted;
 }
 
+export function isComponentOverrideProperty(property) {
+  return COMPONENT_OVERRIDE_PROPERTY_SET.has(property);
+}
+
+export function clearComponentMetadata(node) {
+  if (!node) return node;
+  node.componentId = null;
+  node.componentRole = null;
+  node.componentSourceId = null;
+  node.componentOverrides = {};
+  return node;
+}
+
+// This is intentionally a model-level repair so imported and persisted files
+// become safe before the editor's component synchronization runs.
+export function repairComponentMetadata(document) {
+  if (!document || !Array.isArray(document.pages)) return document;
+  const components = normalizeComponentRecords(document.components, document);
+  const componentById = new Map(components.map((component) => [component.id, component]));
+  const sourceIdsByComponent = new Map();
+  const sourceMembership = new Set();
+
+  for (const component of components) {
+    const page = getPage(document, component.sourcePageId);
+    const source = page ? getNode(page, component.sourceNodeId) : null;
+    if (!page || !source) continue;
+    const branch = getNodesWithDescendants(page, [source.id]);
+    const sourceIds = new Set(branch.map((node) => node.id));
+    sourceIdsByComponent.set(component.id, sourceIds);
+    for (const node of branch) {
+      sourceMembership.add(node.id);
+      node.componentId = component.id;
+      node.componentRole = node.id === source.id ? COMPONENT_ROLES.MAIN : COMPONENT_ROLES.SOURCE;
+      node.componentSourceId = node.id;
+      node.componentOverrides = {};
+    }
+  }
+
+  for (const page of document.pages) {
+    for (const node of page.nodes) {
+      if ([COMPONENT_ROLES.MAIN, COMPONENT_ROLES.SOURCE].includes(node.componentRole)) {
+        if (!sourceMembership.has(node.id)) clearComponentMetadata(node);
+        continue;
+      }
+      if (![COMPONENT_ROLES.INSTANCE, COMPONENT_ROLES.INSTANCE_CHILD].includes(node.componentRole)) {
+        if (node.componentId || node.componentSourceId || Object.keys(node.componentOverrides ?? {}).length) {
+          clearComponentMetadata(node);
+        }
+        continue;
+      }
+      const component = componentById.get(node.componentId);
+      const sourceIds = sourceIdsByComponent.get(node.componentId);
+      if (!component || !sourceIds) {
+        clearComponentMetadata(node);
+        continue;
+      }
+      if (node.componentRole === COMPONENT_ROLES.INSTANCE) {
+        node.componentSourceId = component.sourceNodeId;
+      } else if (!node.componentSourceId || !sourceIds.has(node.componentSourceId)) {
+        clearComponentMetadata(node);
+        continue;
+      }
+      node.componentOverrides = normalizeComponentOverrides(node.componentOverrides);
+    }
+  }
+
+  document.components = components;
+  return document;
+}
+
 function cloneValue(value) {
   return globalThis.structuredClone
     ? globalThis.structuredClone(value)
@@ -1073,6 +1221,73 @@ function ensureUniqueIds(document) {
       }
     }
   }
+}
+
+function normalizeComponentRecords(input, document) {
+  const components = [];
+  const usedIds = new Set();
+  const usedSources = new Set();
+  const source = Array.isArray(input) ? input.slice(0, 5_000) : [];
+  for (const raw of source) {
+    if (!raw || typeof raw !== "object") continue;
+    const id = cleanString(raw.id, "", 160);
+    const sourcePageId = cleanString(raw.sourcePageId, "", 160);
+    const sourceNodeId = cleanString(raw.sourceNodeId, "", 160);
+    const page = getPage(document, sourcePageId);
+    const node = page ? getNode(page, sourceNodeId) : null;
+    const sourceKey = `${sourcePageId}:${sourceNodeId}`;
+    if (!id || usedIds.has(id) || usedSources.has(sourceKey) || !page || !node) continue;
+    usedIds.add(id);
+    usedSources.add(sourceKey);
+    const now = new Date().toISOString();
+    components.push({
+      id,
+      name: cleanString(raw.name, node.name || "Component", 120),
+      sourcePageId,
+      sourceNodeId,
+      createdAt: cleanString(raw.createdAt, now, 64),
+      updatedAt: cleanString(raw.updatedAt, now, 64),
+    });
+  }
+  return components;
+}
+
+function normalizeComponentOverrides(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const overrides = {};
+  for (const [sourceId, rawProperties] of Object.entries(input).slice(0, 5_000)) {
+    const id = cleanString(sourceId, "", 160);
+    if (!id || !rawProperties || typeof rawProperties !== "object" || Array.isArray(rawProperties)) continue;
+    const properties = {};
+    for (const [property, value] of Object.entries(rawProperties).slice(0, COMPONENT_OVERRIDE_PROPERTIES.length)) {
+      if (!COMPONENT_OVERRIDE_PROPERTY_SET.has(property)) continue;
+      const cloned = cloneComponentOverrideValue(value);
+      if (cloned !== undefined) properties[property] = cloned;
+    }
+    if (Object.keys(properties).length) overrides[id] = properties;
+  }
+  return overrides;
+}
+
+function cloneComponentOverrideValue(value) {
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined || serialized.length > 40_000_000) return undefined;
+    return JSON.parse(serialized);
+  } catch {
+    return undefined;
+  }
+}
+
+function getInstanceRootInPage(document, node) {
+  let cursor = node;
+  const visited = new Set();
+  while (cursor && !visited.has(cursor.id)) {
+    if (cursor.componentRole === COMPONENT_ROLES.INSTANCE) return cursor;
+    visited.add(cursor.id);
+    cursor = cursor.parentId ? getNode(document, cursor.parentId) : null;
+  }
+  return null;
 }
 
 function combinedBounds(bounds) {

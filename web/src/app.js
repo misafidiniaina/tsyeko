@@ -51,6 +51,23 @@ import {
   resizeFrameChildren,
   resolvePageLayout,
 } from "./layout.js";
+import {
+  createComponent,
+  createComponentInstance,
+  detachComponentInstance,
+  getComponentDefinition,
+  getComponentInstanceCount,
+  getComponentInstanceRoot,
+  getComponentSource,
+  hasComponentOverrides,
+  isComponentInstanceMember,
+  isComponentInstanceRoot,
+  isComponentSource,
+  isMainComponent,
+  recordComponentOverride,
+  resetComponentOverrides,
+  syncDocumentComponents,
+} from "./components.js";
 import { DocumentHistory } from "./history.js";
 import { documentToSVG, downloadBlob, safeFilename } from "./export.js";
 import { loadWorkspace, saveWorkspace } from "./persistence.js";
@@ -84,6 +101,9 @@ const elements = {
   saveState: document.querySelector("#saveState"),
   layersList: document.querySelector("#layersList"),
   emptyLayers: document.querySelector("#emptyLayers"),
+  assetsSearch: document.querySelector("#assetsSearch"),
+  componentsList: document.querySelector("#componentsList"),
+  emptyComponents: document.querySelector("#emptyComponents"),
   inspector: document.querySelector("#inspector"),
   zoomValue: document.querySelector("#zoomValue"),
   mainMenuButton: document.querySelector("#mainMenuButton"),
@@ -106,6 +126,7 @@ const renderer = new CanvasRenderer(elements.canvas);
 renderer.onInvalidate = () => requestRender();
 const restoredWorkspace = await restoreWorkspace();
 let designDocument = restoredWorkspace?.document ?? createStarterDocument();
+syncDocumentComponents(designDocument);
 resolveAllPageLayouts(designDocument);
 let activePageId = getPage(designDocument, restoredWorkspace?.activePageId)?.id ?? designDocument.pages[0].id;
 let pageViews = restoredWorkspace?.pageViews ?? {};
@@ -180,13 +201,7 @@ function bindToolbar() {
   document.querySelector("#playButton").addEventListener("click", openPreview);
   document.querySelector("#addPageButton").addEventListener("click", addPage);
   document.querySelector("#importImageButton").addEventListener("click", () => openImagePicker());
-  document.querySelector("#createComponentButton").addEventListener("click", () => {
-    if (!selectedIds.length) {
-      showToast("Select one or more layers first.");
-      return;
-    }
-    showToast("Component definitions and instances are planned for the design-system milestone.");
-  });
+  document.querySelector("#createComponentButton").addEventListener("click", createComponentFromSelection);
 }
 
 function bindCanvas() {
@@ -240,8 +255,17 @@ function bindPanels() {
         renderLayers();
         return;
       }
-      if (action.dataset.layerAction === "visibility") node.visible = !node.visible;
-      if (action.dataset.layerAction === "lock") node.locked = !node.locked;
+      if (action.dataset.layerAction === "visibility") {
+        node.visible = !node.visible;
+        recordComponentOverride(designDocument, currentPage(), node, "visible");
+      }
+      if (action.dataset.layerAction === "lock") {
+        if (isComponentInstanceMember(node)) {
+          showToast("Lock the main component or detach this instance first.");
+          return;
+        }
+        node.locked = !node.locked;
+      }
       commitDocument();
       return;
     }
@@ -256,6 +280,13 @@ function bindPanels() {
       selectedIds = [id];
     }
     refreshUI();
+  });
+
+  elements.assetsSearch.addEventListener("input", renderAssets);
+  elements.componentsList.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-component-action='insert']");
+    if (!button) return;
+    insertComponentInstance(button.dataset.componentId);
   });
 
   elements.pageSwitcher.addEventListener("click", (event) => {
@@ -313,6 +344,7 @@ function bindInspector() {
         value = clamp(value, 0, 10_000);
       }
       node[property] = value;
+      recordComponentOverride(designDocument, currentPage(), node, property);
       liveDocumentChange();
       return;
     }
@@ -327,6 +359,7 @@ function bindInspector() {
       const value = normalizeInspectorColor(gradientStopInput.value);
       if (!node.gradient.stops[index] || !isRenderableColor(value)) return;
       node.gradient.stops[index].color = value;
+      recordComponentOverride(designDocument, currentPage(), node, "gradient");
       liveDocumentChange();
       return;
     }
@@ -339,6 +372,7 @@ function bindInspector() {
       if (!Number.isFinite(value)) return;
       if (gradientInput.dataset.gradientProperty === "angle") value = ((value % 360) + 360) % 360;
       node.gradient[gradientInput.dataset.gradientProperty] = value;
+      recordComponentOverride(designDocument, currentPage(), node, "gradient");
       liveDocumentChange();
       return;
     }
@@ -361,6 +395,7 @@ function bindInspector() {
         if (["offsetX", "offsetY"].includes(property)) value = clamp(value, -10_000, 10_000);
       }
       node.shadow[property] = value;
+      recordComponentOverride(designDocument, currentPage(), node, "shadow");
       liveDocumentChange();
       return;
     }
@@ -371,6 +406,11 @@ function bindInspector() {
     if (!node) return;
 
     const property = input.dataset.property;
+    if (isComponentGeometryLocked(node, property)) {
+      showToast("Resize, rotate, or move the main component. Detach this instance for a free transform.");
+      renderInspector();
+      return;
+    }
     let value = input.value;
     if (input.dataset.valueType === "number") {
       value = Number.parseFloat(value);
@@ -396,6 +436,7 @@ function bindInspector() {
       : null;
     if (isAutoBoundsContainer(node) && ["width", "height"].includes(property)) {
       scaleAutoBoundsContainer(node, property, value);
+      recordComponentOverride(designDocument, currentPage(), node, property);
       liveDocumentChange();
       return;
     }
@@ -440,6 +481,7 @@ function bindInspector() {
         child.rotation = normalizeDegrees(child.rotation + delta);
       }
     }
+    recordComponentOverride(designDocument, currentPage(), node, property);
     liveDocumentChange();
 
     if (property === "name") renderLayers();
@@ -456,8 +498,65 @@ function bindInspector() {
     if (!node) return;
     const action = button.dataset.inspectorAction;
 
+    if (action === "reset-component-overrides") {
+      const root = resetComponentOverrides(designDocument, currentPage(), node);
+      if (!root) return;
+      selectedIds = [root.id];
+      commitDocument();
+      showToast("Instance overrides reset");
+      return;
+    }
+    if (action === "detach-component-instance") {
+      const root = detachComponentInstance(currentPage(), node);
+      if (!root) return;
+      selectedIds = [root.id];
+      commitDocument();
+      showToast("Instance detached");
+      return;
+    }
+    if (action === "reveal-main-component") {
+      revealMainComponent(node.componentId);
+      return;
+    }
+    if (action === "select-component-instance") {
+      const root = getComponentInstanceRoot(currentPage(), node);
+      if (!root) return;
+      selectedIds = [root.id];
+      refreshUI();
+      return;
+    }
+    if (isComponentInstanceMember(node) && [
+      "edit-vector",
+      "reverse-vector",
+      "vector-closed",
+      "vector-fill-rule",
+      "vector-point-corner",
+      "vector-point-smooth",
+    ].includes(action)) {
+      showToast("Edit vector geometry in the main component, or detach this instance first.");
+      return;
+    }
+    if (isComponentInstanceMember(node) && !isComponentInstanceRoot(node) && [
+      "layout-sizing-horizontal",
+      "layout-sizing-vertical",
+      "layout-positioning",
+    ].includes(action)) {
+      showToast("Change layout sizing in the main component, or detach this instance first.");
+      return;
+    }
+
     if (action === "toggle-visible") node.visible = !node.visible;
-    if (action === "toggle-lock") node.locked = !node.locked;
+    if (action === "toggle-lock") {
+      if (isComponentInstanceMember(node)) {
+        showToast("Lock the main component or detach this instance first.");
+        return;
+      }
+      node.locked = !node.locked;
+    }
+    if (["bring-forward", "send-backward"].includes(action) && isComponentInstanceMember(node) && !isComponentInstanceRoot(node)) {
+      showToast("Reorder the instance itself, or detach it to reorder an internal layer.");
+      return;
+    }
     if (action === "bring-forward") reorderNode(currentPage(), node.id, "front");
     if (action === "send-backward") reorderNode(currentPage(), node.id, "back");
     if (action === "delete") {
@@ -543,6 +642,8 @@ function bindInspector() {
       openImagePicker(node.id);
       return;
     }
+    const overrideProperty = componentOverridePropertyForAction(action);
+    if (overrideProperty) recordComponentOverride(designDocument, currentPage(), node, overrideProperty);
     commitDocument();
   });
 
@@ -595,7 +696,7 @@ function bindMenus() {
     if (action === "redo") redo();
     if (action === "fit") fitToContent();
     if (action === "shortcuts") {
-      showToast("V select · P pen · Enter edit · ⌘G group · ⌘⌥U/S/I/X Boolean · ⌘⌥M mask · ⌘D duplicate");
+      showToast("V select · P pen · Enter edit · ⌘G group · ⌘⌥K component · ⌘⌥U/S/I/X Boolean · ⌘⌥M mask · ⌘D duplicate");
     }
   });
 
@@ -642,6 +743,11 @@ function bindKeyboard() {
     if (command && key === "d") {
       event.preventDefault();
       duplicateSelection();
+      return;
+    }
+    if (command && event.altKey && event.code === "KeyK") {
+      event.preventDefault();
+      createComponentFromSelection();
       return;
     }
     const booleanShortcut = {
@@ -920,6 +1026,10 @@ function onPointerDown(event) {
   const handle = selectedNode ? renderer.getHandleAt(screen, selectedNode, camera) : null;
 
   if (handle && selectedNode && !isNodeEffectivelyLocked(currentPage(), selectedNode)) {
+    if (isComponentInstanceMember(selectedNode)) {
+      showToast("Resize and rotation stay linked to the main component. Detach this instance for a free transform.");
+      return;
+    }
     if (handle === "rotate" && isAutoLayoutFrame(selectedNode)) {
       showToast("Auto Layout frames use an axis-aligned flow and cannot be rotated yet.");
       return;
@@ -943,18 +1053,21 @@ function onPointerDown(event) {
 
     if (!isNodeEffectivelyLocked(currentPage(), hit) && selectedIds.includes(hit.id)) {
       const rootIds = getTopLevelNodeIds(currentPage(), selectedIds)
-        .filter((id) => !isNodeEffectivelyLocked(currentPage(), id));
+        .filter((id) => !isNodeEffectivelyLocked(currentPage(), id))
+        .filter((id) => canMoveComponentNode(getNode(currentPage(), id)));
       const movableNodes = getNodesWithDescendants(currentPage(), rootIds);
-      interaction = {
-        type: "move",
-        pointerId: event.pointerId,
-        startWorld: world,
-        nodes: movableNodes.map((node) => ({ id: node.id, x: node.x, y: node.y })),
-        rootIds,
-        axis: null,
-      };
-      capturePointer(event);
-      updateCanvasCursor("move");
+      if (movableNodes.length) {
+        interaction = {
+          type: "move",
+          pointerId: event.pointerId,
+          startWorld: world,
+          nodes: movableNodes.map((node) => ({ id: node.id, x: node.x, y: node.y })),
+          rootIds,
+          axis: null,
+        };
+        capturePointer(event);
+        updateCanvasCursor("move");
+      }
     }
     refreshUI();
     return;
@@ -1115,7 +1228,7 @@ function onDoubleClick(event) {
     }
     return;
   }
-  if (node?.type === NODE_TYPES.VECTOR && !isNodeEffectivelyLocked(currentPage(), node)) {
+  if (node?.type === NODE_TYPES.VECTOR && !isNodeEffectivelyLocked(currentPage(), node) && !isComponentInstanceMember(node)) {
     enterVectorEdit(node);
     return;
   }
@@ -1254,6 +1367,10 @@ function constrainPenPoint(origin, point, enabled) {
 
 function enterVectorEdit(node, pointIndex = null) {
   if (node?.type !== NODE_TYPES.VECTOR || isNodeEffectivelyLocked(currentPage(), node)) return;
+  if (isComponentInstanceMember(node)) {
+    showToast("Edit vector geometry in the main component, or detach this instance first.");
+    return;
+  }
   if (activeTool !== "select") setTool("select");
   selectedIds = [node.id];
   vectorEdit = { nodeId: node.id, pointIndex, handleKind: null };
@@ -1617,7 +1734,7 @@ function updateHoverCursor(screen) {
     return;
   }
   const handle = selected ? renderer.getHandleAt(screen, selected, camera) : null;
-  if (handle) {
+  if (handle && !isComponentInstanceMember(selected)) {
     elements.canvas.dataset.cursor = "";
     elements.canvas.style.cursor = resizeCursorForHandle(handle, selected.rotation);
     return;
@@ -1657,6 +1774,7 @@ function onTextEditInput() {
   const node = getNode(currentPage(), editingTextId);
   if (!node) return;
   node.text = elements.textEditor.value;
+  recordComponentOverride(designDocument, currentPage(), node, "text");
   liveDocumentChange();
 }
 
@@ -1672,6 +1790,17 @@ function deleteSelection() {
   if (!selectedIds.length) return;
   const ids = getTopLevelNodeIds(currentPage(), selectedIds)
     .filter((id) => !isNodeEffectivelyLocked(currentPage(), id));
+  for (const id of ids) {
+    const node = getNode(currentPage(), id);
+    if (isComponentInstanceMember(node) && !isComponentInstanceRoot(node)) {
+      showToast("Delete the whole instance, or detach it before deleting an internal layer.");
+      return;
+    }
+    if (isMainComponent(node) && getComponentInstanceCount(designDocument, node.componentId) > 0) {
+      showToast("This main component has instances. Detach or delete those instances first.");
+      return;
+    }
+  }
   deleteNodes(currentPage(), ids);
   if (vectorEdit && !getNode(currentPage(), vectorEdit.nodeId)) vectorEdit = null;
   selectedIds = selectedIds.filter((id) => getNode(currentPage(), id));
@@ -1680,6 +1809,10 @@ function deleteSelection() {
 
 function duplicateSelection() {
   if (!selectedIds.length) return;
+  if (selectionContainsInternalInstanceLayer()) {
+    showToast("Select the instance root to duplicate it, or detach it first.");
+    return;
+  }
   const copies = duplicateNodes(currentPage(), selectedIds, 20 / camera.zoom);
   const copyIds = new Set(copies.map((node) => node.id));
   selectedIds = copies.filter((node) => !copyIds.has(node.parentId)).map((node) => node.id);
@@ -1687,6 +1820,10 @@ function duplicateSelection() {
 }
 
 function copySelection() {
+  if (selectionContainsInternalInstanceLayer()) {
+    showToast("Select the instance root to copy it, or detach it first.");
+    return;
+  }
   clipboardNodes = getNodesWithDescendants(currentPage(), selectedIds).map(cloneNode);
   if (clipboardNodes.length) showToast(`${clipboardNodes.length} layer${clipboardNodes.length === 1 ? "" : "s"} copied`);
 }
@@ -1696,8 +1833,17 @@ function pasteClipboard() {
   const idMap = new Map();
   const copies = clipboardNodes.map((source) => {
     const { id: _id, parentId: _parentId, ...properties } = source;
+    const componentProperties = shouldPreservePastedComponentMetadata(source)
+      ? properties
+      : {
+          ...properties,
+          componentId: null,
+          componentRole: null,
+          componentSourceId: null,
+          componentOverrides: {},
+        };
     const copy = createNode(source.type, source.x + 24, source.y + 24, {
-      ...properties,
+      ...componentProperties,
       locked: false,
       parentId: null,
     });
@@ -1722,9 +1868,13 @@ function pasteClipboard() {
 
 function nudgeSelection(key, amount) {
   const rootIds = getTopLevelNodeIds(currentPage(), selectedIds)
-    .filter((id) => !isNodeEffectivelyLocked(currentPage(), id));
+    .filter((id) => !isNodeEffectivelyLocked(currentPage(), id))
+    .filter((id) => canMoveComponentNode(getNode(currentPage(), id)));
   const nodes = getNodesWithDescendants(currentPage(), rootIds);
-  if (!nodes.length) return;
+  if (!nodes.length) {
+    if (selectedIds.length) showToast("Move the instance root, or detach this instance for independent positioning.");
+    return;
+  }
   for (const node of nodes) {
     if (key === "ArrowLeft") node.x -= amount;
     if (key === "ArrowRight") node.x += amount;
@@ -1737,6 +1887,7 @@ function nudgeSelection(key, amount) {
 
 function groupSelection() {
   if (!selectedIds.length) return;
+  if (!canChangeComponentStructure("Group")) return;
   vectorEdit = null;
   const group = groupNodes(currentPage(), selectedIds);
   if (!group) {
@@ -1752,6 +1903,7 @@ function autoLayoutSelection(requestedMode = null) {
     showToast("Select one or more sibling layers first.");
     return;
   }
+  if (!canChangeComponentStructure("Auto Layout")) return;
   vectorEdit = null;
   const rootIds = getTopLevelNodeIds(currentPage(), selectedIds)
     .filter((id) => !isNodeEffectivelyLocked(currentPage(), id));
@@ -1788,6 +1940,7 @@ function booleanSelection(operation) {
     showToast("Select at least two sibling layers for a Boolean operation.");
     return;
   }
+  if (!canChangeComponentStructure("Boolean operations")) return;
   vectorEdit = null;
   const boolean = booleanGroupNodes(currentPage(), selectedIds, operation);
   if (!boolean) {
@@ -1805,6 +1958,7 @@ function maskSelection() {
     showToast("Select a mask shape and at least one content layer.");
     return;
   }
+  if (!canChangeComponentStructure("Masks")) return;
   vectorEdit = null;
   const mask = maskNodes(currentPage(), selectedIds);
   if (!mask) {
@@ -1819,6 +1973,7 @@ function maskSelection() {
 
 function ungroupSelection() {
   if (!selectedIds.length) return;
+  if (!canChangeComponentStructure("Ungroup")) return;
   vectorEdit = null;
   const released = ungroupNodes(currentPage(), selectedIds);
   if (!released.length) {
@@ -1831,6 +1986,63 @@ function ungroupSelection() {
 
 function isAutoBoundsContainer(node) {
   return [NODE_TYPES.GROUP, NODE_TYPES.BOOLEAN, NODE_TYPES.MASK].includes(node?.type);
+}
+
+function isComponentGeometryLocked(node, property) {
+  const root = getComponentInstanceRoot(currentPage(), node);
+  if (!root) return false;
+  if (["width", "height", "rotation"].includes(property)) return true;
+  return ["x", "y"].includes(property) && root.id !== node.id;
+}
+
+function canMoveComponentNode(node) {
+  return !isComponentInstanceMember(node) || isComponentInstanceRoot(node);
+}
+
+function selectionContainsInternalInstanceLayer() {
+  const roots = getTopLevelNodeIds(currentPage(), selectedIds)
+    .map((id) => getNode(currentPage(), id))
+    .filter(Boolean);
+  return roots.some((node) => isComponentInstanceMember(node) && !isComponentInstanceRoot(node));
+}
+
+function canChangeComponentStructure(action) {
+  const selected = getNodesWithDescendants(currentPage(), selectedIds);
+  if (!selected.some(isComponentInstanceMember)) return true;
+  showToast(`${action} would change a linked instance. Detach it first.`);
+  return false;
+}
+
+function shouldPreservePastedComponentMetadata(source) {
+  if (!isComponentInstanceMember(source)) return false;
+  const byId = new Map(clipboardNodes.map((node) => [node.id, node]));
+  let cursor = source;
+  const visited = new Set();
+  while (cursor && !visited.has(cursor.id)) {
+    if (isComponentInstanceRoot(cursor)) return true;
+    visited.add(cursor.id);
+    cursor = cursor.parentId ? byId.get(cursor.parentId) : null;
+  }
+  return false;
+}
+
+function componentOverridePropertyForAction(action) {
+  return {
+    "toggle-visible": "visible",
+    "boolean-operation": "booleanOperation",
+    align: "textAlign",
+    "fill-mode": "fillType",
+    "toggle-shadow": "shadow",
+    "image-fit": "imageFit",
+    "layout-mode": "layoutMode",
+    "primary-axis-align": "primaryAxisAlign",
+    "counter-axis-align": "counterAxisAlign",
+    "vector-closed": "vectorClosed",
+    "vector-fill-rule": "vectorFillRule",
+    "reverse-vector": "vectorPoints",
+    "vector-point-corner": "vectorPoints",
+    "vector-point-smooth": "vectorPoints",
+  }[action] ?? null;
 }
 
 function scaleAutoBoundsContainer(node, property, value) {
@@ -1860,12 +2072,17 @@ function scaleAutoBoundsContainer(node, property, value) {
 
 function arrangeSelection(direction) {
   if (selectedIds.length !== 1) return;
+  const node = getNode(currentPage(), selectedIds[0]);
+  if (isComponentInstanceMember(node) && !isComponentInstanceRoot(node)) {
+    showToast("Reorder the instance itself, or detach it to reorder an internal layer.");
+    return;
+  }
   if (reorderNode(currentPage(), selectedIds[0], direction)) commitDocument();
 }
 
 function assignNodeToFrame(page, node) {
   const frame = findContainingFrame(page, node);
-  node.parentId = frame?.id ?? null;
+  node.parentId = isComponentSource(frame) || isComponentInstanceMember(frame) ? null : frame?.id ?? null;
   sortNodesByHierarchy(page);
 }
 
@@ -1875,7 +2092,8 @@ function reparentMovedRoots(rootIds = []) {
     const node = getNode(page, id);
     const currentParent = node?.parentId ? getNode(page, node.parentId) : null;
     if (!node || [NODE_TYPES.GROUP, NODE_TYPES.BOOLEAN, NODE_TYPES.MASK].includes(currentParent?.type)) continue;
-    node.parentId = findContainingFrame(page, node, rootIds)?.id ?? null;
+    const frame = findContainingFrame(page, node, rootIds);
+    node.parentId = isComponentSource(frame) || isComponentInstanceMember(frame) ? null : frame?.id ?? null;
   }
   sortNodesByHierarchy(page);
   for (const id of rootIds) reorderAutoLayoutChild(page, id);
@@ -2018,8 +2236,13 @@ function resolveAllPageLayouts(document) {
   for (const page of document.pages) resolvePageGeometry(page);
 }
 
+function synchronizeDocumentGeometry() {
+  syncDocumentComponents(designDocument);
+  resolveAllPageLayouts(designDocument);
+}
+
 function commitDocument() {
-  resolvePageGeometry(currentPage());
+  synchronizeDocumentGeometry();
   designDocument.updatedAt = new Date().toISOString();
   history.commit(designDocument);
   scheduleSave();
@@ -2027,7 +2250,7 @@ function commitDocument() {
 }
 
 function liveDocumentChange() {
-  resolvePageGeometry(currentPage());
+  synchronizeDocumentGeometry();
   designDocument.updatedAt = new Date().toISOString();
   elements.saveState.textContent = "Saving…";
   scheduleSave();
@@ -2044,6 +2267,7 @@ function undo() {
     return;
   }
   designDocument = previous;
+  synchronizeDocumentGeometry();
   ensureActivePage();
   selectedIds = selectedIds.filter((id) => getNode(currentPage(), id));
   scheduleSave();
@@ -2060,6 +2284,7 @@ function redo() {
     return;
   }
   designDocument = next;
+  synchronizeDocumentGeometry();
   ensureActivePage();
   selectedIds = selectedIds.filter((id) => getNode(currentPage(), id));
   scheduleSave();
@@ -2071,6 +2296,7 @@ function refreshUI() {
   elements.currentPageName.textContent = currentPage().name;
   renderPages();
   renderLayers();
+  renderAssets();
   const designTab = [...document.querySelectorAll(".inspector-tab")].find((tab) => tab.textContent.trim() === "Design");
   if (designTab?.classList.contains("active")) renderInspector();
   requestRender();
@@ -2101,7 +2327,13 @@ function renderLayers() {
           ? "BASE"
           : ({ union: "ADD", subtract: "CUT", intersect: "AND", exclude: "XOR" }[parent.booleanOperation] ?? "SOURCE")
         : "";
-    if (!layerRole && isAutoLayoutFrame(node)) {
+    if (isMainComponent(node)) {
+      layerRole = "MAIN";
+    } else if (isComponentInstanceRoot(node)) {
+      layerRole = "INSTANCE";
+    } else if (isComponentInstanceMember(node) && componentNodeHasOverride(page, node)) {
+      layerRole = "OVERRIDE";
+    } else if (!layerRole && isAutoLayoutFrame(node)) {
       layerRole = node.layoutMode === LAYOUT_MODES.HORIZONTAL ? "AUTO H" : "AUTO V";
     } else if (!layerRole && isAutoLayoutFrame(parent)) {
       if (node.layoutPositioning === LAYOUT_POSITIONING.ABSOLUTE) layerRole = "ABS";
@@ -2112,7 +2344,7 @@ function renderLayers() {
         ${hasChildren
           ? `<button class="layer-collapse" data-layer-action="collapse" title="${collapsed ? "Expand" : "Collapse"} layer" aria-label="${collapsed ? "Expand" : "Collapse"} ${escapeAttribute(node.name)}" aria-expanded="${!collapsed}"><svg viewBox="0 0 20 20"><path d="m6.5 8 3.5 3.5L13.5 8" /></svg></button>`
           : '<span class="layer-collapse-spacer"></span>'}
-        <span class="layer-icon">${nodeIcon(node.type)}</span>
+        <span class="layer-icon">${componentLayerIcon(node)}</span>
         <span class="layer-name" title="${escapeAttribute(node.name)}">${escapeHTML(node.name)}</span>
         <span class="layer-composite-role">${layerRole}</span>
         <button class="layer-action" data-layer-action="visibility" title="${node.visible ? "Hide" : "Show"} layer" aria-label="${node.visible ? "Hide" : "Show"} ${escapeAttribute(node.name)}">${visibilityIcon(node.visible)}</button>
@@ -2126,6 +2358,86 @@ function renderLayers() {
     .reverse()
     .map((node) => renderBranch(node, 0))
     .join("");
+}
+
+function renderAssets() {
+  if (!elements.componentsList || !elements.emptyComponents) return;
+  const query = (elements.assetsSearch?.value ?? "").trim().toLowerCase();
+  const allComponents = designDocument.components ?? [];
+  const components = allComponents.filter((component) => component.name.toLowerCase().includes(query));
+  elements.emptyComponents.hidden = allComponents.length > 0;
+  if (!components.length) {
+    elements.componentsList.innerHTML = allComponents.length
+      ? '<p class="assets-empty-result">No local components match that search.</p>'
+      : "";
+    return;
+  }
+  elements.componentsList.innerHTML = components.map((component) => {
+    const count = getComponentInstanceCount(designDocument, component.id);
+    return `<button class="component-card" data-component-action="insert" data-component-id="${escapeAttribute(component.id)}" title="Insert ${escapeAttribute(component.name)}">
+      <span class="component-card-preview">${componentIcon()}</span>
+      <span class="component-card-copy"><strong>${escapeHTML(component.name)}</strong><small>${count} instance${count === 1 ? "" : "s"}</small></span>
+      <span class="component-card-add">+</span>
+    </button>`;
+  }).join("");
+}
+
+function createComponentFromSelection() {
+  finishTextEditing(true);
+  vectorEdit = null;
+  const result = createComponent(designDocument, activePageId, selectedIds);
+  if (result.error || !result.source || !result.component) {
+    showToast(result.error ?? "Could not create a component from that selection.");
+    return;
+  }
+  selectedIds = [result.source.id];
+  collapsedLayerIds.delete(result.source.id);
+  commitDocument();
+  showToast(`${result.component.name} is now a local component`);
+}
+
+function insertComponentInstance(componentId) {
+  const source = getComponentSource(designDocument, componentId);
+  if (!source) {
+    showToast("That component source is no longer available.");
+    return;
+  }
+  const center = renderer.screenToWorld(
+    { x: renderer.width / 2, y: renderer.height / 2 },
+    camera,
+  );
+  const instance = createComponentInstance(designDocument, componentId, activePageId, {
+    x: center.x - source.node.width / 2,
+    y: center.y - source.node.height / 2,
+  });
+  if (!instance) {
+    showToast("Could not insert that component.");
+    return;
+  }
+  assignNodeToFrame(currentPage(), instance);
+  selectedIds = [instance.id];
+  collapsedLayerIds.delete(instance.id);
+  commitDocument();
+  showToast(`${source.component.name} instance inserted`);
+}
+
+function revealMainComponent(componentId) {
+  const source = getComponentSource(designDocument, componentId);
+  if (!source) {
+    showToast("The main component is no longer available.");
+    return;
+  }
+  if (activePageId !== source.page.id) switchPage(source.page.id);
+  selectedIds = [source.node.id];
+  collapsedLayerIds.delete(source.node.id);
+  refreshUI();
+  fitToContent([source.node.id]);
+}
+
+function componentNodeHasOverride(page, node) {
+  const root = getComponentInstanceRoot(page, node);
+  const properties = root?.componentOverrides?.[node?.componentSourceId];
+  return Boolean(properties && Object.keys(properties).length);
 }
 
 function renderPages() {
@@ -2210,6 +2522,9 @@ function renderInspector() {
 
   const node = getNode(currentPage(), selectedIds[0]);
   if (!node) return;
+  const instanceRoot = getComponentInstanceRoot(currentPage(), node);
+  const isLinkedInstance = Boolean(instanceRoot);
+  const instancePositionLocked = isLinkedInstance && instanceRoot.id !== node.id;
   const managedPosition = isAutoLayoutChild(currentPage(), node);
   const managedWidth = (managedPosition && node.layoutSizingHorizontal === LAYOUT_SIZING.FILL) ||
     (isAutoLayoutFrame(node) && node.layoutSizingHorizontal === LAYOUT_SIZING.HUG);
@@ -2217,18 +2532,20 @@ function renderInspector() {
     (isAutoLayoutFrame(node) && node.layoutSizingVertical === LAYOUT_SIZING.HUG);
   elements.inspector.innerHTML = `
     <div class="selection-summary">
-      <span class="selection-summary-icon">${nodeIcon(node.type)}</span>
+      <span class="selection-summary-icon">${componentLayerIcon(node)}</span>
       <input data-property="name" value="${escapeAttribute(node.name)}" aria-label="Layer name" />
     </div>
+
+    ${componentInspector(node)}
 
     ${node.type !== NODE_TYPES.GROUP ? `<section class="inspector-section">
       <p class="inspector-section-title">Position</p>
       <div class="field-grid">
-        ${numberField("X", "x", node.x, managedPosition)}
-        ${numberField("Y", "y", node.y, managedPosition)}
-        ${numberField("W", "width", node.width, managedWidth)}
-        ${numberField("H", "height", node.height, managedHeight)}
-        ${numberField("↻", "rotation", node.rotation, isAutoLayoutFrame(node))}
+        ${numberField("X", "x", node.x, managedPosition || instancePositionLocked)}
+        ${numberField("Y", "y", node.y, managedPosition || instancePositionLocked)}
+        ${numberField("W", "width", node.width, managedWidth || isLinkedInstance)}
+        ${numberField("H", "height", node.height, managedHeight || isLinkedInstance)}
+        ${numberField("↻", "rotation", node.rotation, isAutoLayoutFrame(node) || isLinkedInstance)}
         ${numberField("R", "cornerRadius", node.cornerRadius, [NODE_TYPES.ELLIPSE, NODE_TYPES.TEXT, NODE_TYPES.VECTOR, NODE_TYPES.BOOLEAN, NODE_TYPES.MASK].includes(node.type))}
       </div>
     </section>` : ""}
@@ -2275,6 +2592,40 @@ function renderInspector() {
       </div>
       <button class="button button-quiet" data-inspector-action="delete" style="width: 100%; margin-top: 8px; color: #fca5a5">Delete layer</button>
     </section>`;
+}
+
+function componentInspector(node) {
+  const component = node?.componentId ? getComponentDefinition(designDocument, node.componentId) : null;
+  if (!component) return "";
+  if (isMainComponent(node)) {
+    const count = getComponentInstanceCount(designDocument, component.id);
+    return `<section class="inspector-section component-inspector">
+      <p class="inspector-section-title">${componentIcon()} Main component</p>
+      <div class="component-inspector-summary"><strong>${escapeHTML(component.name)}</strong><span>${count} linked instance${count === 1 ? "" : "s"}</span></div>
+      <p class="inspector-hint">Changes to this source update every linked instance.</p>
+    </section>`;
+  }
+  if (isComponentSource(node)) {
+    return `<section class="inspector-section component-inspector">
+      <p class="inspector-section-title">${componentIcon()} Main component source</p>
+      <div class="component-inspector-summary"><strong>${escapeHTML(component.name)}</strong><span>Shared layer</span></div>
+      <button class="button button-quiet" data-inspector-action="reveal-main-component" style="width: 100%; margin-top: 8px">Select main component</button>
+    </section>`;
+  }
+  const root = getComponentInstanceRoot(currentPage(), node);
+  if (!root) return "";
+  const overridden = hasComponentOverrides(currentPage(), root);
+  return `<section class="inspector-section component-inspector">
+    <p class="inspector-section-title">${componentIcon()} ${root.id === node.id ? "Instance" : "Instance layer"}</p>
+    <div class="component-inspector-summary"><strong>${escapeHTML(component.name)}</strong><span>${componentNodeHasOverride(currentPage(), node) ? "Local override" : "Linked to main"}</span></div>
+    <div class="field-grid one-column" style="margin-top: 8px">
+      ${root.id === node.id ? "" : '<button class="button button-quiet" data-inspector-action="select-component-instance">Select instance</button>'}
+      <button class="button button-quiet" data-inspector-action="reveal-main-component">Go to main component</button>
+      <button class="button button-quiet" data-inspector-action="reset-component-overrides" ${overridden ? "" : "disabled"}>Reset all overrides</button>
+      <button class="button button-quiet" data-inspector-action="detach-component-instance">Detach instance</button>
+    </div>
+    <p class="inspector-hint">Visual and content edits become local overrides. Geometry stays linked until you detach.</p>
+  </section>`;
 }
 
 function autoLayoutInspector(frame) {
@@ -2699,6 +3050,8 @@ async function importImage() {
     if (replacement?.type === NODE_TYPES.IMAGE) {
       replacement.imageData = imageData;
       replacement.altText ||= file.name;
+      recordComponentOverride(designDocument, page, replacement, "imageData");
+      recordComponentOverride(designDocument, page, replacement, "altText");
       commitDocument();
       showToast("Image replaced");
       return;
@@ -2740,6 +3093,7 @@ async function importDocument() {
     const content = await file.text();
     const imported = normalizeDocument(JSON.parse(content));
     designDocument = imported;
+    syncDocumentComponents(designDocument);
     resolveAllPageLayouts(designDocument);
     penDraft = null;
     vectorEdit = null;
@@ -3040,6 +3394,14 @@ function nodeIcon(type) {
     multiple: '<svg viewBox="0 0 20 20"><rect x="3" y="3" width="9" height="9" /><rect x="8" y="8" width="9" height="9" /></svg>',
   };
   return icons[type] ?? icons.rectangle;
+}
+
+function componentIcon() {
+  return '<svg class="component-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m10 2.8 3 4.2 4.2 3-4.2 3-3 4.2-3-4.2-4.2-3 4.2-3 3-4.2Z" /></svg>';
+}
+
+function componentLayerIcon(node) {
+  return isMainComponent(node) || isComponentInstanceRoot(node) ? componentIcon() : nodeIcon(node?.type);
 }
 
 function visibilityIcon(visible) {
