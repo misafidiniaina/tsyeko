@@ -2,8 +2,9 @@ const DATABASE_NAME = "tsyaiko-editor";
 const DATABASE_VERSION = 1;
 const STORE_NAME = "workspaces";
 const ACTIVE_WORKSPACE_KEY = "active";
-const STORAGE_KEY = "tsyaiko.workspace.v7";
+const STORAGE_KEY = "tsyaiko.workspace.v8";
 const LEGACY_STORAGE_KEYS = [
+  "tsyaiko.workspace.v7",
   "tsyaiko.workspace.v6",
   "tsyaiko.workspace.v5",
   "tsyaiko.workspace.v4",

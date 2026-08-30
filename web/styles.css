@@ -722,6 +722,44 @@ svg {
   height: 20px;
 }
 
+.section-shortcut {
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.layout-control-block {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.layout-control-label {
+  color: var(--text-faint);
+  font-size: 9px;
+  letter-spacing: 0.02em;
+}
+
+.layout-axis-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.layout-axis-row .icon-toggle-row {
+  min-width: 0;
+}
+
+.compact-toggle-row .icon-toggle,
+.layout-axis-row .icon-toggle {
+  min-width: 0;
+  padding-inline: 5px;
+  font-size: 9px;
+}
+
 .field-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

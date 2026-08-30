@@ -35,6 +35,8 @@ GOCACHE=$PWD/.cache/go-build go run .
 - Pen tool for open/closed paths, click-drag curve handles, 45-degree Shift constraints, and click-first-point closure
 - Direct vector editing with draggable anchors and handles, mirrored/free controls, corner/smooth conversion, curve-preserving segment insertion, anchor deletion, path reversal, and fill rules
 - Hierarchical frame/group/Boolean/mask parenting with nested clipping and inherited visibility, locking, and opacity
+- Horizontal and vertical Auto Layout frames with ordered flow, per-side padding, gaps, primary/counter-axis alignment, hug sizing, and fill children
+- Flow/absolute child positioning plus left, right, center, stretch, and scale constraints for responsive frame resizing
 - Embedded PNG, JPEG, WebP, and GIF image layers with cover/contain fitting
 - Solid and editable linear-gradient fills with angle and color stops
 - Data-driven drop shadows with color, opacity, offsets, and blur
@@ -50,7 +52,7 @@ GOCACHE=$PWD/.cache/go-build go run .
 - JSON import/export, SVG export, and high-resolution PNG export
 - Prototype preview surface
 - Responsive editor shell
-- Sanitized, cycle-safe v7 document imports with automatic v1–v6 migration
+- Sanitized, cycle-safe v8 document imports with automatic v1–v7 migration
 - Embedded Go server with a health endpoint and security headers
 
 ## Useful shortcuts
@@ -70,6 +72,7 @@ GOCACHE=$PWD/.cache/go-build go run .
 | Duplicate | `Ctrl/Cmd+D` |
 | Copy / paste | `Ctrl/Cmd+C` / `Ctrl/Cmd+V` |
 | Group / ungroup | `Ctrl/Cmd+G` / `Ctrl/Cmd+Shift+G` |
+| Wrap in Auto Layout | `Shift+A` |
 | Boolean Union | `Ctrl/Cmd+Alt+U` |
 | Boolean Subtract | `Ctrl/Cmd+Alt+S` |
 | Boolean Intersect | `Ctrl/Cmd+Alt+I` |
@@ -89,6 +92,18 @@ GOCACHE=$PWD/.cache/go-build go run .
 | Disconnect a Bézier handle | `Alt`-drag the handle |
 | Delete selected vector anchor | `Backspace` or `Delete` |
 
+## Responsive layout workflow
+
+Select sibling layers and press `Shift+A`, or use the horizontal/vertical Auto Layout buttons in the inspector. The new frame hugs its content and orders children by their visual position. A selected Auto Layout frame exposes:
+
+- Horizontal or vertical flow
+- Fixed, hug, and parent-fill sizing where valid
+- Gap and independent top/right/bottom/left padding
+- Start, center, end, space-between, and stretch alignment
+- Layers-order flow with hidden layers excluded
+
+Select a child to choose fixed/fill sizing or switch it to absolute positioning. Children of ordinary frames—and absolute children of Auto Layout frames—expose horizontal and vertical constraints that are evaluated from the frame geometry at the start of each resize. Canvas, PNG, and SVG all consume the same resolved geometry.
+
 ## Test it
 
 ```bash
@@ -97,7 +112,7 @@ npm run check
 npm run test:browser
 ```
 
-The unit suite covers document migration and sanitization, cubic evaluation, curve-preserving splitting and reversal, vector bounds, Boolean/mask geometry, structured SVG composite export, gradient/effect bounds, cycle-safe hierarchy, subtree operations, multi-page identity, rotated hit testing, history, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies all four Boolean modes and mask intersection with Canvas and rasterized-SVG pixel samples, expanded strokes, nested source editing/release, pen-drag curves, paint editing, image import, grouping, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
+The unit suite covers document migration and sanitization, nested Auto Layout, hug/fill sizing, alignment, frame constraints, SVG layout parity, cubic geometry, Boolean/mask geometry, hierarchy, history, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies the layout inspector, responsive resizing, undo/redo, v8 persistence, all four Boolean modes and mask intersection with Canvas and rasterized-SVG pixel samples, expanded strokes, pen-drag curves, paints, images, grouping, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
 
 ## Project structure
 
@@ -111,11 +126,13 @@ The unit suite covers document migration and sanitization, cubic evaluation, cur
 │   └── src/
 │       ├── app.js           Editor controller and interactions
 │       ├── model.js         Document schema and geometry
+│       ├── layout.js        Auto Layout and frame constraints
 │       ├── vector.js        Cubic path geometry and transformations
 │       ├── history.js       Undo/redo snapshots
 │       ├── renderer.js      Canvas renderer and hit testing
 │       ├── export.js        SVG/JSON/download support
 │       ├── persistence.js   IndexedDB storage and migration fallback
+│       ├── layout.test.js   Responsive layout unit tests
 │       ├── model.test.js    Document and export unit tests
 │       └── vector.test.js   Bézier geometry unit tests
 ├── scripts/
@@ -126,7 +143,7 @@ The unit suite covers document migration and sanitization, cubic evaluation, cur
 
 ## Current product boundary
 
-The MVP stores one hierarchical, multi-page document and embedded raster assets in the browser. Cubic paths, object-level non-destructive Booleans, and silhouette masks are implemented. True multi-contour path editing, destructive path flattening, precision offset curves, and a scalable cached/GPU compositor remain future graphics work. It also has no account system, remote database, true component instances, font asset pipeline, auto layout, or multiplayer synchronization yet. These are explicit follow-on milestones described in [the architecture document](docs/ARCHITECTURE.md).
+The MVP stores one hierarchical, multi-page document and embedded raster assets in the browser. Cubic paths, object-level non-destructive Booleans, silhouette masks, single-axis Auto Layout, and frame constraints are implemented. Layout does not yet include wrapping, min/max dimensions, baseline alignment, intrinsic text measurement, or rotated Auto Layout frames. True multi-contour path editing, destructive path flattening, precision offset curves, and a scalable cached/GPU compositor also remain future work. There is no account system, remote database, true component instances, managed font asset pipeline, or multiplayer synchronization yet. These are explicit follow-on milestones described in [the architecture document](docs/ARCHITECTURE.md).
 
 ## Core design decision
 

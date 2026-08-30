@@ -1,6 +1,7 @@
 import {
   BOOLEAN_OPERATIONS,
   booleanGroupNodes,
+  COUNTER_AXIS_ALIGNS,
   cloneDocument,
   createEmptyDocument,
   createNode,
@@ -21,21 +22,35 @@ import {
   getPage,
   getTopLevelNodeIds,
   groupNodes,
+  HORIZONTAL_CONSTRAINTS,
   isContainerNode,
   isCompositeNode,
   isNodeEffectivelyLocked,
   isNodeEffectivelyVisible,
   localToWorld,
+  LAYOUT_MODES,
+  LAYOUT_POSITIONING,
+  LAYOUT_SIZING,
   maskNodes,
   NODE_TYPES,
   normalizeDocument,
   normalizeVectorBounds,
+  PRIMARY_AXIS_ALIGNS,
   reorderNode,
   sortNodesByHierarchy,
   syncGroupBounds,
   ungroupNodes,
+  VERTICAL_CONSTRAINTS,
   worldToLocal,
 } from "./model.js";
+import {
+  createAutoLayoutFrame,
+  isAutoLayoutChild,
+  isAutoLayoutFrame,
+  reorderAutoLayoutChild,
+  resizeFrameChildren,
+  resolvePageLayout,
+} from "./layout.js";
 import { DocumentHistory } from "./history.js";
 import { documentToSVG, downloadBlob, safeFilename } from "./export.js";
 import { loadWorkspace, saveWorkspace } from "./persistence.js";
@@ -91,6 +106,7 @@ const renderer = new CanvasRenderer(elements.canvas);
 renderer.onInvalidate = () => requestRender();
 const restoredWorkspace = await restoreWorkspace();
 let designDocument = restoredWorkspace?.document ?? createStarterDocument();
+resolveAllPageLayouts(designDocument);
 let activePageId = getPage(designDocument, restoredWorkspace?.activePageId)?.id ?? designDocument.pages[0].id;
 let pageViews = restoredWorkspace?.pageViews ?? {};
 let camera = pageViews[activePageId] ?? restoredWorkspace?.camera ?? { x: 0, y: 0, zoom: 1 };
@@ -285,6 +301,22 @@ function bindInspector() {
       return;
     }
 
+    const layoutInput = event.target.closest("[data-layout-property]");
+    if (layoutInput && selectedIds.length === 1) {
+      const node = getNode(currentPage(), selectedIds[0]);
+      if (!node) return;
+      const property = layoutInput.dataset.layoutProperty;
+      let value = layoutInput.value;
+      if (["layoutGap", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft"].includes(property)) {
+        value = Number.parseFloat(value);
+        if (!Number.isFinite(value)) return;
+        value = clamp(value, 0, 10_000);
+      }
+      node[property] = value;
+      liveDocumentChange();
+      return;
+    }
+
     const gradientStopInput = event.target.closest("[data-gradient-stop]");
     if (gradientStopInput && selectedIds.length === 1) {
       const node = getNode(currentPage(), selectedIds[0]);
@@ -356,6 +388,12 @@ function bindInspector() {
     if (property === "strokeWidth" || property === "cornerRadius") value = Math.max(0, value);
     if (property === "fontSize") value = Math.max(1, value);
     const previousValue = node[property];
+    const frameResizeOriginal = node.type === NODE_TYPES.FRAME && ["width", "height"].includes(property)
+      ? cloneNode(node)
+      : null;
+    const frameResizeSnapshots = frameResizeOriginal
+      ? getNodesWithDescendants(currentPage(), [node.id]).map(cloneNode)
+      : null;
     if (isAutoBoundsContainer(node) && ["width", "height"].includes(property)) {
       scaleAutoBoundsContainer(node, property, value);
       liveDocumentChange();
@@ -370,6 +408,16 @@ function bindInspector() {
       ));
     }
     node[property] = value;
+    if (frameResizeOriginal) {
+      if (property === "width") node.layoutSizingHorizontal = LAYOUT_SIZING.FIXED;
+      if (property === "height") node.layoutSizingVertical = LAYOUT_SIZING.FIXED;
+      resizeFrameChildren(
+        currentPage(),
+        frameResizeOriginal,
+        node,
+        frameResizeSnapshots,
+      );
+    }
     if (isContainerNode(node) && ["x", "y"].includes(property)) {
       const delta = value - previousValue;
       for (const child of getNodesWithDescendants(currentPage(), [node.id])) {
@@ -398,7 +446,7 @@ function bindInspector() {
   });
 
   elements.inspector.addEventListener("change", (event) => {
-    if (event.target.closest("[data-property], [data-page-property], [data-gradient-stop], [data-gradient-property], [data-shadow-property]")) commitDocument();
+    if (event.target.closest("[data-property], [data-page-property], [data-gradient-stop], [data-gradient-property], [data-shadow-property], [data-layout-property]")) commitDocument();
   });
 
   elements.inspector.addEventListener("click", (event) => {
@@ -432,6 +480,40 @@ function bindInspector() {
     if (action === "fill-mode") node.fillType = button.dataset.value;
     if (action === "toggle-shadow") node.shadow.enabled = !node.shadow.enabled;
     if (action === "image-fit") node.imageFit = button.dataset.value;
+    if (action === "layout-mode" && node.type === NODE_TYPES.FRAME) {
+      const mode = button.dataset.value;
+      if (Object.values(LAYOUT_MODES).includes(mode)) {
+        if (mode !== LAYOUT_MODES.NONE && Math.abs(node.rotation) > 0.001) {
+          showToast("Set the frame rotation to 0° before enabling Auto Layout.");
+          return;
+        }
+        node.layoutMode = mode;
+      }
+    }
+    if (action === "primary-axis-align" && isAutoLayoutFrame(node)) {
+      if (Object.values(PRIMARY_AXIS_ALIGNS).includes(button.dataset.value)) {
+        node.primaryAxisAlign = button.dataset.value;
+      }
+    }
+    if (action === "counter-axis-align" && isAutoLayoutFrame(node)) {
+      if (Object.values(COUNTER_AXIS_ALIGNS).includes(button.dataset.value)) {
+        node.counterAxisAlign = button.dataset.value;
+      }
+    }
+    if (["layout-sizing-horizontal", "layout-sizing-vertical"].includes(action)) {
+      const sizing = button.dataset.value;
+      if (Object.values(LAYOUT_SIZING).includes(sizing)) {
+        const property = action === "layout-sizing-horizontal"
+          ? "layoutSizingHorizontal"
+          : "layoutSizingVertical";
+        node[property] = sizing;
+      }
+    }
+    if (action === "layout-positioning") {
+      if (Object.values(LAYOUT_POSITIONING).includes(button.dataset.value)) {
+        node.layoutPositioning = button.dataset.value;
+      }
+    }
     if (action === "vector-closed") {
       node.vectorClosed = button.dataset.value === "true" && node.vectorPoints.length >= 3;
     }
@@ -582,6 +664,11 @@ function bindKeyboard() {
       event.preventDefault();
       if (event.shiftKey) ungroupSelection();
       else groupSelection();
+      return;
+    }
+    if (!command && !event.altKey && event.shiftKey && event.code === "KeyA") {
+      event.preventDefault();
+      autoLayoutSelection();
       return;
     }
     if (command && key === "c") {
@@ -833,6 +920,10 @@ function onPointerDown(event) {
   const handle = selectedNode ? renderer.getHandleAt(screen, selectedNode, camera) : null;
 
   if (handle && selectedNode && !isNodeEffectivelyLocked(currentPage(), selectedNode)) {
+    if (handle === "rotate" && isAutoLayoutFrame(selectedNode)) {
+      showToast("Auto Layout frames use an axis-aligned flow and cannot be rotated yet.");
+      return;
+    }
     interaction = handle === "rotate"
       ? createRotateInteraction(event, selectedNode, world)
       : createResizeInteraction(event, selectedNode, handle);
@@ -1282,16 +1373,26 @@ function updateMove(world, event) {
 }
 
 function createResizeInteraction(event, node, handle) {
-  const nodes = isAutoBoundsContainer(node)
+  const nodes = isAutoBoundsContainer(node) || node.type === NODE_TYPES.FRAME
     ? getNodesWithDescendants(currentPage(), [node.id])
     : [node];
+  const original = cloneNode(node);
+  const snapshots = nodes.map(cloneNode);
+  if (isAutoLayoutChild(currentPage(), node)) {
+    if (handle.includes("w") || handle.includes("e")) {
+      node.layoutSizingHorizontal = LAYOUT_SIZING.FIXED;
+    }
+    if (handle.includes("n") || handle.includes("s")) {
+      node.layoutSizingVertical = LAYOUT_SIZING.FIXED;
+    }
+  }
   return {
     type: "resize",
     pointerId: event.pointerId,
     nodeId: node.id,
     handle,
-    original: cloneNode(node),
-    nodes: nodes.map(cloneNode),
+    original,
+    nodes: snapshots,
     aspectRatio: node.width / node.height,
   };
 }
@@ -1349,7 +1450,16 @@ function updateResize(world, event) {
       scaleVectorPoint(point, scaleX, scaleY));
   }
 
-  if (isAutoBoundsContainer(node)) {
+  if (node.type === NODE_TYPES.FRAME) {
+    if (handle.includes("w") || handle.includes("e")) {
+      node.layoutSizingHorizontal = LAYOUT_SIZING.FIXED;
+    }
+    if (handle.includes("n") || handle.includes("s")) {
+      node.layoutSizingVertical = LAYOUT_SIZING.FIXED;
+    }
+    resizeFrameChildren(currentPage(), original, node, interaction.nodes);
+    resolvePageGeometry(currentPage());
+  } else if (isAutoBoundsContainer(node)) {
     const scaleX = width / original.width;
     const scaleY = height / original.height;
     for (const snapshot of interaction.nodes) {
@@ -1637,6 +1747,42 @@ function groupSelection() {
   commitDocument();
 }
 
+function autoLayoutSelection(requestedMode = null) {
+  if (!selectedIds.length) {
+    showToast("Select one or more sibling layers first.");
+    return;
+  }
+  vectorEdit = null;
+  const rootIds = getTopLevelNodeIds(currentPage(), selectedIds)
+    .filter((id) => !isNodeEffectivelyLocked(currentPage(), id));
+  const roots = getNodes(currentPage(), rootIds);
+  if (!roots.length) {
+    showToast("Unlock at least one selected layer first.");
+    return;
+  }
+  let mode = Object.values(LAYOUT_MODES).includes(requestedMode) && requestedMode !== LAYOUT_MODES.NONE
+    ? requestedMode
+    : LAYOUT_MODES.HORIZONTAL;
+  if (!requestedMode && roots.length > 1) {
+    const centers = roots.map((node) => ({
+      x: node.x + node.width / 2,
+      y: node.y + node.height / 2,
+    }));
+    const horizontalSpread = Math.max(...centers.map((point) => point.x)) - Math.min(...centers.map((point) => point.x));
+    const verticalSpread = Math.max(...centers.map((point) => point.y)) - Math.min(...centers.map((point) => point.y));
+    if (verticalSpread > horizontalSpread) mode = LAYOUT_MODES.VERTICAL;
+  }
+  const frame = createAutoLayoutFrame(currentPage(), rootIds, mode);
+  if (!frame) {
+    showToast("Auto Layout layers must share the same parent.");
+    return;
+  }
+  selectedIds = [frame.id];
+  collapsedLayerIds.delete(frame.id);
+  commitDocument();
+  showToast(`${capitalize(mode)} Auto Layout created`);
+}
+
 function booleanSelection(operation) {
   if (selectedIds.length < 2) {
     showToast("Select at least two sibling layers for a Boolean operation.");
@@ -1732,6 +1878,7 @@ function reparentMovedRoots(rootIds = []) {
     node.parentId = findContainingFrame(page, node, rootIds)?.id ?? null;
   }
   sortNodesByHierarchy(page);
+  for (const id of rootIds) reorderAutoLayoutChild(page, id);
 }
 
 function currentPage() {
@@ -1861,8 +2008,18 @@ function hasDocumentContent() {
   return designDocument.pages.some((page) => page.nodes.length > 0);
 }
 
+function resolvePageGeometry(page) {
+  syncGroupBounds(page);
+  resolvePageLayout(page);
+  syncGroupBounds(page);
+}
+
+function resolveAllPageLayouts(document) {
+  for (const page of document.pages) resolvePageGeometry(page);
+}
+
 function commitDocument() {
-  syncGroupBounds(currentPage());
+  resolvePageGeometry(currentPage());
   designDocument.updatedAt = new Date().toISOString();
   history.commit(designDocument);
   scheduleSave();
@@ -1870,7 +2027,7 @@ function commitDocument() {
 }
 
 function liveDocumentChange() {
-  syncGroupBounds(currentPage());
+  resolvePageGeometry(currentPage());
   designDocument.updatedAt = new Date().toISOString();
   elements.saveState.textContent = "Saving…";
   scheduleSave();
@@ -1937,13 +2094,19 @@ function renderLayers() {
     const locked = isNodeEffectivelyLocked(page, node);
     const parent = node.parentId ? getNode(page, node.parentId) : null;
     const siblingIndex = parent ? (childrenByParent.get(parent.id) ?? []).indexOf(node) : -1;
-    const compositeRole = parent?.type === NODE_TYPES.MASK
+    let layerRole = parent?.type === NODE_TYPES.MASK
       ? siblingIndex === 0 ? "MASK" : "CONTENT"
       : parent?.type === NODE_TYPES.BOOLEAN
         ? siblingIndex === 0
           ? "BASE"
           : ({ union: "ADD", subtract: "CUT", intersect: "AND", exclude: "XOR" }[parent.booleanOperation] ?? "SOURCE")
         : "";
+    if (!layerRole && isAutoLayoutFrame(node)) {
+      layerRole = node.layoutMode === LAYOUT_MODES.HORIZONTAL ? "AUTO H" : "AUTO V";
+    } else if (!layerRole && isAutoLayoutFrame(parent)) {
+      if (node.layoutPositioning === LAYOUT_POSITIONING.ABSOLUTE) layerRole = "ABS";
+      else if ([node.layoutSizingHorizontal, node.layoutSizingVertical].includes(LAYOUT_SIZING.FILL)) layerRole = "FILL";
+    }
     const row = `
       <div class="layer-row ${selectedIds.includes(node.id) ? "selected" : ""} ${visible ? "" : "hidden-layer"}" data-layer-id="${escapeAttribute(node.id)}" style="--layer-depth: ${depth}">
         ${hasChildren
@@ -1951,7 +2114,7 @@ function renderLayers() {
           : '<span class="layer-collapse-spacer"></span>'}
         <span class="layer-icon">${nodeIcon(node.type)}</span>
         <span class="layer-name" title="${escapeAttribute(node.name)}">${escapeHTML(node.name)}</span>
-        <span class="layer-composite-role">${compositeRole}</span>
+        <span class="layer-composite-role">${layerRole}</span>
         <button class="layer-action" data-layer-action="visibility" title="${node.visible ? "Hide" : "Show"} layer" aria-label="${node.visible ? "Hide" : "Show"} ${escapeAttribute(node.name)}">${visibilityIcon(node.visible)}</button>
         <button class="layer-action ${locked && !node.locked ? "inherited" : ""}" data-layer-action="lock" title="${node.locked ? "Unlock" : "Lock"} layer" aria-label="${node.locked ? "Unlock" : "Lock"} ${escapeAttribute(node.name)}">${lockIcon(locked)}</button>
       </div>`;
@@ -2018,6 +2181,14 @@ function renderInspector() {
         </div>
       </div>
       <div class="inspector-section">
+        <p class="inspector-section-title">Auto Layout</p>
+        <div class="icon-toggle-row">
+          <button class="icon-toggle" data-multi-action="auto-layout" data-mode="horizontal">Horizontal</button>
+          <button class="icon-toggle" data-multi-action="auto-layout" data-mode="vertical">Vertical</button>
+        </div>
+        <p class="inspector-hint">Wraps the selection in a responsive frame. Shift+A infers the direction.</p>
+      </div>
+      <div class="inspector-section">
         <p class="inspector-section-title">Combine shapes</p>
         <div class="boolean-operation-grid">
           ${Object.values(BOOLEAN_OPERATIONS).map((operation) => `<button class="icon-toggle" data-multi-action="boolean" data-operation="${operation}">${capitalize(operation)}</button>`).join("")}
@@ -2027,6 +2198,9 @@ function renderInspector() {
       </div>`;
     elements.inspector.querySelector("[data-multi-action='group']")?.addEventListener("click", groupSelection);
     elements.inspector.querySelector("[data-multi-action='duplicate']")?.addEventListener("click", duplicateSelection);
+    elements.inspector.querySelectorAll("[data-multi-action='auto-layout']").forEach((button) => {
+      button.addEventListener("click", () => autoLayoutSelection(button.dataset.mode));
+    });
     elements.inspector.querySelectorAll("[data-multi-action='boolean']").forEach((button) => {
       button.addEventListener("click", () => booleanSelection(button.dataset.operation));
     });
@@ -2036,6 +2210,11 @@ function renderInspector() {
 
   const node = getNode(currentPage(), selectedIds[0]);
   if (!node) return;
+  const managedPosition = isAutoLayoutChild(currentPage(), node);
+  const managedWidth = (managedPosition && node.layoutSizingHorizontal === LAYOUT_SIZING.FILL) ||
+    (isAutoLayoutFrame(node) && node.layoutSizingHorizontal === LAYOUT_SIZING.HUG);
+  const managedHeight = (managedPosition && node.layoutSizingVertical === LAYOUT_SIZING.FILL) ||
+    (isAutoLayoutFrame(node) && node.layoutSizingVertical === LAYOUT_SIZING.HUG);
   elements.inspector.innerHTML = `
     <div class="selection-summary">
       <span class="selection-summary-icon">${nodeIcon(node.type)}</span>
@@ -2045,14 +2224,17 @@ function renderInspector() {
     ${node.type !== NODE_TYPES.GROUP ? `<section class="inspector-section">
       <p class="inspector-section-title">Position</p>
       <div class="field-grid">
-        ${numberField("X", "x", node.x)}
-        ${numberField("Y", "y", node.y)}
-        ${numberField("W", "width", node.width)}
-        ${numberField("H", "height", node.height)}
-        ${numberField("↻", "rotation", node.rotation)}
+        ${numberField("X", "x", node.x, managedPosition)}
+        ${numberField("Y", "y", node.y, managedPosition)}
+        ${numberField("W", "width", node.width, managedWidth)}
+        ${numberField("H", "height", node.height, managedHeight)}
+        ${numberField("↻", "rotation", node.rotation, isAutoLayoutFrame(node))}
         ${numberField("R", "cornerRadius", node.cornerRadius, [NODE_TYPES.ELLIPSE, NODE_TYPES.TEXT, NODE_TYPES.VECTOR, NODE_TYPES.BOOLEAN, NODE_TYPES.MASK].includes(node.type))}
       </div>
     </section>` : ""}
+
+    ${node.type === NODE_TYPES.FRAME ? autoLayoutInspector(node) : ""}
+    ${layoutRelationshipInspector(node)}
 
     ${node.type === NODE_TYPES.TEXT ? textInspector(node) : ""}
     ${node.type === NODE_TYPES.IMAGE ? imageInspector(node) : ""}
@@ -2093,6 +2275,133 @@ function renderInspector() {
       </div>
       <button class="button button-quiet" data-inspector-action="delete" style="width: 100%; margin-top: 8px; color: #fca5a5">Delete layer</button>
     </section>`;
+}
+
+function autoLayoutInspector(frame) {
+  const enabled = isAutoLayoutFrame(frame);
+  const parent = frame.parentId ? getNode(currentPage(), frame.parentId) : null;
+  const canFillParent = isAutoLayoutFrame(parent) &&
+    frame.layoutPositioning !== LAYOUT_POSITIONING.ABSOLUTE;
+  return `
+    <section class="inspector-section" data-auto-layout-controls>
+      <p class="inspector-section-title">Auto Layout <span class="section-shortcut">Shift+A</span></p>
+      <div class="icon-toggle-row">
+        ${layoutModeButton(frame, LAYOUT_MODES.NONE, "Off")}
+        ${layoutModeButton(frame, LAYOUT_MODES.HORIZONTAL, "Horizontal")}
+        ${layoutModeButton(frame, LAYOUT_MODES.VERTICAL, "Vertical")}
+      </div>
+      ${enabled ? `
+        <div class="layout-control-block">
+          <span class="layout-control-label">Frame sizing</span>
+          ${layoutSizingControl(frame, "horizontal", true, canFillParent)}
+          ${layoutSizingControl(frame, "vertical", true, canFillParent)}
+        </div>
+        <div class="layout-control-block">
+          <span class="layout-control-label">Gap</span>
+          ${layoutNumberField("↔", "layoutGap", frame.layoutGap, "Gap between items")}
+        </div>
+        <div class="layout-control-block">
+          <span class="layout-control-label">Padding · top, right, bottom, left</span>
+          <div class="field-grid">
+            ${layoutNumberField("T", "paddingTop", frame.paddingTop, "Top padding")}
+            ${layoutNumberField("R", "paddingRight", frame.paddingRight, "Right padding")}
+            ${layoutNumberField("B", "paddingBottom", frame.paddingBottom, "Bottom padding")}
+            ${layoutNumberField("L", "paddingLeft", frame.paddingLeft, "Left padding")}
+          </div>
+        </div>
+        <div class="layout-control-block">
+          <span class="layout-control-label">Primary axis</span>
+          <div class="icon-toggle-row compact-toggle-row">
+            ${Object.values(PRIMARY_AXIS_ALIGNS).map((align) => `
+              <button class="icon-toggle ${frame.primaryAxisAlign === align ? "active" : ""}" data-inspector-action="primary-axis-align" data-value="${align}">${align === PRIMARY_AXIS_ALIGNS.SPACE_BETWEEN ? "Space" : capitalize(align)}</button>`).join("")}
+          </div>
+        </div>
+        <div class="layout-control-block">
+          <span class="layout-control-label">Counter axis</span>
+          <div class="icon-toggle-row compact-toggle-row">
+            ${Object.values(COUNTER_AXIS_ALIGNS).map((align) => `
+              <button class="icon-toggle ${frame.counterAxisAlign === align ? "active" : ""}" data-inspector-action="counter-axis-align" data-value="${align}">${capitalize(align)}</button>`).join("")}
+          </div>
+        </div>
+        <p class="inspector-hint">Visible flow children follow their Layers order. Hidden and absolute children stay outside the flow.</p>` : `
+        <p class="inspector-hint">Enable a direction to flow children with responsive padding, gaps, alignment, hug, and fill sizing.</p>`}
+    </section>`;
+}
+
+function layoutRelationshipInspector(node) {
+  const parent = node.parentId ? getNode(currentPage(), node.parentId) : null;
+  if (parent?.type !== NODE_TYPES.FRAME) return "";
+  if (!isAutoLayoutFrame(parent)) return constraintsInspector(node, "Constraints");
+
+  const absolute = node.layoutPositioning === LAYOUT_POSITIONING.ABSOLUTE;
+  const autoBounds = isAutoBoundsContainer(node);
+  const sizingAlreadyShown = isAutoLayoutFrame(node);
+  return `
+    <section class="inspector-section" data-layout-child-controls>
+      <p class="inspector-section-title">Auto Layout child</p>
+      <div class="icon-toggle-row">
+        <button class="icon-toggle ${absolute ? "" : "active"}" data-inspector-action="layout-positioning" data-value="auto">Flow</button>
+        <button class="icon-toggle ${absolute ? "active" : ""}" data-inspector-action="layout-positioning" data-value="absolute">Absolute</button>
+      </div>
+      ${!absolute && !autoBounds && !sizingAlreadyShown ? `
+        <div class="layout-control-block">
+          <span class="layout-control-label">Child sizing</span>
+          ${layoutSizingControl(node, "horizontal", false, true)}
+          ${layoutSizingControl(node, "vertical", false, true)}
+        </div>` : ""}
+      ${!absolute && autoBounds ? `<p class="inspector-hint">Composite size follows its source layers; Auto Layout controls its position.</p>` : ""}
+      ${absolute ? `${constraintsFields(node)}<p class="inspector-hint">Absolute children keep free positioning and respond to frame constraints.</p>` : ""}
+    </section>`;
+}
+
+function constraintsInspector(node, title) {
+  return `
+    <section class="inspector-section" data-constraint-controls>
+      <p class="inspector-section-title">${title}</p>
+      ${constraintsFields(node)}
+      <p class="inspector-hint">Pins or scales this layer when its parent frame is resized.</p>
+    </section>`;
+}
+
+function constraintsFields(node) {
+  return `
+    <div class="field-grid">
+      <label class="field"><span class="field-label">H</span><select data-layout-property="constraintHorizontal" aria-label="Horizontal constraint">
+        ${constraintOptions(HORIZONTAL_CONSTRAINTS, node.constraintHorizontal)}
+      </select></label>
+      <label class="field"><span class="field-label">V</span><select data-layout-property="constraintVertical" aria-label="Vertical constraint">
+        ${constraintOptions(VERTICAL_CONSTRAINTS, node.constraintVertical)}
+      </select></label>
+    </div>`;
+}
+
+function constraintOptions(values, selected) {
+  return Object.values(values).map((value) => `
+    <option value="${value}" ${value === selected ? "selected" : ""}>${capitalize(value.replaceAll("-", " + "))}</option>`).join("");
+}
+
+function layoutModeButton(frame, mode, label) {
+  return `<button class="icon-toggle ${frame.layoutMode === mode ? "active" : ""}" data-inspector-action="layout-mode" data-value="${mode}">${label}</button>`;
+}
+
+function layoutSizingControl(node, axis, allowHug, allowFill) {
+  const property = axis === "horizontal" ? "layoutSizingHorizontal" : "layoutSizingVertical";
+  const action = axis === "horizontal" ? "layout-sizing-horizontal" : "layout-sizing-vertical";
+  const options = [LAYOUT_SIZING.FIXED];
+  if (allowHug) options.push(LAYOUT_SIZING.HUG);
+  if (allowFill) options.push(LAYOUT_SIZING.FILL);
+  if (!options.includes(node[property])) options.push(node[property]);
+  return `
+    <div class="layout-axis-row">
+      <span>${axis === "horizontal" ? "Width" : "Height"}</span>
+      <div class="icon-toggle-row">
+        ${options.map((sizing) => `<button class="icon-toggle ${node[property] === sizing ? "active" : ""}" data-inspector-action="${action}" data-value="${sizing}">${capitalize(sizing)}</button>`).join("")}
+      </div>
+    </div>`;
+}
+
+function layoutNumberField(label, property, value, ariaLabel) {
+  return `<label class="field"><span class="field-label">${label}</span><input type="number" data-layout-property="${property}" min="0" step="1" value="${formatNumber(value)}" aria-label="${ariaLabel}" /></label>`;
 }
 
 function booleanInspector(node) {
@@ -2431,6 +2740,7 @@ async function importDocument() {
     const content = await file.text();
     const imported = normalizeDocument(JSON.parse(content));
     designDocument = imported;
+    resolveAllPageLayouts(designDocument);
     penDraft = null;
     vectorEdit = null;
     history = new DocumentHistory(designDocument);

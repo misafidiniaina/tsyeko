@@ -3,7 +3,7 @@ import {
   VECTOR_HANDLE_MODES,
 } from "./vector.js";
 
-export const DOCUMENT_VERSION = 7;
+export const DOCUMENT_VERSION = 8;
 const MAX_HIERARCHY_DEPTH = 256;
 
 export const BOOLEAN_OPERATIONS = Object.freeze({
@@ -11,6 +11,53 @@ export const BOOLEAN_OPERATIONS = Object.freeze({
   SUBTRACT: "subtract",
   INTERSECT: "intersect",
   EXCLUDE: "exclude",
+});
+
+export const LAYOUT_MODES = Object.freeze({
+  NONE: "none",
+  HORIZONTAL: "horizontal",
+  VERTICAL: "vertical",
+});
+
+export const LAYOUT_SIZING = Object.freeze({
+  FIXED: "fixed",
+  HUG: "hug",
+  FILL: "fill",
+});
+
+export const LAYOUT_POSITIONING = Object.freeze({
+  AUTO: "auto",
+  ABSOLUTE: "absolute",
+});
+
+export const PRIMARY_AXIS_ALIGNS = Object.freeze({
+  START: "start",
+  CENTER: "center",
+  END: "end",
+  SPACE_BETWEEN: "space-between",
+});
+
+export const COUNTER_AXIS_ALIGNS = Object.freeze({
+  START: "start",
+  CENTER: "center",
+  END: "end",
+  STRETCH: "stretch",
+});
+
+export const HORIZONTAL_CONSTRAINTS = Object.freeze({
+  LEFT: "left",
+  CENTER: "center",
+  RIGHT: "right",
+  LEFT_RIGHT: "left-right",
+  SCALE: "scale",
+});
+
+export const VERTICAL_CONSTRAINTS = Object.freeze({
+  TOP: "top",
+  CENTER: "center",
+  BOTTOM: "bottom",
+  TOP_BOTTOM: "top-bottom",
+  SCALE: "scale",
 });
 
 const DEFAULT_SHADOW = Object.freeze({
@@ -82,6 +129,14 @@ const DEFAULTS = Object.freeze({
     stroke: "#d8d8de",
     strokeWidth: 1,
     cornerRadius: 0,
+    layoutMode: LAYOUT_MODES.NONE,
+    layoutGap: 16,
+    paddingTop: 16,
+    paddingRight: 16,
+    paddingBottom: 16,
+    paddingLeft: 16,
+    primaryAxisAlign: PRIMARY_AXIS_ALIGNS.START,
+    counterAxisAlign: COUNTER_AXIS_ALIGNS.START,
     shadow: DEFAULT_FRAME_SHADOW,
   },
   rectangle: {
@@ -402,6 +457,21 @@ export function normalizeNode(input) {
     stroke: cleanColor(input.stroke, defaults.stroke),
     strokeWidth: finiteNumber(input.strokeWidth, defaults.strokeWidth, 0, 200),
     cornerRadius: finiteNumber(input.cornerRadius, defaults.cornerRadius, 0, 50_000),
+    layoutSizingHorizontal: Object.values(LAYOUT_SIZING).includes(input.layoutSizingHorizontal)
+      ? input.layoutSizingHorizontal
+      : LAYOUT_SIZING.FIXED,
+    layoutSizingVertical: Object.values(LAYOUT_SIZING).includes(input.layoutSizingVertical)
+      ? input.layoutSizingVertical
+      : LAYOUT_SIZING.FIXED,
+    layoutPositioning: Object.values(LAYOUT_POSITIONING).includes(input.layoutPositioning)
+      ? input.layoutPositioning
+      : LAYOUT_POSITIONING.AUTO,
+    constraintHorizontal: Object.values(HORIZONTAL_CONSTRAINTS).includes(input.constraintHorizontal)
+      ? input.constraintHorizontal
+      : HORIZONTAL_CONSTRAINTS.LEFT,
+    constraintVertical: Object.values(VERTICAL_CONSTRAINTS).includes(input.constraintVertical)
+      ? input.constraintVertical
+      : VERTICAL_CONSTRAINTS.TOP,
   };
   node.fillType = input.fillType === "linear-gradient" ? "linear-gradient" : "solid";
   node.gradient = normalizeGradient(input.gradient, node.fill);
@@ -435,6 +505,23 @@ export function normalizeNode(input) {
     node.booleanOperation = Object.values(BOOLEAN_OPERATIONS).includes(input.booleanOperation)
       ? input.booleanOperation
       : defaults.booleanOperation;
+  }
+
+  if (node.type === NODE_TYPES.FRAME) {
+    node.layoutMode = Object.values(LAYOUT_MODES).includes(input.layoutMode)
+      ? input.layoutMode
+      : defaults.layoutMode;
+    node.layoutGap = finiteNumber(input.layoutGap, defaults.layoutGap, 0, 10_000);
+    node.paddingTop = finiteNumber(input.paddingTop, defaults.paddingTop, 0, 10_000);
+    node.paddingRight = finiteNumber(input.paddingRight, defaults.paddingRight, 0, 10_000);
+    node.paddingBottom = finiteNumber(input.paddingBottom, defaults.paddingBottom, 0, 10_000);
+    node.paddingLeft = finiteNumber(input.paddingLeft, defaults.paddingLeft, 0, 10_000);
+    node.primaryAxisAlign = Object.values(PRIMARY_AXIS_ALIGNS).includes(input.primaryAxisAlign)
+      ? input.primaryAxisAlign
+      : defaults.primaryAxisAlign;
+    node.counterAxisAlign = Object.values(COUNTER_AXIS_ALIGNS).includes(input.counterAxisAlign)
+      ? input.counterAxisAlign
+      : defaults.counterAxisAlign;
   }
 
   return node;

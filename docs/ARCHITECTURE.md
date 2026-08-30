@@ -33,6 +33,7 @@ Browser
 │   ├── inspector and layers panel
 │   └── IndexedDB autosave with localStorage migration/fallback
 ├── Versioned hierarchical document model
+├── Deterministic Auto Layout and frame-constraint engine
 ├── Snapshot history
 ├── Hierarchy-aware Canvas 2D renderer
 │   ├── Porter–Duff Boolean composition
@@ -85,11 +86,11 @@ Avoid introducing every distributed component on day one. PostgreSQL, Redis, obj
 
 ## 5. Document model
 
-The current v7 file format is a versioned, multi-page JSON document with flat storage, explicit parent relationships, paint definitions, effects, cubic Bézier vector paths, and ordered Boolean/mask containers. Versions 1–6 migrate automatically. Imports repair dangling parents, reject non-container parents, break cycles, sanitize anchor/control/paint/effect/composite values, and restore parent-before-child ordering:
+The current v8 file format is a versioned, multi-page JSON document with flat storage, explicit parent relationships, responsive-layout metadata, paint definitions, effects, cubic Bézier vector paths, and ordered Boolean/mask containers. Versions 1–7 migrate automatically. Imports repair dangling parents, reject non-container parents, break cycles, sanitize layout/anchor/control/paint/effect/composite values, and restore parent-before-child ordering:
 
 ```json
 {
-  "version": 7,
+  "version": 8,
   "id": "document_…",
   "name": "Untitled design",
   "background": "#101114",
@@ -115,7 +116,17 @@ The current v7 file format is a versioned, multi-page JSON document with flat st
           "fill": "#ffffff",
           "stroke": "#d8d8de",
           "strokeWidth": 1,
-          "cornerRadius": 0
+          "cornerRadius": 0,
+          "layoutMode": "horizontal",
+          "layoutGap": 24,
+          "paddingTop": 32,
+          "paddingRight": 32,
+          "paddingBottom": 32,
+          "paddingLeft": 32,
+          "primaryAxisAlign": "start",
+          "counterAxisAlign": "center",
+          "layoutSizingHorizontal": "fixed",
+          "layoutSizingVertical": "hug"
         },
         {
           "id": "rectangle_…",
@@ -142,6 +153,11 @@ The current v7 file format is a versioned, multi-page JSON document with flat st
           "stroke": "#d8d8de",
           "strokeWidth": 1,
           "cornerRadius": 16,
+          "layoutPositioning": "auto",
+          "layoutSizingHorizontal": "fill",
+          "layoutSizingVertical": "fixed",
+          "constraintHorizontal": "left-right",
+          "constraintVertical": "top",
           "shadow": {
             "enabled": true,
             "color": "#000000",
@@ -236,7 +252,7 @@ Production evolution:
 - Add multiple paint stacks, radial/angular gradients, and blur effects
 - Add rich-text ranges and font references
 - Add component definitions, instances, override maps, and variant properties
-- Add constraints and auto-layout properties
+- Extend Auto Layout with wrapping, min/max dimensions, baseline alignment, and intrinsic text measurement
 - Add prototype edges separately from visual nodes
 - Add explicit schema migrations for every document version
 
@@ -406,16 +422,22 @@ Every mutation is authorized server-side. Client UI permissions are convenience,
 
 ## 12. Auto layout and constraints
 
-Implement layout as a deterministic pure function of document properties. Begin with:
+The v8 client implements layout as a deterministic function of document properties. A frame with horizontal or vertical Auto Layout flows its visible direct children in sibling order; hidden and absolute children are excluded. The implemented contract includes:
 
-- Horizontal and vertical stacks
-- Padding and gap
-- Primary and cross-axis alignment
-- Fixed, hug-content, and fill-container sizing
-- Min/max dimensions
-- Absolute children
+- Independent top, right, bottom, and left padding
+- Fixed gaps or primary-axis space-between distribution
+- Start, center, and end alignment plus counter-axis stretch
+- Fixed and fill child sizing
+- Fixed, hug, and parent-fill sizing for nested Auto Layout frames
+- Absolute children with responsive constraints
+- Left, center, right, left+right, and scale horizontal constraints
+- Top, center, bottom, top+bottom, and scale vertical constraints
 
-Layout invalidation should recompute only affected ancestors and descendants. The browser and export worker must use the same algorithm and font metrics.
+Resolution runs deepest frames first and repeats to a bounded fixed point. A hugging parent can therefore consume a hugging child's intrinsic result, while a fill child can receive its allocation and then reflow its own descendants. Auto-bound groups, Booleans, and masks participate in positioning but continue deriving their size from their sources.
+
+Frame constraints are calculated from immutable node snapshots captured at the start of each resize gesture. This prevents cumulative drift and permits nested frames to evaluate their own children after receiving a new box. Resolved geometry is committed to history and persistence, so Canvas, hit testing, PNG, and SVG use the same boxes.
+
+The current engine is single-axis and axis-aligned. Wrapping, baseline alignment, min/max dimensions, intrinsic text measurement, rotated Auto Layout frames, and incremental dirty-subtree invalidation remain future work. A hosted export worker must eventually run this same algorithm and controlled font metrics.
 
 ## 13. Components and design systems
 
@@ -511,7 +533,7 @@ Every document schema change needs forward-migration tests and fixtures from old
 ### Milestone 0 — implemented foundation
 
 - Canvas editor and basic nodes
-- Multi-page documents, page operations, and v1–v6 schema migration into v7
+- Multi-page documents, page operations, and v1–v7 schema migration into v8
 - Hierarchical frames and groups with recursive editing and cycle-safe imports
 - Nested layers, frame clipping, and inherited visibility, locking, and opacity
 - Linear-gradient fills and explicit drop-shadow effects with Canvas/SVG parity
@@ -519,6 +541,8 @@ Every document schema change needs forward-migration tests and fixtures from old
 - Non-destructive Union/Subtract/Intersect/Exclude containers with ordered editable sources and composite hit testing
 - Nested silhouette mask groups, result effects, expanded Boolean strokes, and Canvas/PNG/SVG export parity
 - Composite creation, operation switching, source-order labels, release workflows, keyboard commands, persistence, and browser pixel tests
+- Horizontal/vertical Auto Layout, Shift+A wrapping, padding, gaps, alignment, fixed/hug/fill sizing, absolute children, and Layers feedback
+- Responsive frame constraints with nested evaluation, resize snapshots, undo/redo, persistence, and Canvas/SVG geometry parity
 - Per-page canvas appearance and view state
 - Embedded raster image layers with cover/contain fitting
 - IndexedDB persistence and compact localStorage recovery copies
@@ -530,6 +554,7 @@ Every document schema change needs forward-migration tests and fixtures from old
 
 ### Milestone 1 — structured editor
 
+- Advanced layout wrapping, min/max sizing, baseline alignment, and intrinsic text measurement
 - Editable compound contours, destructive Boolean flattening, precision stroke outlining, and geometry-kernel fuzz tests
 - Bounds-local composite caches, dirty-region rendering, and large-scene profiling
 - Multiple paint stacks, radial/angular gradients, and blur effects
@@ -551,7 +576,6 @@ Exit criterion: a team can safely co-edit a file and recover from disconnects or
 
 ### Milestone 3 — professional design systems
 
-- Auto layout and responsive constraints
 - Components, instances, variants, and overrides
 - Variables, modes, and published libraries
 - Developer inspection and asset download

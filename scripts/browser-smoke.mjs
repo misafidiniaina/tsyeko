@@ -743,17 +743,222 @@ try {
     "mask inspector reload persistence",
   );
 
+  await evaluate(`
+    (() => {
+      const selectLayer = (name, shiftKey) => [...document.querySelectorAll(".layer-row")]
+        .find((row) => row.querySelector(".layer-name")?.textContent === name)
+        .dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey }));
+      selectLayer("Vector path", false);
+      selectLayer("Mask group", true);
+      return true;
+    })()
+  `);
+  await waitFor(
+    `document.querySelector('[data-multi-action="auto-layout"][data-mode="vertical"]')`,
+    "Auto Layout multi-selection controls",
+  );
+  await evaluate(`document.querySelector('[data-multi-action="auto-layout"][data-mode="vertical"]').click(); true`);
+  await waitFor(
+    `document.querySelectorAll(".layer-row").length === 8 &&
+     document.querySelector(".selection-summary input")?.value === "Auto layout" &&
+     document.querySelector('[data-inspector-action="layout-mode"][data-value="vertical"]')?.classList.contains("active") &&
+     [...document.querySelectorAll(".layer-composite-role")].some((item) => item.textContent === "AUTO V")`,
+    "vertical Auto Layout wrapping",
+  );
+
+  await evaluate(`
+    document.querySelector('[data-inspector-action="layout-sizing-horizontal"][data-value="fixed"]').click();
+    document.querySelector('[data-inspector-action="layout-sizing-vertical"][data-value="fixed"]').click();
+    true;
+  `);
+  await evaluate(`
+    (() => {
+      const setInput = (selector, value) => {
+        const input = document.querySelector(selector);
+        input.value = String(value);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+      setInput('[data-property="width"]', 420);
+      setInput('[data-property="height"]', 360);
+      for (const property of ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"]) {
+        setInput('[data-layout-property="' + property + '"]', 24);
+      }
+      setInput('[data-layout-property="layoutGap"]', 20);
+      return true;
+    })()
+  `);
+  await waitFor(
+    `document.querySelector('[data-property="width"]')?.value === "420" &&
+     document.querySelector('[data-property="height"]')?.value === "360" &&
+     document.querySelector('[data-layout-property="layoutGap"]')?.value === "20" &&
+     [...document.querySelectorAll('[data-layout-property^="padding"]')].every((input) => input.value === "24") &&
+     document.querySelector("#saveState").textContent === "Saved locally"`,
+    "Auto Layout fixed sizing, padding, and gap editing",
+  );
+
+  await evaluate(`
+    [...document.querySelectorAll(".layer-row")]
+      .find((row) => row.querySelector(".layer-name")?.textContent === "Vector path")
+      .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    true;
+  `);
+  await waitFor(
+    `document.querySelector('[data-inspector-action="layout-sizing-horizontal"][data-value="fill"]')`,
+    "Auto Layout child sizing controls",
+  );
+  await evaluate(`document.querySelector('[data-inspector-action="layout-sizing-horizontal"][data-value="fill"]').click(); true`);
+  await waitFor(
+    `document.querySelector('[data-inspector-action="layout-sizing-horizontal"][data-value="fill"]')?.classList.contains("active") &&
+     document.querySelector('[data-property="width"]')?.disabled === true &&
+     document.querySelector('[data-property="width"]')?.value === "372"`,
+    "fill-width Auto Layout child",
+  );
+
+  await evaluate(`document.querySelector('[data-inspector-action="layout-positioning"][data-value="absolute"]').click(); true`);
+  await waitFor(
+    `document.querySelector('[data-inspector-action="layout-positioning"][data-value="absolute"]')?.classList.contains("active") &&
+     document.querySelector('[data-layout-property="constraintHorizontal"]')`,
+    "absolute Auto Layout child positioning",
+  );
+  await evaluate(`
+    (() => {
+      const horizontal = document.querySelector('[data-layout-property="constraintHorizontal"]');
+      horizontal.value = "right";
+      horizontal.dispatchEvent(new Event("input", { bubbles: true }));
+      horizontal.dispatchEvent(new Event("change", { bubbles: true }));
+      const vertical = document.querySelector('[data-layout-property="constraintVertical"]');
+      vertical.value = "bottom";
+      vertical.dispatchEvent(new Event("input", { bubbles: true }));
+      vertical.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    })()
+  `);
+  const constrainedBefore = await evaluate(`({
+    x: Number(document.querySelector('[data-property="x"]').value),
+    y: Number(document.querySelector('[data-property="y"]').value)
+  })`);
+
+  await evaluate(`
+    [...document.querySelectorAll(".layer-row")]
+      .find((row) => row.querySelector(".layer-name")?.textContent === "Auto layout")
+      .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    true;
+  `);
+  await evaluate(`
+    (() => {
+      const setInput = (property, value) => {
+        const input = document.querySelector('[data-property="' + property + '"]');
+        input.value = String(value);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+      setInput("width", 520);
+      setInput("height", 440);
+      return true;
+    })()
+  `);
+  await evaluate(`
+    [...document.querySelectorAll(".layer-row")]
+      .find((row) => row.querySelector(".layer-name")?.textContent === "Vector path")
+      .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    true;
+  `);
+  const constrainedAfter = await evaluate(`({
+    x: Number(document.querySelector('[data-property="x"]').value),
+    y: Number(document.querySelector('[data-property="y"]').value)
+  })`);
+  if (Math.abs(constrainedAfter.x - constrainedBefore.x - 100) > 0.01 ||
+      Math.abs(constrainedAfter.y - constrainedBefore.y - 80) > 0.01) {
+    throw new Error(`Frame constraint resize failed: ${JSON.stringify({ constrainedBefore, constrainedAfter })}`);
+  }
+
+  await evaluate(`
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true, bubbles: true }));
+    true;
+  `);
+  await waitFor(
+    `Math.abs(Number(document.querySelector('[data-property="y"]')?.value) - ${constrainedBefore.y}) < 0.01`,
+    "constraint resize undo",
+  );
+  await evaluate(`
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true, shiftKey: true, bubbles: true }));
+    true;
+  `);
+  await waitFor(
+    `Math.abs(Number(document.querySelector('[data-property="y"]')?.value) - ${constrainedAfter.y}) < 0.01 &&
+     document.querySelector("#saveState").textContent === "Saved locally"`,
+    "constraint resize redo",
+  );
+
+  await command("Page.reload", { ignoreCache: true });
+  await waitFor(
+    `document.readyState === "complete" &&
+     document.querySelectorAll(".layer-row").length === 8 &&
+     [...document.querySelectorAll(".layer-composite-role")].some((item) => item.textContent === "AUTO V")`,
+    "Auto Layout hierarchy reload persistence",
+  );
+  await evaluate(`
+    [...document.querySelectorAll(".layer-row")]
+      .find((row) => row.querySelector(".layer-name")?.textContent === "Auto layout")
+      .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    true;
+  `);
+  await waitFor(
+    `document.querySelector('[data-inspector-action="layout-mode"][data-value="vertical"]')?.classList.contains("active") &&
+     document.querySelector('[data-property="width"]')?.value === "520" &&
+     document.querySelector('[data-property="height"]')?.value === "440" &&
+     document.querySelector('[data-layout-property="layoutGap"]')?.value === "20"`,
+    "Auto Layout inspector reload persistence",
+  );
+  const layoutState = await evaluate(`({
+    mode: document.querySelector('[data-inspector-action="layout-mode"].active')?.dataset.value,
+    gap: document.querySelector('[data-layout-property="layoutGap"]')?.value,
+    width: document.querySelector('[data-property="width"]')?.value,
+    height: document.querySelector('[data-property="height"]')?.value
+  })`);
+  const storedDocumentVersion = await evaluate(`
+    new Promise((resolve, reject) => {
+      const request = indexedDB.open("tsyaiko-editor", 1);
+      request.addEventListener("success", () => {
+        const transaction = request.result.transaction("workspaces", "readonly");
+        const record = transaction.objectStore("workspaces").get("active");
+        record.addEventListener("success", () => resolve(record.result?.document?.version));
+        record.addEventListener("error", () => reject(record.error));
+      }, { once: true });
+      request.addEventListener("error", () => reject(request.error), { once: true });
+    })
+  `);
+  if (storedDocumentVersion !== 8) {
+    throw new Error(`Expected persisted document v8, received ${storedDocumentVersion}.`);
+  }
+  await evaluate(`
+    [...document.querySelectorAll(".layer-row")]
+      .find((row) => row.querySelector(".layer-name")?.textContent === "Vector path")
+      .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    true;
+  `);
+  await waitFor(
+    `document.querySelector('[data-inspector-action="layout-positioning"][data-value="absolute"]')?.classList.contains("active") &&
+     document.querySelector('[data-layout-property="constraintHorizontal"]')?.value === "right" &&
+     document.querySelector('[data-layout-property="constraintVertical"]')?.value === "bottom"`,
+    "absolute child constraint reload persistence",
+  );
+
   const result = await evaluate(`({
     currentPage: document.querySelector("#currentPageName").textContent,
     pageCount: document.querySelectorAll(".page-list-row").length,
     layerCount: document.querySelectorAll(".layer-row").length,
     saved: document.querySelector("#saveState").textContent,
     booleans: [...document.querySelectorAll(".layer-name")].filter((item) => item.textContent === "Subtract").length,
-    masks: [...document.querySelectorAll(".layer-name")].filter((item) => item.textContent === "Mask group").length
+    masks: [...document.querySelectorAll(".layer-name")].filter((item) => item.textContent === "Mask group").length,
+    autoLayouts: [...document.querySelectorAll(".layer-composite-role")].filter((item) => item.textContent === "AUTO V").length
   })`);
   result.gradient = paintState.gradient;
   result.shadowBlur = paintState.shadowBlur;
   result.curves = reloadedCurveCount;
+  result.layout = layoutState;
+  result.documentVersion = storedDocumentVersion;
   if (process.env.TSYAIKO_SCREENSHOT) {
     const screenshot = await command("Page.captureScreenshot", { format: "png" });
     writeFileSync(process.env.TSYAIKO_SCREENSHOT, Buffer.from(screenshot.data, "base64"));
