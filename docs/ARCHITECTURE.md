@@ -459,6 +459,7 @@ The v10 client implements layout as a deterministic function of document propert
 - Fixed gaps or primary-axis space-between distribution
 - Start, center, and end alignment plus counter-axis stretch
 - Deterministic text/control baseline alignment for horizontal rows
+- Intrinsic text width and wrapped-height hug sizing with shared Canvas/SVG line breaking
 - Fixed and fill child sizing
 - Minimum and maximum dimensions across direct resizing, hug, stretch, and fill distribution
 - Fixed, hug, and parent-fill sizing for nested Auto Layout frames
@@ -470,7 +471,7 @@ Resolution runs deepest frames first and repeats to a bounded fixed point. A hug
 
 Frame constraints are calculated from immutable node snapshots captured at the start of each resize gesture. This prevents cumulative drift and permits nested frames to evaluate their own children after receiving a new box. Resolved geometry is committed to history and persistence, so Canvas, hit testing, PNG, and SVG use the same boxes.
 
-The current engine is axis-aligned. Baselines use a deterministic approximation until controlled font metrics are available. Intrinsic text measurement, rotated Auto Layout frames, and incremental dirty-subtree invalidation remain future work. A hosted export worker must eventually run this same algorithm and controlled font metrics.
+The current engine is axis-aligned. Text widths and baselines use deterministic approximations until controlled font metrics are available. Rotated Auto Layout frames and incremental dirty-subtree invalidation remain future work. A hosted export worker must eventually run this same algorithm and controlled font metrics.
 
 ## 13. Components and design systems
 
@@ -597,7 +598,7 @@ Every document schema change needs forward-migration tests and fixtures from old
 
 ### Milestone 1 — structured editor
 
-- Intrinsic text measurement and controlled font metrics
+- Controlled font shaping and exact font metrics
 - Editable compound contours, destructive Boolean flattening, precision stroke outlining, and geometry-kernel fuzz tests
 - Bounds-local composite caches, dirty-region rendering, and large-scene profiling
 - Multiple paint stacks, radial/angular gradients, and blur effects

@@ -22,6 +22,7 @@ import {
   resolvePageLayout,
 } from "./layout.js";
 import { documentToSVG } from "./export.js";
+import { intrinsicTextSize } from "./text.js";
 
 function pageWith(...nodes) {
   const page = createEmptyDocument().pages[0];
@@ -236,6 +237,44 @@ test("horizontal Auto Layout aligns text and controls on a shared baseline", () 
   assert.equal(control.y, 0);
   assert.equal(text.y + text.fontSize * 0.8, control.y + control.height);
   assert.equal(frame.height, 38);
+});
+
+test("text children can hug intrinsic width and wrapped height", () => {
+  const frame = createNode(NODE_TYPES.FRAME, 0, 0, {
+    width: 220,
+    height: 200,
+    layoutMode: LAYOUT_MODES.VERTICAL,
+    paddingTop: 10,
+    paddingRight: 10,
+    paddingBottom: 10,
+    paddingLeft: 10,
+  });
+  const natural = createNode(NODE_TYPES.TEXT, 0, 0, {
+    parentId: frame.id,
+    text: "Intrinsic label",
+    fontSize: 20,
+    lineHeight: 1.2,
+    layoutSizingHorizontal: LAYOUT_SIZING.HUG,
+    layoutSizingVertical: LAYOUT_SIZING.HUG,
+  });
+  const wrapped = createNode(NODE_TYPES.TEXT, 0, 0, {
+    parentId: frame.id,
+    width: 90,
+    text: "This text wraps onto several lines",
+    fontSize: 16,
+    lineHeight: 1.25,
+    layoutSizingVertical: LAYOUT_SIZING.HUG,
+  });
+  const page = pageWith(frame, natural, wrapped);
+
+  resolvePageLayout(page);
+
+  const naturalSize = intrinsicTextSize(natural);
+  const wrappedSize = intrinsicTextSize(wrapped, wrapped.width);
+  assert.equal(natural.width, naturalSize.width);
+  assert.equal(natural.height, 24);
+  assert.equal(wrapped.height, wrappedSize.height);
+  assert.ok(wrappedSize.lines.length > 1);
 });
 
 test("nested hug frames resolve from the inside out and move descendants together", () => {

@@ -12,6 +12,7 @@ import {
   pointInNode,
   worldToLocal,
 } from "./model.js";
+import { wrapTextLines } from "./text.js";
 import { createResolvedLayoutSnapshot } from "./layout.js";
 import {
   flattenVectorPath,
@@ -502,7 +503,7 @@ export class CanvasRenderer {
       : node.textAlign === "right"
         ? width / 2
         : left;
-    const lines = wrapCanvasText(context, node.text, width);
+    const lines = wrapTextLines(node.text, width / zoom, node.fontSize, node.fontWeight);
     const lineHeight = fontSize * node.lineHeight;
     let y = -height / 2;
     for (const line of lines) {
@@ -1011,29 +1012,6 @@ function screenToNodeScreen(node, screenPoint, camera, renderer) {
     x: node.width * camera.zoom / 2 + offsetX * cosine - offsetY * sine,
     y: node.height * camera.zoom / 2 + offsetX * sine + offsetY * cosine,
   };
-}
-
-function wrapCanvasText(context, text, maxWidth) {
-  const lines = [];
-  for (const paragraph of text.split("\n")) {
-    if (!paragraph) {
-      lines.push("");
-      continue;
-    }
-    const words = paragraph.split(/\s+/);
-    let line = "";
-    for (const word of words) {
-      const candidate = line ? `${line} ${word}` : word;
-      if (context.measureText(candidate).width > maxWidth && line) {
-        lines.push(line);
-        line = word;
-      } else {
-        line = candidate;
-      }
-    }
-    lines.push(line);
-  }
-  return lines;
 }
 
 function roundedRect(context, x, y, width, height, radius) {

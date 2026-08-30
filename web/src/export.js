@@ -6,6 +6,7 @@ import {
   isNodeEffectivelyVisible,
   NODE_TYPES,
 } from "./model.js";
+import { wrapTextLines } from "./text.js";
 import { createResolvedLayoutSnapshot } from "./layout.js";
 import { getVectorSegments } from "./vector.js";
 
@@ -299,7 +300,7 @@ function nodeToSVG(node, opacity = node.opacity) {
         ? node.x + node.width
         : node.x;
     const lineHeight = node.fontSize * node.lineHeight;
-    const lines = wrapTextForExport(node.text, node.width, node.fontSize);
+    const lines = wrapTextLines(node.text, node.width, node.fontSize, node.fontWeight);
     const tspans = lines.map((line, index) =>
       `<tspan x="${round(x)}" dy="${index === 0 ? round(node.fontSize) : round(lineHeight)}">${escapeXML(line)}</tspan>`,
     ).join("");
@@ -343,30 +344,6 @@ function shadowToSVG(node) {
 
 function safeId(value) {
   return String(value).replace(/[^a-z0-9_-]/gi, "-");
-}
-
-function wrapTextForExport(text, width, fontSize) {
-  const maxCharacters = Math.max(1, Math.floor(width / (fontSize * 0.54)));
-  const output = [];
-  for (const paragraph of text.split("\n")) {
-    const words = paragraph.split(/\s+/).filter(Boolean);
-    if (!words.length) {
-      output.push("");
-      continue;
-    }
-    let line = "";
-    for (const word of words) {
-      const candidate = line ? `${line} ${word}` : word;
-      if (candidate.length > maxCharacters && line) {
-        output.push(line);
-        line = word;
-      } else {
-        line = candidate;
-      }
-    }
-    output.push(line);
-  }
-  return output;
 }
 
 function escapeXML(value) {

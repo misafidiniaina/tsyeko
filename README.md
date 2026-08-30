@@ -35,7 +35,7 @@ GOCACHE=$PWD/.cache/go-build go run .
 - Pen tool for open/closed paths, click-drag curve handles, 45-degree Shift constraints, and click-first-point closure
 - Direct vector editing with draggable anchors and handles, mirrored/free controls, corner/smooth conversion, curve-preserving segment insertion, anchor deletion, path reversal, and fill rules
 - Hierarchical frame/group/Boolean/mask parenting with nested clipping and inherited visibility, locking, and opacity
-- Horizontal and vertical Auto Layout frames with ordered flow, wrapping, per-side padding, gaps, primary/counter-axis and text baseline alignment, hug sizing, fill children, and min/max dimensions
+- Horizontal and vertical Auto Layout frames with ordered flow, wrapping, per-side padding, gaps, primary/counter-axis and text baseline alignment, intrinsic text hug sizing, fill children, and min/max dimensions
 - Flow/absolute child positioning plus left, right, center, stretch, and scale constraints for responsive frame resizing
 - Local reusable components with main sources, grouped variant sets, Inspector variant switching, linked instances, visual/content overrides, reset, and detach
 - Embedded PNG, JPEG, WebP, and GIF image layers with cover/contain fitting
@@ -108,6 +108,8 @@ Select sibling layers and press `Shift+A`, or use the horizontal/vertical Auto L
 
 Select a child to choose fixed/fill sizing or switch it to absolute positioning. Children of ordinary frames—and absolute children of Auto Layout frames—expose horizontal and vertical constraints that are evaluated from the frame geometry at the start of each resize. Canvas, PNG, and SVG all consume the same resolved geometry.
 
+Text children can hug their natural width and wrapped height. Line breaking is shared by layout, Canvas, and SVG export so text boxes resolve consistently as content, font size, or available width changes.
+
 Every resizable layer also exposes minimum and maximum width and height in the Position inspector. These limits apply to direct canvas resizing, numeric size edits, hug frames, stretched children, and fill-space distribution. When a fill child reaches a limit, remaining space is redistributed among the other fill children.
 
 ## Component workflow
@@ -142,6 +144,7 @@ The unit suite covers document migration and sanitization, component source/inst
 │       ├── model.js         Document schema and geometry
 │       ├── components.js    Local component and linked-instance synchronization
 │       ├── layout.js        Auto Layout and frame constraints
+│       ├── text.js          Deterministic text measurement and line wrapping
 │       ├── vector.js        Cubic path geometry and transformations
 │       ├── history.js       Undo/redo snapshots
 │       ├── renderer.js      Canvas renderer and hit testing
@@ -159,7 +162,7 @@ The unit suite covers document migration and sanitization, component source/inst
 
 ## Current product boundary
 
-The MVP stores one hierarchical, multi-page document and embedded raster assets in the browser. Cubic paths, object-level non-destructive Booleans, silhouette masks, wrapping and baseline-aware Auto Layout, frame constraints, min/max dimensions, local linked components, and local variant sets are implemented. Layout does not yet include intrinsic text measurement or rotated Auto Layout frames. Components do not yet support nested component composition, published libraries, remote updates, or typed component-property controls. True multi-contour path editing, destructive path flattening, precision offset curves, and a scalable cached/GPU compositor also remain future work. There is no account system, remote database, managed font asset pipeline, or multiplayer synchronization yet. These are explicit follow-on milestones described in [the architecture document](docs/ARCHITECTURE.md).
+The MVP stores one hierarchical, multi-page document and embedded raster assets in the browser. Cubic paths, object-level non-destructive Booleans, silhouette masks, wrapping and baseline-aware Auto Layout, deterministic intrinsic text sizing, frame constraints, min/max dimensions, local linked components, and local variant sets are implemented. Layout does not yet support rotated Auto Layout frames or production font shaping and metrics. Components do not yet support nested component composition, published libraries, remote updates, or typed component-property controls. True multi-contour path editing, destructive path flattening, precision offset curves, and a scalable cached/GPU compositor also remain future work. There is no account system, remote database, managed font asset pipeline, or multiplayer synchronization yet. These are explicit follow-on milestones described in [the architecture document](docs/ARCHITECTURE.md).
 
 ## Core design decision
 

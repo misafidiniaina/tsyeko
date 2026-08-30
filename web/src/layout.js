@@ -19,6 +19,7 @@ import {
   VERTICAL_CONSTRAINTS,
 } from "./model.js";
 import { scaleVectorPoint } from "./vector.js";
+import { intrinsicTextSize } from "./text.js";
 
 const EPSILON = 0.001;
 const MIN_SIZE = 1;
@@ -79,6 +80,19 @@ function layoutFrame(document, frame) {
   const mainSizing = horizontal ? frame.layoutSizingHorizontal : frame.layoutSizingVertical;
   const crossSizing = horizontal ? frame.layoutSizingVertical : frame.layoutSizingHorizontal;
   let changed = false;
+
+  for (const child of children) {
+    if (child.type !== NODE_TYPES.TEXT || !canResize(child)) continue;
+    let targetWidth = child.width;
+    if (child.layoutSizingHorizontal === LAYOUT_SIZING.HUG) {
+      targetWidth = clampSize(child, true, intrinsicTextSize(child).width);
+    }
+    let targetHeight = child.height;
+    if (child.layoutSizingVertical === LAYOUT_SIZING.HUG) {
+      targetHeight = clampSize(child, false, intrinsicTextSize(child, targetWidth).height);
+    }
+    changed = resizeNode(document, child, true, targetWidth, targetHeight) || changed;
+  }
 
   const childMainTotal = children.reduce((total, child) => total + mainSize(child, horizontal), 0);
   const singleLineMetrics = crossLineMetrics(children, horizontal, frame.counterAxisAlign);

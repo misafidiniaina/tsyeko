@@ -2965,8 +2965,8 @@ function layoutRelationshipInspector(node) {
       ${!absolute && !autoBounds && !sizingAlreadyShown ? `
         <div class="layout-control-block">
           <span class="layout-control-label">Child sizing</span>
-          ${layoutSizingControl(node, "horizontal", false, true)}
-          ${layoutSizingControl(node, "vertical", false, true)}
+          ${layoutSizingControl(node, "horizontal", node.type === NODE_TYPES.TEXT, true)}
+          ${layoutSizingControl(node, "vertical", node.type === NODE_TYPES.TEXT, true)}
         </div>` : ""}
       ${!absolute && autoBounds ? `<p class="inspector-hint">Composite size follows its source layers; Auto Layout controls its position.</p>` : ""}
       ${absolute ? `${constraintsFields(node)}<p class="inspector-hint">Absolute children keep free positioning and respond to frame constraints.</p>` : ""}
