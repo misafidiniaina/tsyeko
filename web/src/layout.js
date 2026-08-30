@@ -91,14 +91,17 @@ function layoutFrame(document, frame) {
     changed = setFrameAxisSize(
       frame,
       horizontal,
-      Math.max(MIN_SIZE, paddingMainStart + childMainTotal + fixedGaps + paddingMainEnd),
+      clampSize(frame, horizontal, paddingMainStart + childMainTotal + fixedGaps + paddingMainEnd),
     ) || changed;
+  }
+  if (frame.layoutWrap && children.length) {
+    return layoutWrappedFrame(document, frame, children, horizontal, changed);
   }
   if (crossSizing === LAYOUT_SIZING.HUG) {
     changed = setFrameAxisSize(
       frame,
       !horizontal,
-      Math.max(MIN_SIZE, paddingCrossStart + childCrossMax + paddingCrossEnd),
+      clampSize(frame, !horizontal, paddingCrossStart + childCrossMax + paddingCrossEnd),
     ) || changed;
   }
   if (!children.length) return changed;
@@ -112,22 +115,19 @@ function layoutFrame(document, frame) {
     (total, child) => total + (fillMainChildren.includes(child) ? 0 : mainSize(child, horizontal)),
     0,
   );
-  const availableForFill = Math.max(
-    fillMainChildren.length * MIN_SIZE,
-    innerMain - fixedGaps - nonFillMain,
-  );
-  const fillMainSize = fillMainChildren.length ? availableForFill / fillMainChildren.length : 0;
+  const availableForFill = Math.max(0, innerMain - fixedGaps - nonFillMain);
+  const fillMainSizes = distributeFillSpace(fillMainChildren, horizontal, availableForFill);
 
   for (const child of children) {
     let targetMain = mainSize(child, horizontal);
     let targetCross = crossSize(child, horizontal);
-    if (fillMainChildren.includes(child)) targetMain = fillMainSize;
+    if (fillMainSizes.has(child)) targetMain = fillMainSizes.get(child);
     if (
       canResize(child) &&
       (childSizing(child, !horizontal) === LAYOUT_SIZING.FILL ||
         frame.counterAxisAlign === COUNTER_AXIS_ALIGNS.STRETCH)
     ) {
-      targetCross = Math.max(MIN_SIZE, innerCross);
+      targetCross = innerCross;
     }
     changed = resizeNode(document, child, horizontal, targetMain, targetCross) || changed;
   }
@@ -161,6 +161,116 @@ function layoutFrame(document, frame) {
     cursor += mainSize(child, horizontal) + gap;
   }
   return changed;
+}
+
+function layoutWrappedFrame(document, frame, children, horizontal, initialChanged) {
+  const paddingMainStart = horizontal ? frame.paddingLeft : frame.paddingTop;
+  const paddingMainEnd = horizontal ? frame.paddingRight : frame.paddingBottom;
+  const paddingCrossStart = horizontal ? frame.paddingTop : frame.paddingLeft;
+  const paddingCrossEnd = horizontal ? frame.paddingBottom : frame.paddingRight;
+  const mainSizing = horizontal ? frame.layoutSizingHorizontal : frame.layoutSizingVertical;
+  const crossSizing = horizontal ? frame.layoutSizingVertical : frame.layoutSizingHorizontal;
+  const innerMain = Math.max(0, mainSize(frame, horizontal) - paddingMainStart - paddingMainEnd);
+  const lines = [];
+  let line = [];
+  let occupied = 0;
+  for (const child of children) {
+    const fill = mainSizing !== LAYOUT_SIZING.HUG &&
+      childSizing(child, horizontal) === LAYOUT_SIZING.FILL && canResize(child);
+    const basis = fill ? clampSize(child, horizontal, MIN_SIZE) : mainSize(child, horizontal);
+    const required = line.length ? frame.layoutGap + basis : basis;
+    if (line.length && occupied + required > innerMain + EPSILON) {
+      lines.push(line);
+      line = [];
+      occupied = 0;
+    }
+    line.push(child);
+    occupied += (line.length > 1 ? frame.layoutGap : 0) + basis;
+  }
+  if (line.length) lines.push(line);
+
+  let changed = initialChanged;
+  const lineCrossSizes = [];
+  for (const items of lines) {
+    const fillChildren = mainSizing === LAYOUT_SIZING.HUG ? [] : items.filter((child) =>
+      childSizing(child, horizontal) === LAYOUT_SIZING.FILL && canResize(child));
+    const fixedMain = items.reduce((total, child) =>
+      total + (fillChildren.includes(child) ? 0 : mainSize(child, horizontal)), 0);
+    const available = Math.max(0, innerMain - frame.layoutGap * Math.max(0, items.length - 1) - fixedMain);
+    const fillSizes = distributeFillSpace(fillChildren, horizontal, available);
+    for (const child of items) {
+      const targetMain = fillSizes.get(child) ?? mainSize(child, horizontal);
+      changed = resizeNode(document, child, horizontal, targetMain, crossSize(child, horizontal)) || changed;
+    }
+    lineCrossSizes.push(items.reduce((maximum, child) => Math.max(maximum, crossSize(child, horizontal)), 0));
+  }
+
+  const contentCross = lineCrossSizes.reduce((total, size) => total + size, 0) +
+    frame.layoutGap * Math.max(0, lines.length - 1);
+  if (crossSizing === LAYOUT_SIZING.HUG) {
+    changed = setFrameAxisSize(frame, !horizontal,
+      clampSize(frame, !horizontal, paddingCrossStart + contentCross + paddingCrossEnd)) || changed;
+  }
+
+  let crossCursor = crossOrigin(frame, horizontal) + paddingCrossStart;
+  for (let index = 0; index < lines.length; index += 1) {
+    const items = lines[index];
+    const lineCross = lineCrossSizes[index];
+    for (const child of items) {
+      if (canResize(child) && (childSizing(child, !horizontal) === LAYOUT_SIZING.FILL ||
+        frame.counterAxisAlign === COUNTER_AXIS_ALIGNS.STRETCH)) {
+        changed = resizeNode(document, child, horizontal, mainSize(child, horizontal), lineCross) || changed;
+      }
+    }
+    const occupiedMain = items.reduce((total, child) => total + mainSize(child, horizontal), 0);
+    let gap = frame.layoutGap;
+    const freeMain = innerMain - occupiedMain - gap * Math.max(0, items.length - 1);
+    let mainOffset = frame.primaryAxisAlign === PRIMARY_AXIS_ALIGNS.CENTER ? freeMain / 2 :
+      frame.primaryAxisAlign === PRIMARY_AXIS_ALIGNS.END ? freeMain : 0;
+    if (frame.primaryAxisAlign === PRIMARY_AXIS_ALIGNS.SPACE_BETWEEN && items.length > 1) {
+      gap = Math.max(0, (innerMain - occupiedMain) / (items.length - 1));
+      mainOffset = 0;
+    }
+    let mainCursor = mainOrigin(frame, horizontal) + paddingMainStart + mainOffset;
+    for (const child of items) {
+      const freeCross = lineCross - crossSize(child, horizontal);
+      const crossOffset = frame.counterAxisAlign === COUNTER_AXIS_ALIGNS.CENTER ? freeCross / 2 :
+        frame.counterAxisAlign === COUNTER_AXIS_ALIGNS.END ? freeCross : 0;
+      changed = moveBranch(document, child,
+        horizontal ? mainCursor : crossCursor + crossOffset,
+        horizontal ? crossCursor + crossOffset : mainCursor) || changed;
+      mainCursor += mainSize(child, horizontal) + gap;
+    }
+    crossCursor += lineCross + frame.layoutGap;
+  }
+  return changed;
+}
+
+function clampSize(node, horizontal, value) {
+  const minimum = horizontal ? node.minWidth : node.minHeight;
+  const maximum = horizontal ? node.maxWidth : node.maxHeight;
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function distributeFillSpace(children, horizontal, available) {
+  const sizes = new Map();
+  const pending = new Set(children);
+  let remaining = available;
+  while (pending.size) {
+    const share = remaining / pending.size;
+    const constrained = [...pending].filter((child) => !almostEqual(clampSize(child, horizontal, share), share));
+    if (!constrained.length) {
+      for (const child of pending) sizes.set(child, share);
+      break;
+    }
+    for (const child of constrained) {
+      const size = clampSize(child, horizontal, share);
+      sizes.set(child, size);
+      remaining -= size;
+      pending.delete(child);
+    }
+  }
+  return sizes;
 }
 
 export function resizeFrameChildren(document, originalFrame, resizedFrame, originalNodes) {
@@ -388,8 +498,8 @@ function resizeNode(document, node, horizontal, targetMain, targetCross) {
   if (!canResize(node)) return false;
   const targetWidth = horizontal ? targetMain : targetCross;
   const targetHeight = horizontal ? targetCross : targetMain;
-  const width = Math.max(MIN_SIZE, targetWidth);
-  const height = Math.max(MIN_SIZE, targetHeight);
+  const width = clampSize(node, true, Math.max(MIN_SIZE, targetWidth));
+  const height = clampSize(node, false, Math.max(MIN_SIZE, targetHeight));
   if (almostEqual(node.width, width) && almostEqual(node.height, height)) return false;
   const source = {
     ...node,

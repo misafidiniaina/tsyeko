@@ -41,6 +41,7 @@ export const COMPONENT_OVERRIDE_PROPERTIES = Object.freeze([
   "vectorFillRule",
   "booleanOperation",
   "layoutMode",
+  "layoutWrap",
   "layoutGap",
   "paddingTop",
   "paddingRight",
@@ -176,6 +177,7 @@ const DEFAULTS = Object.freeze({
     strokeWidth: 1,
     cornerRadius: 0,
     layoutMode: LAYOUT_MODES.NONE,
+    layoutWrap: false,
     layoutGap: 16,
     paddingTop: 16,
     paddingRight: 16,
@@ -500,6 +502,10 @@ export function normalizeNode(input) {
     y: finiteNumber(input.y, 0, -1_000_000, 1_000_000),
     width: finiteNumber(input.width, defaults.width, 1, 100_000),
     height: finiteNumber(input.height, defaults.height, 1, 100_000),
+    minWidth: finiteNumber(input.minWidth, 1, 1, 100_000),
+    maxWidth: finiteNumber(input.maxWidth, 100_000, 1, 100_000),
+    minHeight: finiteNumber(input.minHeight, 1, 1, 100_000),
+    maxHeight: finiteNumber(input.maxHeight, 100_000, 1, 100_000),
     rotation: normalizeRotation(finiteNumber(input.rotation, 0, -36_000, 36_000)),
     opacity: finiteNumber(input.opacity, 1, 0, 1),
     visible: input.visible !== false,
@@ -534,6 +540,10 @@ export function normalizeNode(input) {
       : null,
     componentOverrides: normalizeComponentOverrides(input.componentOverrides),
   };
+  node.maxWidth = Math.max(node.minWidth, node.maxWidth);
+  node.maxHeight = Math.max(node.minHeight, node.maxHeight);
+  node.width = Math.min(node.maxWidth, Math.max(node.minWidth, node.width));
+  node.height = Math.min(node.maxHeight, Math.max(node.minHeight, node.height));
   node.fillType = input.fillType === "linear-gradient" ? "linear-gradient" : "solid";
   node.gradient = normalizeGradient(input.gradient, node.fill);
   node.shadow = normalizeShadow(input.shadow, defaults.shadow ?? DEFAULT_SHADOW);
@@ -572,6 +582,7 @@ export function normalizeNode(input) {
     node.layoutMode = Object.values(LAYOUT_MODES).includes(input.layoutMode)
       ? input.layoutMode
       : defaults.layoutMode;
+    node.layoutWrap = input.layoutWrap === true;
     node.layoutGap = finiteNumber(input.layoutGap, defaults.layoutGap, 0, 10_000);
     node.paddingTop = finiteNumber(input.paddingTop, defaults.paddingTop, 0, 10_000);
     node.paddingRight = finiteNumber(input.paddingRight, defaults.paddingRight, 0, 10_000);

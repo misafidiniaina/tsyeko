@@ -53,6 +53,7 @@ test("v10 migration preserves safe responsive layout defaults", () => {
   assert.equal(child.constraintHorizontal, HORIZONTAL_CONSTRAINTS.LEFT);
   assert.equal(child.constraintVertical, VERTICAL_CONSTRAINTS.TOP);
   assert.equal(rotated.rotation, 0);
+  assert.equal(frame.layoutWrap, false);
 });
 
 test("horizontal Auto Layout distributes fill children and aligns the counter axis", () => {
@@ -87,6 +88,121 @@ test("horizontal Auto Layout distributes fill children and aligns the counter ax
   assert.equal(fill.x, 80);
   assert.equal(fill.y, 60);
   assert.equal(fill.width, 320);
+});
+
+test("min and max dimensions constrain hug and fill layout", () => {
+  const frame = createNode(NODE_TYPES.FRAME, 0, 0, {
+    width: 300,
+    height: 100,
+    layoutMode: LAYOUT_MODES.HORIZONTAL,
+    layoutSizingHorizontal: LAYOUT_SIZING.HUG,
+  });
+  const child = createNode(NODE_TYPES.RECTANGLE, 0, 0, {
+    parentId: frame.id,
+    width: 20,
+    height: 20,
+    minWidth: 80,
+    maxWidth: 100,
+  });
+  const page = pageWith(frame, child);
+
+  resolvePageLayout(page);
+  assert.equal(child.width, 80);
+  assert.equal(frame.width, 112);
+
+  frame.layoutSizingHorizontal = LAYOUT_SIZING.FIXED;
+  frame.width = 300;
+  child.layoutSizingHorizontal = LAYOUT_SIZING.FILL;
+  resolvePageLayout(page);
+  assert.equal(child.width, 100);
+});
+
+test("fill layout redistributes space after a child reaches its maximum", () => {
+  const frame = createNode(NODE_TYPES.FRAME, 0, 0, {
+    width: 300,
+    height: 80,
+    layoutMode: LAYOUT_MODES.HORIZONTAL,
+    layoutGap: 0,
+    paddingTop: 10,
+    paddingRight: 10,
+    paddingBottom: 10,
+    paddingLeft: 10,
+  });
+  const capped = createNode(NODE_TYPES.RECTANGLE, 0, 0, {
+    parentId: frame.id,
+    layoutSizingHorizontal: LAYOUT_SIZING.FILL,
+    maxWidth: 100,
+  });
+  const flexible = createNode(NODE_TYPES.RECTANGLE, 0, 0, {
+    parentId: frame.id,
+    layoutSizingHorizontal: LAYOUT_SIZING.FILL,
+  });
+  const page = pageWith(frame, capped, flexible);
+
+  resolvePageLayout(page);
+
+  assert.equal(capped.width, 100);
+  assert.equal(flexible.width, 180);
+  assert.equal(flexible.x, 110);
+});
+
+test("horizontal Auto Layout wraps children into rows and hugs the cross axis", () => {
+  const frame = createNode(NODE_TYPES.FRAME, 10, 20, {
+    width: 150,
+    height: 200,
+    layoutMode: LAYOUT_MODES.HORIZONTAL,
+    layoutWrap: true,
+    layoutGap: 10,
+    paddingTop: 10,
+    paddingRight: 10,
+    paddingBottom: 10,
+    paddingLeft: 10,
+    layoutSizingVertical: LAYOUT_SIZING.HUG,
+  });
+  const children = [0, 1, 2].map((index) => createNode(NODE_TYPES.RECTANGLE, 0, 0, {
+    parentId: frame.id,
+    name: `Item ${index}`,
+    width: 60,
+    height: 20 + index * 10,
+  }));
+  const page = pageWith(frame, ...children);
+
+  resolvePageLayout(page);
+
+  assert.deepEqual(children.map((child) => [child.x, child.y]), [
+    [20, 30],
+    [90, 30],
+    [20, 70],
+  ]);
+  assert.equal(frame.height, 100);
+});
+
+test("vertical Auto Layout wraps children into columns", () => {
+  const frame = createNode(NODE_TYPES.FRAME, 0, 0, {
+    width: 200,
+    height: 130,
+    layoutMode: LAYOUT_MODES.VERTICAL,
+    layoutWrap: true,
+    layoutGap: 10,
+    paddingTop: 10,
+    paddingRight: 10,
+    paddingBottom: 10,
+    paddingLeft: 10,
+  });
+  const children = [0, 1, 2].map(() => createNode(NODE_TYPES.RECTANGLE, 0, 0, {
+    parentId: frame.id,
+    width: 40,
+    height: 50,
+  }));
+  const page = pageWith(frame, ...children);
+
+  resolvePageLayout(page);
+
+  assert.deepEqual(children.map((child) => [child.x, child.y]), [
+    [10, 10],
+    [10, 70],
+    [60, 10],
+  ]);
 });
 
 test("nested hug frames resolve from the inside out and move descendants together", () => {

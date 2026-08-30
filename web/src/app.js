@@ -432,12 +432,28 @@ function bindInspector() {
       if (!Number.isFinite(value)) return;
       value *= Number.parseFloat(input.dataset.scale || "1");
     }
+    if (["minWidth", "maxWidth", "minHeight", "maxHeight"].includes(property)) {
+      value = clamp(value, 1, 100_000);
+      const original = cloneNode(node);
+      const snapshots = node.type === NODE_TYPES.FRAME
+        ? getNodesWithDescendants(currentPage(), [node.id]).map(cloneNode)
+        : null;
+      node[property] = value;
+      if (property === "minWidth") node.maxWidth = Math.max(node.maxWidth, value);
+      if (property === "maxWidth") node.minWidth = Math.min(node.minWidth, value);
+      if (property === "minHeight") node.maxHeight = Math.max(node.maxHeight, value);
+      if (property === "maxHeight") node.minHeight = Math.min(node.minHeight, value);
+      applyNodeSizeLimits(node, original, snapshots);
+      liveDocumentChange();
+      return;
+    }
     if (["fill", "stroke"].includes(property)) {
       value = normalizeInspectorColor(value);
       if (!isRenderableColor(value)) return;
     }
 
-    if (["width", "height"].includes(property)) value = Math.max(1, value);
+    if (property === "width") value = clamp(value, node.minWidth, node.maxWidth);
+    if (property === "height") value = clamp(value, node.minHeight, node.maxHeight);
     if (property === "rotation") value = normalizeDegrees(value);
     if (property === "opacity") value = clamp(value, 0, 1);
     if (property === "strokeWidth" || property === "cornerRadius") value = Math.max(0, value);
@@ -647,6 +663,9 @@ function bindInspector() {
       if (Object.values(COUNTER_AXIS_ALIGNS).includes(button.dataset.value)) {
         node.counterAxisAlign = button.dataset.value;
       }
+    }
+    if (action === "layout-wrap" && isAutoLayoutFrame(node)) {
+      node.layoutWrap = !node.layoutWrap;
     }
     if (["layout-sizing-horizontal", "layout-sizing-vertical"].includes(action)) {
       const sizing = button.dataset.value;
@@ -1598,6 +1617,27 @@ function updateResize(world, event) {
       if (handle.includes("w")) left = right - width;
       else right = left + width;
     }
+  }
+
+  const unclampedWidth = width;
+  const unclampedHeight = height;
+  width = clamp(width, node.minWidth, node.maxWidth);
+  height = clamp(height, node.minHeight, node.maxHeight);
+  if (width !== unclampedWidth) {
+    if (event.altKey) {
+      const center = (left + right) / 2;
+      left = center - width / 2;
+      right = center + width / 2;
+    } else if (handle.includes("w")) left = right - width;
+    else right = left + width;
+  }
+  if (height !== unclampedHeight) {
+    if (event.altKey) {
+      const center = (top + bottom) / 2;
+      top = center - height / 2;
+      bottom = center + height / 2;
+    } else if (handle.includes("n")) top = bottom - height;
+    else bottom = top + height;
   }
 
   const newCenter = localToWorld(original, {
@@ -2702,6 +2742,15 @@ function renderInspector() {
         ${numberField("↻", "rotation", node.rotation, isAutoLayoutFrame(node) || isLinkedInstance)}
         ${numberField("R", "cornerRadius", node.cornerRadius, [NODE_TYPES.ELLIPSE, NODE_TYPES.TEXT, NODE_TYPES.VECTOR, NODE_TYPES.BOOLEAN, NODE_TYPES.MASK].includes(node.type))}
       </div>
+      ${!isAutoBoundsContainer(node) ? `<div class="layout-control-block">
+        <span class="layout-control-label">Size limits</span>
+        <div class="field-grid">
+          ${numberField("Min W", "minWidth", node.minWidth, isLinkedInstance)}
+          ${numberField("Max W", "maxWidth", node.maxWidth, isLinkedInstance)}
+          ${numberField("Min H", "minHeight", node.minHeight, isLinkedInstance)}
+          ${numberField("Max H", "maxHeight", node.maxHeight, isLinkedInstance)}
+        </div>
+      </div>` : ""}
     </section>` : ""}
 
     ${node.type === NODE_TYPES.FRAME ? autoLayoutInspector(node) : ""}
@@ -2866,6 +2915,10 @@ function autoLayoutInspector(frame) {
           ${layoutNumberField("↔", "layoutGap", frame.layoutGap, "Gap between items")}
         </div>
         <div class="layout-control-block">
+          <span class="layout-control-label">Flow behavior</span>
+          <button class="icon-toggle ${frame.layoutWrap ? "active" : ""}" data-inspector-action="layout-wrap">${frame.layoutWrap ? "Wrap enabled" : "No wrap"}</button>
+        </div>
+        <div class="layout-control-block">
           <span class="layout-control-label">Padding · top, right, bottom, left</span>
           <div class="field-grid">
             ${layoutNumberField("T", "paddingTop", frame.paddingTop, "Top padding")}
@@ -2888,7 +2941,7 @@ function autoLayoutInspector(frame) {
               <button class="icon-toggle ${frame.counterAxisAlign === align ? "active" : ""}" data-inspector-action="counter-axis-align" data-value="${align}">${capitalize(align)}</button>`).join("")}
           </div>
         </div>
-        <p class="inspector-hint">Visible flow children follow their Layers order. Hidden and absolute children stay outside the flow.</p>` : `
+        <p class="inspector-hint">Visible flow children follow their Layers order. Wrapping creates rows or columns within the frame bounds; hidden and absolute children stay outside the flow.</p>` : `
         <p class="inspector-hint">Enable a direction to flow children with responsive padding, gaps, alignment, hug, and fill sizing.</p>`}
     </section>`;
 }
@@ -3076,6 +3129,23 @@ function vectorInspector(node) {
         </div>` : ""}
       <p class="inspector-hint">Drag while placing an anchor to create a curve. Double-click a segment to split it without changing its shape. Double-click an anchor to toggle corner/smooth; Alt-drag a handle to disconnect it.</p>
     </section>`;
+}
+
+function applyNodeSizeLimits(node, original, frameSnapshots) {
+  const width = clamp(node.width, node.minWidth, node.maxWidth);
+  const height = clamp(node.height, node.minHeight, node.maxHeight);
+  if (width === node.width && height === node.height) return;
+  node.width = width;
+  node.height = height;
+  if (node.type === NODE_TYPES.VECTOR) {
+    const scaleX = width / Math.max(1, original.width);
+    const scaleY = height / Math.max(1, original.height);
+    node.vectorPoints = original.vectorPoints.map((point) => scaleVectorPoint(point, scaleX, scaleY));
+  }
+  if (node.type === NODE_TYPES.FRAME && frameSnapshots) {
+    resizeFrameChildren(currentPage(), original, node, frameSnapshots);
+  }
+  syncGroupBounds(currentPage());
 }
 
 function numberField(label, property, value, disabled = false) {

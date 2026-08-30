@@ -455,9 +455,11 @@ Every mutation is authorized server-side. Client UI permissions are convenience,
 The v10 client implements layout as a deterministic function of document properties. A frame with horizontal or vertical Auto Layout flows its visible direct children in sibling order; hidden and absolute children are excluded. The implemented contract includes:
 
 - Independent top, right, bottom, and left padding
+- Optional horizontal row wrapping and vertical column wrapping
 - Fixed gaps or primary-axis space-between distribution
 - Start, center, and end alignment plus counter-axis stretch
 - Fixed and fill child sizing
+- Minimum and maximum dimensions across direct resizing, hug, stretch, and fill distribution
 - Fixed, hug, and parent-fill sizing for nested Auto Layout frames
 - Absolute children with responsive constraints
 - Left, center, right, left+right, and scale horizontal constraints
@@ -467,7 +469,7 @@ Resolution runs deepest frames first and repeats to a bounded fixed point. A hug
 
 Frame constraints are calculated from immutable node snapshots captured at the start of each resize gesture. This prevents cumulative drift and permits nested frames to evaluate their own children after receiving a new box. Resolved geometry is committed to history and persistence, so Canvas, hit testing, PNG, and SVG use the same boxes.
 
-The current engine is single-axis and axis-aligned. Wrapping, baseline alignment, min/max dimensions, intrinsic text measurement, rotated Auto Layout frames, and incremental dirty-subtree invalidation remain future work. A hosted export worker must eventually run this same algorithm and controlled font metrics.
+The current engine is axis-aligned. Baseline alignment, intrinsic text measurement, rotated Auto Layout frames, and incremental dirty-subtree invalidation remain future work. A hosted export worker must eventually run this same algorithm and controlled font metrics.
 
 ## 13. Components and design systems
 
@@ -594,7 +596,7 @@ Every document schema change needs forward-migration tests and fixtures from old
 
 ### Milestone 1 — structured editor
 
-- Advanced layout wrapping, min/max sizing, baseline alignment, and intrinsic text measurement
+- Advanced layout baseline alignment and intrinsic text measurement
 - Editable compound contours, destructive Boolean flattening, precision stroke outlining, and geometry-kernel fuzz tests
 - Bounds-local composite caches, dirty-region rendering, and large-scene profiling
 - Multiple paint stacks, radial/angular gradients, and blur effects
