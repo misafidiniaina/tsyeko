@@ -81,10 +81,8 @@ function layoutFrame(document, frame) {
   let changed = false;
 
   const childMainTotal = children.reduce((total, child) => total + mainSize(child, horizontal), 0);
-  const childCrossMax = children.reduce(
-    (maximum, child) => Math.max(maximum, crossSize(child, horizontal)),
-    0,
-  );
+  const singleLineMetrics = crossLineMetrics(children, horizontal, frame.counterAxisAlign);
+  const childCrossMax = singleLineMetrics.size;
   const fixedGaps = frame.layoutGap * Math.max(0, children.length - 1);
 
   if (mainSizing === LAYOUT_SIZING.HUG) {
@@ -154,6 +152,8 @@ function layoutFrame(document, frame) {
       crossOffset = availableCrossSpace / 2;
     } else if (frame.counterAxisAlign === COUNTER_AXIS_ALIGNS.END) {
       crossOffset = availableCrossSpace;
+    } else if (horizontal && frame.counterAxisAlign === COUNTER_AXIS_ALIGNS.BASELINE) {
+      crossOffset = singleLineMetrics.baseline - baselineOffset(child);
     }
     const x = horizontal ? cursor : crossOriginValue + crossOffset;
     const y = horizontal ? crossOriginValue + crossOffset : cursor;
@@ -202,10 +202,10 @@ function layoutWrappedFrame(document, frame, children, horizontal, initialChange
       const targetMain = fillSizes.get(child) ?? mainSize(child, horizontal);
       changed = resizeNode(document, child, horizontal, targetMain, crossSize(child, horizontal)) || changed;
     }
-    lineCrossSizes.push(items.reduce((maximum, child) => Math.max(maximum, crossSize(child, horizontal)), 0));
+    lineCrossSizes.push(crossLineMetrics(items, horizontal, frame.counterAxisAlign));
   }
 
-  const contentCross = lineCrossSizes.reduce((total, size) => total + size, 0) +
+  const contentCross = lineCrossSizes.reduce((total, metrics) => total + metrics.size, 0) +
     frame.layoutGap * Math.max(0, lines.length - 1);
   if (crossSizing === LAYOUT_SIZING.HUG) {
     changed = setFrameAxisSize(frame, !horizontal,
@@ -215,7 +215,8 @@ function layoutWrappedFrame(document, frame, children, horizontal, initialChange
   let crossCursor = crossOrigin(frame, horizontal) + paddingCrossStart;
   for (let index = 0; index < lines.length; index += 1) {
     const items = lines[index];
-    const lineCross = lineCrossSizes[index];
+    const lineMetrics = lineCrossSizes[index];
+    const lineCross = lineMetrics.size;
     for (const child of items) {
       if (canResize(child) && (childSizing(child, !horizontal) === LAYOUT_SIZING.FILL ||
         frame.counterAxisAlign === COUNTER_AXIS_ALIGNS.STRETCH)) {
@@ -235,7 +236,9 @@ function layoutWrappedFrame(document, frame, children, horizontal, initialChange
     for (const child of items) {
       const freeCross = lineCross - crossSize(child, horizontal);
       const crossOffset = frame.counterAxisAlign === COUNTER_AXIS_ALIGNS.CENTER ? freeCross / 2 :
-        frame.counterAxisAlign === COUNTER_AXIS_ALIGNS.END ? freeCross : 0;
+        frame.counterAxisAlign === COUNTER_AXIS_ALIGNS.END ? freeCross :
+          horizontal && frame.counterAxisAlign === COUNTER_AXIS_ALIGNS.BASELINE
+            ? lineMetrics.baseline - baselineOffset(child) : 0;
       changed = moveBranch(document, child,
         horizontal ? mainCursor : crossCursor + crossOffset,
         horizontal ? crossCursor + crossOffset : mainCursor) || changed;
@@ -244,6 +247,25 @@ function layoutWrappedFrame(document, frame, children, horizontal, initialChange
     crossCursor += lineCross + frame.layoutGap;
   }
   return changed;
+}
+
+function baselineOffset(node) {
+  return node.type === NODE_TYPES.TEXT
+    ? Math.min(node.height, node.fontSize * 0.8)
+    : node.height;
+}
+
+function crossLineMetrics(children, horizontal, alignment) {
+  if (horizontal && alignment === COUNTER_AXIS_ALIGNS.BASELINE && children.length) {
+    const baseline = children.reduce((maximum, child) => Math.max(maximum, baselineOffset(child)), 0);
+    const descent = children.reduce((maximum, child) =>
+      Math.max(maximum, child.height - baselineOffset(child)), 0);
+    return { size: baseline + descent, baseline };
+  }
+  return {
+    size: children.reduce((maximum, child) => Math.max(maximum, crossSize(child, horizontal)), 0),
+    baseline: 0,
+  };
 }
 
 function clampSize(node, horizontal, value) {

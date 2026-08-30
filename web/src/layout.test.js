@@ -205,6 +205,39 @@ test("vertical Auto Layout wraps children into columns", () => {
   ]);
 });
 
+test("horizontal Auto Layout aligns text and controls on a shared baseline", () => {
+  const frame = createNode(NODE_TYPES.FRAME, 0, 0, {
+    width: 240,
+    height: 100,
+    layoutMode: LAYOUT_MODES.HORIZONTAL,
+    layoutSizingVertical: LAYOUT_SIZING.HUG,
+    counterAxisAlign: COUNTER_AXIS_ALIGNS.BASELINE,
+    paddingTop: 0,
+    paddingRight: 0,
+    paddingBottom: 0,
+    paddingLeft: 0,
+  });
+  const text = createNode(NODE_TYPES.TEXT, 0, 0, {
+    parentId: frame.id,
+    width: 80,
+    height: 30,
+    fontSize: 20,
+  });
+  const control = createNode(NODE_TYPES.RECTANGLE, 0, 0, {
+    parentId: frame.id,
+    width: 60,
+    height: 24,
+  });
+  const page = pageWith(frame, text, control);
+
+  resolvePageLayout(page);
+
+  assert.equal(text.y, 8);
+  assert.equal(control.y, 0);
+  assert.equal(text.y + text.fontSize * 0.8, control.y + control.height);
+  assert.equal(frame.height, 38);
+});
+
 test("nested hug frames resolve from the inside out and move descendants together", () => {
   const outer = createNode(NODE_TYPES.FRAME, 100, 50, {
     layoutMode: LAYOUT_MODES.VERTICAL,

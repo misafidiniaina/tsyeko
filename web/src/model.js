@@ -89,6 +89,7 @@ export const COUNTER_AXIS_ALIGNS = Object.freeze({
   CENTER: "center",
   END: "end",
   STRETCH: "stretch",
+  BASELINE: "baseline",
 });
 
 export const HORIZONTAL_CONSTRAINTS = Object.freeze({

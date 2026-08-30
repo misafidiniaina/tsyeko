@@ -35,7 +35,7 @@ GOCACHE=$PWD/.cache/go-build go run .
 - Pen tool for open/closed paths, click-drag curve handles, 45-degree Shift constraints, and click-first-point closure
 - Direct vector editing with draggable anchors and handles, mirrored/free controls, corner/smooth conversion, curve-preserving segment insertion, anchor deletion, path reversal, and fill rules
 - Hierarchical frame/group/Boolean/mask parenting with nested clipping and inherited visibility, locking, and opacity
-- Horizontal and vertical Auto Layout frames with ordered flow, wrapping, per-side padding, gaps, primary/counter-axis alignment, hug sizing, fill children, and min/max dimensions
+- Horizontal and vertical Auto Layout frames with ordered flow, wrapping, per-side padding, gaps, primary/counter-axis and text baseline alignment, hug sizing, fill children, and min/max dimensions
 - Flow/absolute child positioning plus left, right, center, stretch, and scale constraints for responsive frame resizing
 - Local reusable components with main sources, grouped variant sets, Inspector variant switching, linked instances, visual/content overrides, reset, and detach
 - Embedded PNG, JPEG, WebP, and GIF image layers with cover/contain fitting
@@ -102,6 +102,7 @@ Select sibling layers and press `Shift+A`, or use the horizontal/vertical Auto L
 - Fixed, hug, and parent-fill sizing where valid
 - Gap and independent top/right/bottom/left padding
 - Start, center, end, space-between, and stretch alignment
+- Text/control baseline alignment for horizontal rows
 - Layers-order flow with hidden layers excluded
 - Optional row/column wrapping within fixed main-axis bounds
 
@@ -158,7 +159,7 @@ The unit suite covers document migration and sanitization, component source/inst
 
 ## Current product boundary
 
-The MVP stores one hierarchical, multi-page document and embedded raster assets in the browser. Cubic paths, object-level non-destructive Booleans, silhouette masks, wrapping Auto Layout, frame constraints, min/max dimensions, local linked components, and local variant sets are implemented. Layout does not yet include baseline alignment, intrinsic text measurement, or rotated Auto Layout frames. Components do not yet support nested component composition, published libraries, remote updates, or typed component-property controls. True multi-contour path editing, destructive path flattening, precision offset curves, and a scalable cached/GPU compositor also remain future work. There is no account system, remote database, managed font asset pipeline, or multiplayer synchronization yet. These are explicit follow-on milestones described in [the architecture document](docs/ARCHITECTURE.md).
+The MVP stores one hierarchical, multi-page document and embedded raster assets in the browser. Cubic paths, object-level non-destructive Booleans, silhouette masks, wrapping and baseline-aware Auto Layout, frame constraints, min/max dimensions, local linked components, and local variant sets are implemented. Layout does not yet include intrinsic text measurement or rotated Auto Layout frames. Components do not yet support nested component composition, published libraries, remote updates, or typed component-property controls. True multi-contour path editing, destructive path flattening, precision offset curves, and a scalable cached/GPU compositor also remain future work. There is no account system, remote database, managed font asset pipeline, or multiplayer synchronization yet. These are explicit follow-on milestones described in [the architecture document](docs/ARCHITECTURE.md).
 
 ## Core design decision
 

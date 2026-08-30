@@ -2937,7 +2937,8 @@ function autoLayoutInspector(frame) {
         <div class="layout-control-block">
           <span class="layout-control-label">Counter axis</span>
           <div class="icon-toggle-row compact-toggle-row">
-            ${Object.values(COUNTER_AXIS_ALIGNS).map((align) => `
+            ${Object.values(COUNTER_AXIS_ALIGNS).filter((align) =>
+              align !== COUNTER_AXIS_ALIGNS.BASELINE || frame.layoutMode === LAYOUT_MODES.HORIZONTAL).map((align) => `
               <button class="icon-toggle ${frame.counterAxisAlign === align ? "active" : ""}" data-inspector-action="counter-axis-align" data-value="${align}">${capitalize(align)}</button>`).join("")}
           </div>
         </div>
