@@ -40,6 +40,89 @@ type hostedFileSummary struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
+type fileRoomEvent struct {
+	Type      string    `json:"type"`
+	FileID    string    `json:"fileId"`
+	Revision  int64     `json:"revision,omitempty"`
+	ClientID  string    `json:"clientId,omitempty"`
+	Online    int       `json:"online,omitempty"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+type fileRoomHub struct {
+	mu          sync.Mutex
+	subscribers map[string]map[chan fileRoomEvent]struct{}
+}
+
+func newFileRoomHub() *fileRoomHub {
+	return &fileRoomHub{subscribers: make(map[string]map[chan fileRoomEvent]struct{})}
+}
+
+func (hub *fileRoomHub) Subscribe(fileID string) (<-chan fileRoomEvent, func()) {
+	hub.mu.Lock()
+	channel := make(chan fileRoomEvent, 8)
+	if hub.subscribers[fileID] == nil {
+		hub.subscribers[fileID] = make(map[chan fileRoomEvent]struct{})
+	}
+	hub.subscribers[fileID][channel] = struct{}{}
+	hub.publishLocked(fileID, fileRoomEvent{
+		Type: "presence", FileID: fileID, Online: len(hub.subscribers[fileID]), UpdatedAt: time.Now().UTC(),
+	})
+	hub.mu.Unlock()
+
+	var once sync.Once
+	cancel := func() {
+		once.Do(func() {
+			hub.mu.Lock()
+			delete(hub.subscribers[fileID], channel)
+			close(channel)
+			if len(hub.subscribers[fileID]) == 0 {
+				delete(hub.subscribers, fileID)
+			} else {
+				hub.publishLocked(fileID, fileRoomEvent{
+					Type: "presence", FileID: fileID, Online: len(hub.subscribers[fileID]), UpdatedAt: time.Now().UTC(),
+				})
+			}
+			hub.mu.Unlock()
+		})
+	}
+	return channel, cancel
+}
+
+func (hub *fileRoomHub) PublishRevision(file hostedFile, clientID string) {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	hub.publishLocked(file.ID, fileRoomEvent{
+		Type: "revision", FileID: file.ID, Revision: file.Revision,
+		ClientID: cleanClientID(clientID), UpdatedAt: file.UpdatedAt,
+	})
+}
+
+func (hub *fileRoomHub) publishLocked(fileID string, event fileRoomEvent) {
+	for subscriber := range hub.subscribers[fileID] {
+		select {
+		case subscriber <- event:
+		default:
+			select {
+			case <-subscriber:
+			default:
+			}
+			select {
+			case subscriber <- event:
+			default:
+			}
+		}
+	}
+}
+
+func cleanClientID(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 100 {
+		value = value[:100]
+	}
+	return value
+}
+
 type hostedFileStore interface {
 	Create(name string, document json.RawMessage) (hostedFile, error)
 	Get(id string) (hostedFile, error)

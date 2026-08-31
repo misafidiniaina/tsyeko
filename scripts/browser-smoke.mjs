@@ -1285,7 +1285,7 @@ try {
   await waitFor(
     `document.readyState === "complete" &&
      document.querySelector("#documentTitle")?.value === "Hosted smoke" &&
-     document.querySelector("#saveState")?.textContent === "Hosted · revision 1"`,
+     document.querySelector("#saveState")?.textContent.startsWith("Hosted · revision 1")`,
     "hosted file load",
   );
   await evaluate(`
@@ -1298,7 +1298,7 @@ try {
     })()
   `);
   await waitFor(
-    `document.querySelector("#saveState")?.textContent === "Hosted · revision 2"`,
+    `document.querySelector("#saveState")?.textContent.startsWith("Hosted · revision 2")`,
     "hosted revision autosave",
   );
   const hostedReload = await fetch(`http://127.0.0.1:${serverPort}/v1/files/${hostedFile.id}`);
@@ -1306,7 +1306,25 @@ try {
   if (!hostedReload.ok || hostedSavedFile.document?.name !== "Hosted smoke updated" || hostedSavedFile.revision !== 2) {
     throw new Error(`Hosted autosave verification failed: ${JSON.stringify(hostedSavedFile)}`);
   }
-  result.hostedRevision = hostedSavedFile.revision;
+  hostedSavedFile.document.name = "Remote collaborator update";
+  const remoteUpdate = await fetch(`http://127.0.0.1:${serverPort}/v1/files/${hostedFile.id}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      "If-Match": `"${hostedSavedFile.revision}"`,
+      "X-Tsyaiko-Client": "browser-smoke-remote",
+    },
+    body: JSON.stringify({ document: hostedSavedFile.document }),
+  });
+  if (!remoteUpdate.ok) {
+    throw new Error(`Remote collaborator update failed with ${remoteUpdate.status}.`);
+  }
+  await waitFor(
+    `document.querySelector("#documentTitle")?.value === "Remote collaborator update" &&
+     document.querySelector("#saveState")?.textContent.startsWith("Hosted · revision 3")`,
+    "live hosted revision update",
+  );
+  result.hostedRevision = 3;
   process.stdout.write(`Browser smoke test passed: ${JSON.stringify(result)}\n`);
 } finally {
   socket?.close();

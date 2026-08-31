@@ -27,6 +27,10 @@ func newHandler() http.Handler {
 }
 
 func newHandlerWithStore(store hostedFileStore) http.Handler {
+	return newHandlerWithCollaboration(store, newFileRoomHub())
+}
+
+func newHandlerWithCollaboration(store hostedFileStore, hub *fileRoomHub) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -73,6 +77,50 @@ func newHandlerWithStore(store hostedFileStore) http.Handler {
 		}
 		writeHostedFile(w, http.StatusOK, file)
 	})
+	mux.HandleFunc("GET /v1/files/{fileId}/events", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("fileId")
+		if !validHostedFileID(id) {
+			writeAPIError(w, http.StatusNotFound, "file_not_found", "File not found.")
+			return
+		}
+		file, err := store.Get(id)
+		if err != nil {
+			writeAPIError(w, http.StatusNotFound, "file_not_found", "File not found.")
+			return
+		}
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			writeAPIError(w, http.StatusInternalServerError, "stream_unavailable", "Live updates are unavailable.")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+		events, unsubscribe := hub.Subscribe(id)
+		defer unsubscribe()
+		writeFileRoomEvent(w, fileRoomEvent{
+			Type: "revision", FileID: id, Revision: file.Revision, UpdatedAt: file.UpdatedAt,
+		})
+		flusher.Flush()
+		heartbeat := time.NewTicker(15 * time.Second)
+		defer heartbeat.Stop()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case event, open := <-events:
+				if !open {
+					return
+				}
+				writeFileRoomEvent(w, event)
+				flusher.Flush()
+			case <-heartbeat.C:
+				_, _ = w.Write([]byte(": heartbeat\n\n"))
+				flusher.Flush()
+			}
+		}
+	})
 	mux.HandleFunc("PATCH /v1/files/{fileId}", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("fileId")
 		if !validHostedFileID(id) {
@@ -113,6 +161,7 @@ func newHandlerWithStore(store hostedFileStore) http.Handler {
 			writeAPIError(w, http.StatusInternalServerError, "storage_error", "The file snapshot could not be stored.")
 			return
 		}
+		hub.PublishRevision(file, r.Header.Get("X-Tsyaiko-Client"))
 		writeHostedFile(w, http.StatusOK, file)
 	})
 
@@ -123,6 +172,14 @@ func newHandlerWithStore(store hostedFileStore) http.Handler {
 	mux.Handle("/", http.FileServer(http.FS(staticFiles)))
 
 	return withSecurityHeaders(mux)
+}
+
+func writeFileRoomEvent(w http.ResponseWriter, event fileRoomEvent) {
+	data, err := json.Marshal(event)
+	if err != nil {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, data)
 }
 
 func revisionETag(revision int64) string {
@@ -175,7 +232,7 @@ func main() {
 	address := fmt.Sprintf(":%d", *port)
 	server := &http.Server{
 		Addr:              address,
-		Handler:           newHandlerWithStore(store),
+		Handler:           newHandlerWithCollaboration(store, newFileRoomHub()),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

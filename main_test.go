@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHealthEndpoint(t *testing.T) {
@@ -153,5 +154,50 @@ func TestDiskFileStoreReloadsDurableSnapshots(t *testing.T) {
 	}
 	if file.Name != updatedName || file.Revision != 2 {
 		t.Fatalf("unexpected reloaded file: %#v", file)
+	}
+}
+
+func TestFileRoomHubBroadcastsPresenceAndRevisions(t *testing.T) {
+	hub := newFileRoomHub()
+	first, cancelFirst := hub.Subscribe("file_room")
+	defer cancelFirst()
+	if event := nextRoomEvent(t, first, "presence"); event.Online != 1 {
+		t.Fatalf("expected one online subscriber, got %d", event.Online)
+	}
+	second, cancelSecond := hub.Subscribe("file_room")
+	if event := nextRoomEvent(t, first, "presence"); event.Online != 2 {
+		t.Fatalf("expected two online subscribers, got %d", event.Online)
+	}
+	if event := nextRoomEvent(t, second, "presence"); event.Online != 2 {
+		t.Fatalf("expected second subscriber presence, got %d", event.Online)
+	}
+
+	hub.PublishRevision(hostedFile{ID: "file_room", Revision: 4, UpdatedAt: time.Now().UTC()}, "client-a")
+	for index, events := range []<-chan fileRoomEvent{first, second} {
+		event := nextRoomEvent(t, events, "revision")
+		if event.Revision != 4 || event.ClientID != "client-a" {
+			t.Fatalf("subscriber %d received unexpected revision: %#v", index, event)
+		}
+	}
+
+	cancelSecond()
+	if event := nextRoomEvent(t, first, "presence"); event.Online != 1 {
+		t.Fatalf("expected leave presence update, got %d", event.Online)
+	}
+}
+
+func nextRoomEvent(t *testing.T, events <-chan fileRoomEvent, eventType string) fileRoomEvent {
+	t.Helper()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case event := <-events:
+			if event.Type == eventType {
+				return event
+			}
+		case <-timer.C:
+			t.Fatalf("timed out waiting for %s event", eventType)
+		}
 	}
 }

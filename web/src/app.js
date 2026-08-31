@@ -83,6 +83,7 @@ import {
   loadHostedFile,
   requestedHostedFileId,
   saveHostedFile,
+  subscribeHostedFile,
 } from "./hosted.js";
 import { loadWorkspace, saveWorkspace } from "./persistence.js";
 import {
@@ -140,9 +141,15 @@ const elements = {
 const renderer = new CanvasRenderer(elements.canvas);
 renderer.onInvalidate = () => requestRender();
 const hostedFileId = requestedHostedFileId();
+const hostedClientId = globalThis.crypto?.randomUUID?.() ?? `client_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 let hostedRevision = null;
 let hostedLoadError = null;
 let hostedConflict = false;
+let hostedOnlineCount = 0;
+let hostedStreamStatus = "connecting";
+let hostedSyncedSaveVersion = 0;
+let hostedRemoteLoad = null;
+let stopHostedSubscription = null;
 let restoredWorkspace = null;
 if (hostedFileId) {
   try {
@@ -190,7 +197,8 @@ function initialize() {
   bindMenus();
   bindKeyboard();
   if (hostedRevision) {
-    elements.saveState.textContent = `Hosted · revision ${hostedRevision}`;
+    renderHostedState();
+    startHostedRoom();
   } else if (hostedLoadError) {
     elements.saveState.textContent = "Hosted file unavailable";
     showToast("The hosted file could not be opened. Showing the local workspace instead.");
@@ -3497,8 +3505,8 @@ function scheduleSave() {
     }
     if (hostedFileId && hostedRevision && !hostedConflict) {
       try {
-        await queueHostedSave(cloneDocument(designDocument));
-        if (version === saveVersion) elements.saveState.textContent = `Hosted · revision ${hostedRevision}`;
+        await queueHostedSave(cloneDocument(designDocument), version);
+        if (version === saveVersion) renderHostedState();
         return;
       } catch (error) {
         if (error instanceof HostedFileError && error.code === "revision_conflict") {
@@ -3520,18 +3528,98 @@ function scheduleSave() {
   }, 280);
 }
 
-function queueHostedSave(document) {
+function queueHostedSave(document, version) {
   hostedSaveQueue = hostedSaveQueue
     .catch(() => undefined)
     .then(async () => {
       if (hostedConflict || !hostedRevision) {
         throw new HostedFileError("Hosted saving is unavailable.", "hosted_unavailable", 0);
       }
-      const file = await saveHostedFile(hostedFileId, hostedRevision, document);
+      const file = await saveHostedFile(
+        hostedFileId,
+        hostedRevision,
+        document,
+        globalThis.fetch,
+        hostedClientId,
+      );
       hostedRevision = file.revision;
+      hostedSyncedSaveVersion = Math.max(hostedSyncedSaveVersion, version);
       return file;
     });
   return hostedSaveQueue;
+}
+
+function startHostedRoom() {
+  stopHostedSubscription?.();
+  stopHostedSubscription = subscribeHostedFile(hostedFileId, {
+    onRevision: handleHostedRevision,
+    onPresence: (event) => {
+      hostedOnlineCount = Math.max(0, Number(event.online) || 0);
+      if (elements.saveState.textContent !== "Saving…") renderHostedState();
+    },
+    onStatus: (status) => {
+      hostedStreamStatus = status;
+      if (elements.saveState.textContent !== "Saving…") renderHostedState();
+    },
+  });
+  window.addEventListener("beforeunload", () => stopHostedSubscription?.(), { once: true });
+}
+
+function renderHostedState() {
+  if (!hostedRevision) return;
+  if (hostedConflict) {
+    elements.saveState.textContent = "Remote changes · reload required";
+    return;
+  }
+  const presence = hostedOnlineCount ? ` · ${hostedOnlineCount} online` : "";
+  const connection = hostedStreamStatus === "reconnecting" ? " · reconnecting" : "";
+  elements.saveState.textContent = `Hosted · revision ${hostedRevision}${presence}${connection}`;
+}
+
+function handleHostedRevision(event) {
+  const revision = Number(event.revision);
+  if (!Number.isInteger(revision) || revision <= hostedRevision || event.clientId === hostedClientId) return;
+  const localIsClean = saveVersion === hostedSyncedSaveVersion && !interaction && !editingTextId;
+  if (!localIsClean) {
+    hostedConflict = true;
+    renderHostedState();
+    showToast("Another editor published changes while you had local edits. Your local copy is preserved; reload to reconcile.");
+    return;
+  }
+  if (!hostedRemoteLoad) {
+    hostedRemoteLoad = applyHostedRevision(revision).finally(() => {
+      hostedRemoteLoad = null;
+    });
+  }
+}
+
+async function applyHostedRevision(expectedRevision) {
+  try {
+    const file = await loadHostedFile(hostedFileId);
+    if (file.revision < expectedRevision || file.revision <= hostedRevision) return;
+    const nextDocument = normalizeDocument(file.document);
+    designDocument = nextDocument;
+    syncDocumentComponents(designDocument);
+    resolveAllPageLayouts(designDocument);
+    activePageId = designDocument.pages[0].id;
+    pageViews = {};
+    camera = { x: 0, y: 0, zoom: 1 };
+    history = new DocumentHistory(designDocument);
+    selectedIds = [];
+    vectorEdit = null;
+    penDraft = null;
+    hostedRevision = file.revision;
+    hostedSyncedSaveVersion = saveVersion;
+    elements.documentTitle.value = designDocument.name;
+    await saveWorkspace({ document: designDocument, activePageId, pageViews, camera });
+    refreshUI();
+    fitToContent();
+    renderHostedState();
+    showToast(`Updated to hosted revision ${hostedRevision}.`);
+  } catch {
+    hostedStreamStatus = "reconnecting";
+    renderHostedState();
+  }
 }
 
 async function restoreWorkspace() {

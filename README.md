@@ -50,7 +50,7 @@ GOCACHE=$PWD/.cache/go-build go run .
 - Recursive layer ordering, grouping/ungrouping, duplication, copy/paste, nudging, and deletion
 - Undo and redo with a bounded document history
 - Local-first autosave through IndexedDB, with automatic localStorage migration and fallback
-- Durable hosted snapshots with revision-checked autosave, local fallback, and conflict detection
+- Durable hosted snapshots with revision-checked autosave, live room updates, online counts, local fallback, and conflict detection
 - JSON import/export, SVG export, and high-resolution PNG export
 - Prototype preview surface
 - Responsive editor shell
@@ -135,9 +135,9 @@ The unit suite covers document migration and sanitization, component source/inst
 
 The development server exposes `POST /v1/files`, `GET /v1/files`, `GET /v1/files/{id}`, and revision-checked `PATCH /v1/files/{id}`. Snapshots are written atomically under `data/` by default; choose another directory with `-data-dir`.
 
-After creating a file through the API, open `/?file=file_…`. The editor loads that snapshot and sends later document changes with its current revision in `If-Match`. A stale save receives `409 Conflict`; the editor stops remote publishing, preserves the work locally, and asks for a reload. Network failures also retain a local browser copy.
+After creating a file through the API, open `/?file=file_…`. The editor loads that snapshot and sends later document changes with its current revision in `If-Match`. A live server-sent event room reports online sessions and published revisions. Clean editors automatically load a remote revision; editors with unsaved local work stop remote publishing and preserve that work for explicit reconciliation. A stale save also receives `409 Conflict`, and network failures retain a local browser copy.
 
-This API is currently a development collaboration foundation. It has document validation, payload limits, safe IDs, atomic snapshots, and optimistic concurrency, but no accounts or authorization yet. Do not expose it to untrusted networks.
+This API is currently a development collaboration foundation. It has document validation, payload limits, safe IDs, atomic snapshots, optimistic concurrency, room presence counts, and live revision notifications, but no accounts or authorization yet. It synchronizes complete revisions rather than granular concurrent operations. Do not expose it to untrusted networks.
 
 ## Project structure
 

@@ -25,19 +25,40 @@ export async function loadHostedFile(id, fetchImplementation = globalThis.fetch)
   return body;
 }
 
-export async function saveHostedFile(id, revision, document, fetchImplementation = globalThis.fetch) {
+export async function saveHostedFile(
+  id,
+  revision,
+  document,
+  fetchImplementation = globalThis.fetch,
+  clientId = "",
+) {
   const response = await fetchImplementation(`/v1/files/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
       "If-Match": `"${revision}"`,
+      ...(clientId ? { "X-Tsyaiko-Client": clientId } : {}),
     },
     body: JSON.stringify({ document }),
   });
   const body = await readJSON(response);
   if (!response.ok) throw responseError(response, body, "Could not save the hosted file.");
   return body;
+}
+
+export function subscribeHostedFile(
+  id,
+  handlers,
+  EventSourceImplementation = globalThis.EventSource,
+) {
+  if (typeof EventSourceImplementation !== "function") return () => {};
+  const source = new EventSourceImplementation(`/v1/files/${encodeURIComponent(id)}/events`);
+  source.addEventListener("revision", (event) => dispatchRoomEvent(event, handlers.onRevision));
+  source.addEventListener("presence", (event) => dispatchRoomEvent(event, handlers.onPresence));
+  source.addEventListener("open", () => handlers.onStatus?.("connected"));
+  source.addEventListener("error", () => handlers.onStatus?.("reconnecting"));
+  return () => source.close();
 }
 
 async function readJSON(response) {
@@ -55,4 +76,13 @@ function responseError(response, body, fallback) {
     response.status,
     body?.currentRevision ?? null,
   );
+}
+
+function dispatchRoomEvent(event, handler) {
+  if (!handler) return;
+  try {
+    handler(JSON.parse(event.data));
+  } catch {
+    // Ignore malformed room events and keep the stream alive.
+  }
 }
