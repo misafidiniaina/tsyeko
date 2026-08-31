@@ -8,6 +8,7 @@ import {
   createAlignmentGuide,
   createSpacingGuides,
   DISTRIBUTION_AXES,
+  findSmartSpacingSnaps,
 } from "./alignment.js";
 
 function item(id, x, y, width, height) {
@@ -101,4 +102,62 @@ test("feedback guides describe the aligned span and adjacent spacing", () => {
     cross: 20,
     value: 30,
   }]);
+});
+
+test("smart spacing extends an existing rhythm and exposes every repeated gap", () => {
+  const references = [
+    item("a", 0, 10, 20, 20),
+    item("b", 40, 10, 20, 20),
+    item("c", 80, 10, 20, 20),
+  ];
+  const original = structuredClone(references);
+
+  const snaps = findSmartSpacingSnaps(
+    { x: 123, y: 10, width: 20, height: 20 },
+    references,
+    4,
+  );
+
+  assert.equal(snaps.x.delta, -3);
+  assert.equal(snaps.x.gap, 20);
+  assert.deepEqual(snaps.x.guides.map((guide) => [guide.start, guide.end, guide.value]), [
+    [20, 40, 20],
+    [60, 80, 20],
+    [100, 120, 20],
+  ]);
+  assert.equal(snaps.y, null);
+  assert.deepEqual(references, original);
+});
+
+test("smart spacing centers a moving layer between two neighbors", () => {
+  const snaps = findSmartSpacingSnaps(
+    { x: 56, y: 0, width: 20, height: 20 },
+    [item("left", 0, 0, 20, 20), item("right", 100, 0, 20, 20)],
+    6,
+  );
+
+  assert.equal(snaps.x.delta, -6);
+  assert.equal(snaps.x.gap, 30);
+  assert.deepEqual(snaps.x.guides.map((guide) => [guide.start, guide.end, guide.value]), [
+    [20, 50, 30],
+    [70, 100, 30],
+  ]);
+});
+
+test("smart spacing ignores other rows and candidates that overlap a sibling", () => {
+  const references = [
+    item("a", 0, 0, 20, 20),
+    item("b", 40, 0, 20, 20),
+    item("blocker", 80, 0, 20, 20),
+    item("other-row", 120, 100, 20, 20),
+  ];
+
+  const snaps = findSmartSpacingSnaps(
+    { x: 82, y: 0, width: 20, height: 20 },
+    references,
+    4,
+  );
+
+  assert.equal(snaps.x, null);
+  assert.equal(snaps.y, null);
 });

@@ -60,6 +60,7 @@ import {
   createAlignmentGuide,
   createSpacingGuides,
   DISTRIBUTION_AXES,
+  findSmartSpacingSnaps,
 } from "./alignment.js";
 import {
   combineTransformBounds,
@@ -148,6 +149,7 @@ import { baseTextStyle, rebaseTextRuns } from "./text.js";
 const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 16;
 const SNAP_DISTANCE_PX = 6;
+const DRAG_START_DISTANCE_PX = 3;
 const LIVE_MEASUREMENT_DISTANCE_PX = 96;
 
 const elements = {
@@ -234,6 +236,7 @@ let transformFeedbackGuides = [];
 let transformFeedbackPageId = null;
 let transformFeedbackTimer = null;
 let multiTransformAspectLocked = false;
+let lastDuplicateTransform = null;
 let spacePressed = false;
 let altPressed = false;
 let saveTimer = null;
@@ -1107,7 +1110,7 @@ function bindMenus() {
       );
     }
     if (action === "shortcuts") {
-      showToast("V select · P pen · Enter edit · Shift+R rulers · ⌘G group · ⌘⌥K component · ⌘⌥U/S/I/X Boolean · ⌘⌥M mask · ⌘D duplicate");
+      showToast("V select · P pen · Enter edit · ⇧R rulers · ⌘G group · ⌘⌥K component · ⌘⌥U/S/I/X Boolean · ⌘⌥M mask · ⌥⇧ drag duplicate · ⌘D repeat");
     }
   });
 
@@ -1153,7 +1156,7 @@ function bindKeyboard() {
     const command = event.metaKey || event.ctrlKey;
     const key = event.key.toLowerCase();
 
-    if (!command && !event.altKey && event.shiftKey && event.code === "KeyR") {
+    if (!command && !event.altKey && event.shiftKey && key === "r") {
       event.preventDefault();
       togglePageRulers();
       return;
@@ -1170,12 +1173,17 @@ function bindKeyboard() {
       duplicateSelection();
       return;
     }
-    if (command && event.altKey && event.code === "KeyK") {
+    if (command && event.altKey && matchesModifiedShortcut(event, key, "k")) {
       event.preventDefault();
       createComponentFromSelection();
       return;
     }
     const booleanShortcut = {
+      u: BOOLEAN_OPERATIONS.UNION,
+      s: BOOLEAN_OPERATIONS.SUBTRACT,
+      i: BOOLEAN_OPERATIONS.INTERSECT,
+      x: BOOLEAN_OPERATIONS.EXCLUDE,
+    }[key] ?? {
       KeyU: BOOLEAN_OPERATIONS.UNION,
       KeyS: BOOLEAN_OPERATIONS.SUBTRACT,
       KeyI: BOOLEAN_OPERATIONS.INTERSECT,
@@ -1186,7 +1194,7 @@ function bindKeyboard() {
       booleanSelection(booleanShortcut);
       return;
     }
-    if (command && event.altKey && event.code === "KeyM") {
+    if (command && event.altKey && matchesModifiedShortcut(event, key, "m")) {
       event.preventDefault();
       maskSelection();
       return;
@@ -1197,7 +1205,7 @@ function bindKeyboard() {
       else groupSelection();
       return;
     }
-    if (!command && !event.altKey && event.shiftKey && event.code === "KeyA") {
+    if (!command && !event.altKey && event.shiftKey && key === "a") {
       event.preventDefault();
       autoLayoutSelection();
       return;
@@ -1256,6 +1264,11 @@ function bindKeyboard() {
     }
 
     if (event.key === "Escape") {
+      if (interaction) {
+        event.preventDefault();
+        cancelActiveInteraction();
+        return;
+      }
       closePopovers();
       if (!elements.previewModal.hidden) closePreview();
       else if (penDraft) cancelPenPath();
@@ -1319,12 +1332,7 @@ function bindKeyboard() {
     spacePressed = false;
     altPressed = false;
     clearDistanceMeasurements();
-    if (interaction?.type === "pan") interaction = null;
-    if (interaction?.type === "guide") {
-      cancelGuideInteraction();
-      interaction = null;
-      refreshUI();
-    }
+    if (interaction) cancelActiveInteraction();
     updateCanvasCursor();
   });
 }
@@ -1515,7 +1523,14 @@ function onPointerDown(event) {
 
   const hit = renderer.hitTest(currentPage(), screen, camera);
   if (hit) {
-    if (event.shiftKey) {
+    const duplicateGesture = event.altKey && event.shiftKey;
+    const selectedBranchIds = duplicateGesture
+      ? new Set(getNodesWithDescendants(currentPage(), getTopLevelNodeIds(currentPage(), selectedIds)).map((node) => node.id))
+      : null;
+    const hitWasSelected = selectedIds.includes(hit.id) || selectedBranchIds?.has(hit.id);
+    if (duplicateGesture) {
+      if (!hitWasSelected) selectedIds = [hit.id];
+    } else if (event.shiftKey) {
       selectedIds = selectedIds.includes(hit.id)
         ? selectedIds.filter((id) => id !== hit.id)
         : [...selectedIds, hit.id];
@@ -1523,7 +1538,13 @@ function onPointerDown(event) {
       selectedIds = [hit.id];
     }
 
-    if (!isNodeEffectivelyLocked(currentPage(), hit) && selectedIds.includes(hit.id)) {
+    const hitCanStartMove = selectedIds.includes(hit.id) || (duplicateGesture && hitWasSelected);
+    if (!isNodeEffectivelyLocked(currentPage(), hit) && hitCanStartMove) {
+      if (duplicateGesture && selectionContainsInternalInstanceLayer()) {
+        showToast("Select the instance root to duplicate it, or detach it first.");
+        refreshUI();
+        return;
+      }
       const rootIds = getTopLevelNodeIds(currentPage(), selectedIds)
         .filter((id) => !isNodeEffectivelyLocked(currentPage(), id))
         .filter((id) => canMoveComponentNode(getNode(currentPage(), id)));
@@ -1536,6 +1557,10 @@ function onPointerDown(event) {
           nodes: movableNodes.map((node) => ({ id: node.id, x: node.x, y: node.y })),
           rootIds,
           axis: null,
+          duplicateGesture,
+          duplicateActive: false,
+          sourceSelection: [...selectedIds],
+          sourceRootIds: [...rootIds],
         };
         capturePointer(event);
         updateCanvasCursor("move");
@@ -1604,7 +1629,7 @@ function onPointerMove(event) {
   if (interaction.type === "vector-handle") updateVectorHandle(world, event);
   if (interaction.type === "pen-anchor") updatePenAnchorHandles(world, event);
   if (interaction.type === "marquee") updateMarquee(screen);
-  updateInteractionDistanceMeasurements(screen, event.altKey);
+  updateInteractionDistanceMeasurements(screen, event.altKey && !interaction.duplicateGesture);
   requestRender();
 }
 
@@ -1634,15 +1659,24 @@ function onPointerUp(event) {
     commitDocument();
     setTool("select");
   } else if (["move", "resize", "rotate", "multi-resize", "multi-rotate"].includes(completedType)) {
-    if (completedType === "move") reparentMovedRoots(interaction.rootIds);
-    syncGroupBounds(currentPage());
-    const labels = {
-      resize: "Resize layer",
-      rotate: "Rotate layer",
-      "multi-resize": "Resize selection",
-      "multi-rotate": "Rotate selection",
-    };
-    commitDocument(labels[completedType]);
+    const inactiveDuplicate = completedType === "move" &&
+      interaction.duplicateGesture && !interaction.duplicateActive;
+    if (!inactiveDuplicate) {
+      if (completedType === "move") reparentMovedRoots(interaction.rootIds);
+      syncGroupBounds(currentPage());
+      if (interaction.duplicateActive) {
+        synchronizeDocumentGeometry();
+        rememberDuplicateTransform(interaction);
+      }
+      const labels = {
+        move: "Move selection",
+        resize: "Resize layer",
+        rotate: "Rotate layer",
+        "multi-resize": "Resize selection",
+        "multi-rotate": "Rotate selection",
+      };
+      commitDocument(interaction.duplicateActive ? "Duplicate selection" : labels[completedType]);
+    }
   } else if (["vector-point", "vector-handle"].includes(completedType)) {
     const node = getNode(currentPage(), interaction.nodeId);
     if (node?.type === NODE_TYPES.VECTOR) normalizeVectorBounds(node);
@@ -1664,48 +1698,45 @@ function onPointerUp(event) {
 
 function onPointerCancel(event) {
   if (!interaction || interaction.pointerId !== event.pointerId) return;
-  if (interaction.type === "guide") {
-    clearDistanceMeasurements(false);
+  cancelActiveInteraction(event.pointerId);
+}
+
+function cancelActiveInteraction(pointerId = interaction?.pointerId) {
+  if (!interaction || (pointerId !== undefined && interaction.pointerId !== pointerId)) return false;
+  const state = interaction;
+  if (state.type === "guide") {
     cancelGuideInteraction();
-    releasePointer(event);
-    interaction = null;
-    updateCanvasCursor();
-    refreshUI();
-    return;
-  }
-  if (interaction.type === "draw") {
-    currentPage().nodes = currentPage().nodes.filter((node) => node.id !== interaction.nodeId);
+  } else if (state.type === "draw") {
+    currentPage().nodes = currentPage().nodes.filter((node) => node.id !== state.nodeId);
     selectedIds = [];
-  }
-  if (interaction.type === "move") {
-    for (const original of interaction.nodes) {
+  } else if (state.type === "move" && state.duplicateActive) {
+    deleteNodes(currentPage(), state.rootIds);
+    selectedIds = [...state.sourceSelection];
+  } else if (state.type === "move") {
+    for (const original of state.nodes) {
       const node = getNode(currentPage(), original.id);
       if (node) Object.assign(node, { x: original.x, y: original.y });
     }
-  }
-  if (["resize", "multi-resize"].includes(interaction.type)) {
-    for (const original of interaction.nodes) {
+    if (state.duplicateGesture) selectedIds = [...state.sourceSelection];
+  } else if (["resize", "multi-resize", "rotate", "multi-rotate"].includes(state.type)) {
+    for (const original of state.nodes) {
       const node = getNode(currentPage(), original.id);
       if (node) Object.assign(node, original);
     }
-  }
-  if (["rotate", "multi-rotate"].includes(interaction.type)) {
-    for (const original of interaction.nodes) {
-      const node = getNode(currentPage(), original.id);
-      if (node) Object.assign(node, original);
-    }
-  }
-  if (["vector-point", "vector-handle"].includes(interaction.type)) {
-    const node = getNode(currentPage(), interaction.nodeId);
-    if (node) Object.assign(node, interaction.original);
+  } else if (["vector-point", "vector-handle"].includes(state.type)) {
+    const node = getNode(currentPage(), state.nodeId);
+    if (node) Object.assign(node, state.original);
+  } else if (state.type === "marquee") {
+    selectedIds = [...state.previousSelection];
   }
   syncGroupBounds(currentPage());
-  releasePointer(event);
+  releasePointerId(state.pointerId);
   interaction = null;
   guides = [];
   clearDistanceMeasurements(false);
   updateCanvasCursor();
   refreshUI();
+  return true;
 }
 
 function onDoubleClick(event) {
@@ -1990,8 +2021,15 @@ function updateDrawing(world, event) {
 function updateMove(world, event) {
   let deltaX = world.x - interaction.startWorld.x;
   let deltaY = world.y - interaction.startWorld.y;
+  if (interaction.duplicateGesture && !interaction.duplicateActive) {
+    if (Math.hypot(deltaX, deltaY) <= DRAG_START_DISTANCE_PX / camera.zoom) {
+      guides = [];
+      return;
+    }
+    if (!activateMoveDuplication()) return;
+  }
   if (event.shiftKey) {
-    if (!interaction.axis && Math.hypot(deltaX, deltaY) > 3 / camera.zoom) {
+    if (!interaction.axis && Math.hypot(deltaX, deltaY) > DRAG_START_DISTANCE_PX / camera.zoom) {
       interaction.axis = Math.abs(deltaX) > Math.abs(deltaY) ? "x" : "y";
     }
     if (interaction.axis === "x") deltaY = 0;
@@ -2007,8 +2045,24 @@ function updateMove(world, event) {
     node.y = original.y + deltaY;
   }
 
-  guides = event.altKey ? [] : snapSelection(interaction.nodes.map((item) => item.id));
+  guides = event.altKey && !interaction.duplicateActive
+    ? []
+    : snapSelection(interaction.nodes.map((item) => item.id), interaction.rootIds);
   syncGroupBounds(currentPage());
+}
+
+function activateMoveDuplication() {
+  const copies = duplicateNodes(currentPage(), interaction.sourceRootIds, { x: 0, y: 0 });
+  if (!copies.length) return false;
+  const copyIds = new Set(copies.map((node) => node.id));
+  const rootIds = copies
+    .filter((node) => !copyIds.has(node.parentId))
+    .map((node) => node.id);
+  interaction.nodes = copies.map((node) => ({ id: node.id, x: node.x, y: node.y }));
+  interaction.rootIds = rootIds;
+  interaction.duplicateActive = true;
+  selectedIds = [...rootIds];
+  return true;
 }
 
 function guideAxisFromRuler(screen) {
@@ -2583,14 +2637,15 @@ function updateMarquee(screen) {
     : matching;
 }
 
-function snapSelection(ids) {
+function snapSelection(ids, rootIds = ids) {
   const page = currentPage();
   const idSet = new Set(ids);
   const selected = page.nodes.filter((node) => idSet.has(node.id));
+  const roots = rootIds.map((id) => getNode(page, id)).filter(Boolean);
   const references = page.nodes.filter((node) => isNodeEffectivelyVisible(page, node) && !idSet.has(node.id));
   if (!selected.length) return [];
 
-  const selectionBounds = combinedBounds(selected.map(getNodeAABB));
+  const selectionBounds = combinedBounds((roots.length ? roots : selected).map(getNodeAABB));
   const xTargets = edgeValues(selectionBounds, "x");
   const yTargets = edgeValues(selectionBounds, "y");
   const referenceX = references.flatMap((node) => edgeValues(getNodeAABB(node), "x"));
@@ -2600,22 +2655,38 @@ function snapSelection(ids) {
     referenceY.push(...page.guides.filter((guide) => guide.axis === GUIDE_AXES.HORIZONTAL).map((guide) => guide.position));
   }
   const threshold = SNAP_DISTANCE_PX / camera.zoom;
-  const xSnap = closestSelectionSnap(
+  const standardX = closestSelectionSnap(
     closestSnap(xTargets, referenceX, threshold),
     page.snapToGrid ? closestGridSnap(xTargets, page.gridSize, threshold) : null,
   );
-  const ySnap = closestSelectionSnap(
+  const standardY = closestSelectionSnap(
     closestSnap(yTargets, referenceY, threshold),
     page.snapToGrid ? closestGridSnap(yTargets, page.gridSize, threshold) : null,
   );
+  const smartSpacing = findSmartSpacingSnaps(
+    selectionBounds,
+    smartSpacingReferenceItems(page, roots, idSet),
+    threshold,
+  );
+  const xSnap = closestSelectionSnap(smartSpacing.x, standardX);
+  const ySnap = closestSelectionSnap(smartSpacing.y, standardY);
 
   if (xSnap) selected.forEach((node) => { node.x += xSnap.delta; });
   if (ySnap) selected.forEach((node) => { node.y += ySnap.delta; });
 
   return [
-    ...(xSnap ? [{ axis: "x", value: xSnap.value }] : []),
-    ...(ySnap ? [{ axis: "y", value: ySnap.value }] : []),
+    ...(xSnap?.guides ?? (xSnap ? [{ axis: "x", value: xSnap.value }] : [])),
+    ...(ySnap?.guides ?? (ySnap ? [{ axis: "y", value: ySnap.value }] : [])),
   ];
+}
+
+function smartSpacingReferenceItems(page, roots, excludedIds) {
+  if (!roots.length) return [];
+  const parentIds = new Set(roots.map((node) => node.parentId ?? null));
+  if (parentIds.size !== 1) return [];
+  return getChildNodes(page, [...parentIds][0])
+    .filter((node) => !excludedIds.has(node.id) && isNodeEffectivelyVisible(page, node))
+    .map((node) => ({ id: node.id, bounds: getNodeAABB(node) }));
 }
 
 function updateDetailedDistanceMeasurements(screen, enabled = altPressed) {
@@ -2878,10 +2949,26 @@ function duplicateSelection() {
     showToast("Select the instance root to duplicate it, or detach it first.");
     return;
   }
-  const copies = duplicateNodes(currentPage(), selectedIds, 20 / camera.zoom);
+  const transform = lastDuplicateTransform?.pageId === activePageId
+    ? { x: lastDuplicateTransform.x, y: lastDuplicateTransform.y }
+    : { x: 20 / camera.zoom, y: 20 / camera.zoom };
+  const copies = duplicateNodes(currentPage(), selectedIds, transform);
   const copyIds = new Set(copies.map((node) => node.id));
   selectedIds = copies.filter((node) => !copyIds.has(node.parentId)).map((node) => node.id);
-  commitDocument();
+  lastDuplicateTransform = { pageId: activePageId, ...transform };
+  commitDocument("Duplicate selection");
+}
+
+function rememberDuplicateTransform(moveInteraction) {
+  const rootId = moveInteraction.rootIds[0];
+  const original = moveInteraction.nodes.find((node) => node.id === rootId) ?? moveInteraction.nodes[0];
+  const current = original ? getNode(currentPage(), original.id) : null;
+  if (!original || !current) return;
+  lastDuplicateTransform = {
+    pageId: activePageId,
+    x: current.x - original.x,
+    y: current.y - original.y,
+  };
 }
 
 function copySelection() {
@@ -3276,6 +3363,7 @@ function reparentMovedRoots(rootIds = []) {
     const node = getNode(page, id);
     const currentParent = node?.parentId ? getNode(page, node.parentId) : null;
     if (!node || [NODE_TYPES.GROUP, NODE_TYPES.BOOLEAN, NODE_TYPES.MASK].includes(currentParent?.type)) continue;
+    if (isAutoLayoutChild(page, node)) continue;
     const frame = findContainingFrame(page, node, rootIds);
     node.parentId = isComponentSource(frame) || isComponentInstanceMember(frame) ? null : frame?.id ?? null;
   }
@@ -4725,6 +4813,8 @@ function requestRender() {
       "vector-handle",
     ].includes(interaction?.type);
     elements.canvas.dataset.measurementCount = String(measurementGuides.length);
+    elements.canvas.dataset.smartSpacingCount = String(guides.filter((guide) => guide.type === "spacing").length);
+    elements.canvas.dataset.duplicateDrag = String(interaction?.type === "move" && interaction.duplicateActive);
     renderer.render(page, selectedIds, camera, {
       grid: page.gridVisible,
       gridSize: page.gridSize,
@@ -5227,8 +5317,12 @@ function capturePointer(event) {
 }
 
 function releasePointer(event) {
-  if (elements.canvas.hasPointerCapture(event.pointerId)) {
-    elements.canvas.releasePointerCapture(event.pointerId);
+  releasePointerId(event.pointerId);
+}
+
+function releasePointerId(pointerId) {
+  if (pointerId !== undefined && elements.canvas.hasPointerCapture(pointerId)) {
+    elements.canvas.releasePointerCapture(pointerId);
   }
 }
 
@@ -5304,6 +5398,10 @@ function clamp(value, minimum, maximum) {
 
 function isTypingTarget(target) {
   return target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement || target?.isContentEditable;
+}
+
+function matchesModifiedShortcut(event, normalizedKey, expectedKey) {
+  return normalizedKey === expectedKey || event.code === `Key${expectedKey.toUpperCase()}`;
 }
 
 function isValidCamera(value) {

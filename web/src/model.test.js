@@ -164,6 +164,17 @@ test("duplicates nodes with new ids and offsets", () => {
   assert.equal(page.nodes.length, 2);
 });
 
+test("duplicates nodes with a reusable two-dimensional transform", () => {
+  const document = createEmptyDocument();
+  const page = getFirstPage(document);
+  const original = createNode(NODE_TYPES.RECTANGLE, 20, 30);
+  page.nodes.push(original);
+  const [copy] = duplicateNodes(page, [original.id], { x: 48, y: -12 });
+
+  assert.equal(copy.x, 68);
+  assert.equal(copy.y, 18);
+});
+
 test("duplicates a page with globally unique node ids", () => {
   const document = createEmptyDocument();
   const page = getFirstPage(document);

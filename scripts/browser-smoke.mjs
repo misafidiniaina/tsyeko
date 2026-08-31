@@ -829,14 +829,102 @@ try {
     `document.querySelector('[data-multi-action="auto-layout"][data-mode="vertical"]')`,
     "Auto Layout multi-selection controls",
   );
-  await evaluate(`document.querySelector('[data-multi-action="auto-layout"][data-mode="vertical"]').click(); true`);
+  await evaluate(`
+    window.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "A",
+      code: "KeyQ",
+      shiftKey: true,
+      bubbles: true
+    }));
+    true
+  `);
+  await waitFor(
+    `document.querySelectorAll(".layer-row").length === 8 &&
+     document.querySelector(".selection-summary input")?.value === "Auto layout"`,
+    "keyboard-layout-independent Shift+A Auto Layout wrapping",
+  );
+  await evaluate(`document.querySelector('[data-inspector-action="layout-mode"][data-value="vertical"]').click(); true`);
   await waitFor(
     `document.querySelectorAll(".layer-row").length === 8 &&
      document.querySelector(".selection-summary input")?.value === "Auto layout" &&
      document.querySelector('[data-inspector-action="layout-mode"][data-value="vertical"]')?.classList.contains("active") &&
      [...document.querySelectorAll(".layer-composite-role")].some((item) => item.textContent === "AUTO V")`,
-    "vertical Auto Layout wrapping",
+    "vertical Auto Layout mode",
   );
+
+  const autoLayoutDragFixture = await evaluate(`
+    (() => {
+      const select = (name) => [...document.querySelectorAll(".layer-row")]
+        .find((row) => row.querySelector(".layer-name")?.textContent === name)
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      const geometry = () => ({
+        x: Number(document.querySelector('[data-property="x"]')?.value),
+        y: Number(document.querySelector('[data-property="y"]')?.value),
+        width: Number(document.querySelector('[data-property="width"]')?.value),
+        height: Number(document.querySelector('[data-property="height"]')?.value)
+      });
+      select("Vector path");
+      const child = geometry();
+      select("Auto layout");
+      const frame = geometry();
+      select("Vector path");
+      document.querySelector("#zoomValue").click();
+      return { child, frame, rows: document.querySelectorAll(".layer-row").length };
+    })()
+  `);
+  await delay(100);
+  const autoLayoutDragZoom = await evaluate(`Number.parseInt(document.querySelector("#zoomValue").textContent, 10) / 100`);
+  const beforeFrame = autoLayoutDragFixture.frame.y - autoLayoutDragFixture.child.height - 20;
+  const afterFrame = autoLayoutDragFixture.frame.y + autoLayoutDragFixture.frame.height + 20;
+  const autoLayoutDragDelta = Math.abs(beforeFrame - autoLayoutDragFixture.child.y) <
+      Math.abs(afterFrame - autoLayoutDragFixture.child.y)
+    ? beforeFrame - autoLayoutDragFixture.child.y
+    : afterFrame - autoLayoutDragFixture.child.y;
+  const autoLayoutDragStart = {
+    x: canvas.left + canvas.width / 2,
+    y: canvas.top + canvas.height / 2,
+  };
+  await dragPointer(command, autoLayoutDragStart, {
+    x: autoLayoutDragStart.x,
+    y: autoLayoutDragStart.y + autoLayoutDragDelta * autoLayoutDragZoom,
+  }, 9);
+  if (process.env.TSYAIKO_DEBUG_SMOKE) {
+    const autoLayoutDragState = await evaluate(`({
+      selection: document.querySelector(".selection-summary input")?.value,
+      positioning: document.querySelector('[data-inspector-action="layout-positioning"].active')?.dataset.value,
+      duplicateDrag: document.querySelector("#designCanvas")?.dataset.duplicateDrag,
+      rows: [...document.querySelectorAll(".layer-row")].map((row) => ({
+        name: row.querySelector(".layer-name")?.textContent,
+        style: row.getAttribute("style"),
+        selected: row.classList.contains("selected")
+      }))
+    })`);
+    process.stdout.write(`Auto Layout drag debug: ${JSON.stringify({ autoLayoutDragFixture, autoLayoutDragZoom, autoLayoutDragDelta, autoLayoutDragState })}\n`);
+  }
+  await waitFor(
+    `(() => {
+       const rows = [...document.querySelectorAll(".layer-row")];
+       const frame = rows.find((row) => row.querySelector(".layer-name")?.textContent === "Auto layout");
+       const copy = rows.find((row) => row.querySelector(".layer-name")?.textContent === "Vector path copy");
+       return frame && copy &&
+         Number(copy.style.getPropertyValue("--layer-depth")) ===
+           Number(frame.style.getPropertyValue("--layer-depth")) + 1;
+     })() &&
+     document.querySelector('[data-inspector-action="layout-positioning"][data-value="auto"]')?.classList.contains("active")`,
+    "Auto Layout child drag duplication remains in flow",
+  );
+  await evaluate(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true, bubbles: true })); true`);
+  await waitFor(
+    `document.querySelectorAll(".layer-row").length === ${autoLayoutDragFixture.rows} &&
+     ![...document.querySelectorAll(".layer-name")].some((item) => item.textContent === "Vector path copy")`,
+    "Auto Layout drag duplication undo",
+  );
+  await evaluate(`
+    [...document.querySelectorAll(".layer-row")]
+      .find((row) => row.querySelector(".layer-name")?.textContent === "Auto layout")
+      .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    true
+  `);
 
   await evaluate(`
     document.querySelector('[data-inspector-action="layout-sizing-horizontal"][data-value="fixed"]').click();
@@ -1720,6 +1808,213 @@ try {
     const screenshot = await command("Page.captureScreenshot", { format: "png" });
     writeFileSync(process.env.TSYAIKO_SCREENSHOT, Buffer.from(screenshot.data, "base64"));
   }
+
+  await evaluate(`
+    document.querySelectorAll(".layer-row")[0]
+      .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document.querySelector("#zoomValue").click();
+    true
+  `);
+  await delay(100);
+  const duplicateSource = await evaluate(`({
+    x: Number(document.querySelector('[data-property="x"]')?.value),
+    y: Number(document.querySelector('[data-property="y"]')?.value)
+  })`);
+  const duplicateStart = {
+    x: canvas.left + canvas.width / 2,
+    y: canvas.top + canvas.height / 2,
+  };
+  await dragPointer(command, duplicateStart, {
+    x: duplicateStart.x + 120,
+    y: duplicateStart.y + 8,
+  }, 9);
+  await waitFor(
+    `document.querySelectorAll(".layer-row").length === 4 &&
+     document.querySelector(".layer-row.selected .layer-name")?.textContent.endsWith("copy")`,
+    "Alt/Option+Shift drag duplication",
+  );
+  const firstDragCopy = await evaluate(`({
+    x: Number(document.querySelector('[data-property="x"]')?.value),
+    y: Number(document.querySelector('[data-property="y"]')?.value)
+  })`);
+  await evaluate(`
+    window.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "d", code: "KeyD", ctrlKey: true, bubbles: true
+    }));
+    true
+  `);
+  await waitFor(`document.querySelectorAll(".layer-row").length === 5`, "repeat duplicate transform");
+  const repeatedDragCopy = await evaluate(`({
+    x: Number(document.querySelector('[data-property="x"]')?.value),
+    y: Number(document.querySelector('[data-property="y"]')?.value)
+  })`);
+  const firstDuplicateOffset = {
+    x: firstDragCopy.x - duplicateSource.x,
+    y: firstDragCopy.y - duplicateSource.y,
+  };
+  const repeatedDuplicateOffset = {
+    x: repeatedDragCopy.x - firstDragCopy.x,
+    y: repeatedDragCopy.y - firstDragCopy.y,
+  };
+  if (Math.abs(firstDuplicateOffset.x - repeatedDuplicateOffset.x) > 0.2 ||
+      Math.abs(firstDuplicateOffset.y - repeatedDuplicateOffset.y) > 0.2) {
+    throw new Error(`Repeated duplicate transform validation failed: ${JSON.stringify({
+      duplicateSource,
+      firstDragCopy,
+      repeatedDragCopy,
+    })}`);
+  }
+  await evaluate(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true, bubbles: true })); true`);
+  await waitFor(`document.querySelectorAll(".layer-row").length === 4`, "repeat duplicate undo");
+  await evaluate(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true, bubbles: true })); true`);
+  await waitFor(`document.querySelectorAll(".layer-row").length === 3`, "drag duplicate atomic undo");
+
+  await evaluate(`
+    (() => {
+      const ids = [...document.querySelectorAll(".layer-row")].map((row) => row.dataset.layerId);
+      document.querySelector('[data-layer-id="' + ids[0] + '"]')
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      document.querySelector("#zoomValue").click();
+      document.querySelector('[data-layer-id="' + ids[1] + '"]')
+        .dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true }));
+      return true;
+    })()
+  `);
+  await delay(100);
+  await dragPointer(command, duplicateStart, {
+    x: duplicateStart.x + 100,
+    y: duplicateStart.y + 6,
+  }, 9);
+  await waitFor(`document.querySelectorAll(".layer-row").length === 5`, "multi-selection drag duplication");
+  await evaluate(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true, bubbles: true })); true`);
+  await waitFor(`document.querySelectorAll(".layer-row").length === 3`, "multi-selection duplicate atomic undo");
+
+  await evaluate(`
+    document.querySelectorAll(".layer-row")[0]
+      .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document.querySelector("#zoomValue").click();
+    true
+  `);
+  await delay(100);
+  await command("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: duplicateStart.x,
+    y: duplicateStart.y,
+    button: "left",
+    buttons: 1,
+    modifiers: 9,
+    clickCount: 1,
+  });
+  await command("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: duplicateStart.x + 90,
+    y: duplicateStart.y + 5,
+    button: "left",
+    buttons: 1,
+    modifiers: 9,
+  });
+  await waitFor(
+    `document.querySelector("#designCanvas")?.dataset.duplicateDrag === "true"`,
+    "temporary drag duplicate",
+  );
+  await evaluate(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true })); true`);
+  await waitFor(
+    `document.querySelector("#designCanvas")?.dataset.duplicateDrag === "false" &&
+     document.querySelectorAll(".layer-row").length === 3`,
+    "drag duplicate cancellation cleanup",
+  );
+  await command("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: duplicateStart.x + 90,
+    y: duplicateStart.y + 5,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+
+  await evaluate(`
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+    document.querySelector('[data-canvas-aid-action="toggle-grid-snap"]')?.click();
+    true
+  `);
+  const spacingLayerIds = await evaluate(`
+    (() => {
+      const ids = [...document.querySelectorAll(".layer-row")].map((row) => row.dataset.layerId);
+      const values = [0, 40, 100];
+      const setProperty = (property, value) => {
+        const input = document.querySelector('[data-property="' + property + '"]');
+        input.value = String(value);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+      ids.forEach((id, index) => {
+        document.querySelector('[data-layer-id="' + id + '"]')
+          .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        setProperty("x", values[index]);
+        setProperty("y", 0);
+        setProperty("width", 20);
+        setProperty("height", 20);
+        setProperty("rotation", 0);
+      });
+      ids.forEach((id, index) => {
+        document.querySelector('[data-layer-id="' + id + '"]')
+          .dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: index > 0 }));
+      });
+      document.querySelector("#zoomValue").click();
+      document.querySelector('[data-layer-id="' + ids[1] + '"]')
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      return ids;
+    })()
+  `);
+  await delay(100);
+  const spacingZoom = await evaluate(`Number.parseInt(document.querySelector("#zoomValue").textContent, 10) / 100`);
+  const spacingStart = {
+    x: canvas.left + canvas.width / 2 - 10 * spacingZoom,
+    y: canvas.top + canvas.height / 2,
+  };
+  const spacingEnd = {
+    x: spacingStart.x + 10 * spacingZoom + 3,
+    y: spacingStart.y,
+  };
+  await command("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: spacingStart.x,
+    y: spacingStart.y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
+  await command("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: spacingEnd.x,
+    y: spacingEnd.y,
+    button: "left",
+    buttons: 1,
+  });
+  await waitFor(
+    `Number(document.querySelector("#designCanvas")?.dataset.smartSpacingCount) >= 2`,
+    "live equal-spacing guides",
+  );
+  await command("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: spacingEnd.x,
+    y: spacingEnd.y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+  const smartSpacingX = await evaluate(`Number(document.querySelector('[data-property="x"]')?.value)`);
+  if (Math.abs(smartSpacingX - 50) > 0.2) {
+    throw new Error(`Smart spacing snap validation failed: ${JSON.stringify({ spacingLayerIds, spacingZoom, smartSpacingX })}`);
+  }
+  result.smartDuplication = {
+    offset: firstDuplicateOffset,
+    repeat: repeatedDuplicateOffset,
+    multiSelection: true,
+    cancellation: true,
+    smartSpacing: smartSpacingX,
+  };
+
   const hostedCreateResponse = await fetch(`http://127.0.0.1:${serverPort}/v1/files`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

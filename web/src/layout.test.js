@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   createEmptyDocument,
   createNode,
+  duplicateNodes,
   getChildNodes,
   HORIZONTAL_CONSTRAINTS,
   LAYOUT_MODES,
@@ -17,6 +18,7 @@ import {
 } from "./model.js";
 import {
   createAutoLayoutFrame,
+  isAutoLayoutChild,
   reorderAutoLayoutChild,
   resizeFrameChildren,
   resolvePageLayout,
@@ -464,6 +466,26 @@ test("drag-order evaluation reorders flow siblings before layout resolves", () =
 
   assert.deepEqual(getChildNodes(page, frame.id).map((node) => node.name), ["Second", "Third", "First"]);
   assert.equal(first.x, 110);
+});
+
+test("a duplicate dragged beyond a hug frame stays managed and reorders in flow", () => {
+  const first = createNode(NODE_TYPES.RECTANGLE, 10, 20, { width: 40, height: 30, name: "First" });
+  const second = createNode(NODE_TYPES.RECTANGLE, 10, 80, { width: 40, height: 30, name: "Second" });
+  const page = pageWith(first, second);
+  const frame = createAutoLayoutFrame(page, [first.id, second.id], LAYOUT_MODES.VERTICAL);
+  const [copy] = duplicateNodes(page, [first.id], { x: 0, y: 0 });
+
+  copy.y = frame.y - copy.height - 40;
+  assert.equal(isAutoLayoutChild(page, copy), true);
+  assert.equal(reorderAutoLayoutChild(page, copy.id), true);
+  resolvePageLayout(page);
+
+  assert.equal(copy.parentId, frame.id);
+  assert.deepEqual(getChildNodes(page, frame.id).map((node) => node.name), [
+    "First copy",
+    "First",
+    "Second",
+  ]);
 });
 
 test("SVG export uses the same resolved Auto Layout geometry as the canvas model", () => {

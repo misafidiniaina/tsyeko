@@ -641,7 +641,7 @@ Exit criterion met for the local browser editor: a designer can complete and exp
 - Numeric multi-selection X/Y/W/H Inspector editing, optional ratio-locked scaling, ±90° actions, and live rotation readouts (implemented)
 - Persistent adaptive rulers, draggable page guides, exact guide editing, configurable grids, grid/object/guide snapping, history, and v12 persistence (implemented)
 - Rotation-aware Alt/Option distance inspection, parent insets, and nearest-sibling gap measurements during direct transforms (implemented)
-- Faster smart-spacing and duplicate-in-place workflows during direct manipulation
+- Smart repeated-gap snapping with live spacing labels, thresholded Alt/Option+Shift drag duplication, multi-selection branch copies, cancel-safe one-step history, and repeatable duplicate transforms (implemented)
 - More shape/path authoring tools, editable transform origins, skew, and matrix-level transforms
 - Keyboard focus, accessibility, and dense-workflow polish across Canvas, Layers, and Inspector
 

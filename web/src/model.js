@@ -1075,6 +1075,7 @@ export function reorderNode(document, id, direction) {
 }
 
 export function duplicateNodes(document, ids, offset = 20) {
+  const translation = duplicateTranslation(offset);
   const roots = new Set(getTopLevelNodeIds(document, ids));
   const sourceNodes = getNodesWithDescendants(document, [...roots]);
   const idMap = new Map(sourceNodes.map((node) => [node.id, makeId(node.type)]));
@@ -1083,8 +1084,8 @@ export function duplicateNodes(document, ids, offset = 20) {
       id: idMap.get(node.id),
       parentId: node.parentId ? idMap.get(node.parentId) ?? node.parentId : null,
       name: roots.has(node.id) ? `${node.name} copy` : node.name,
-      x: node.x + offset,
-      y: node.y + offset,
+      x: node.x + translation.x,
+      y: node.y + translation.y,
       locked: false,
     }));
   const copiedSourceIds = new Set(sourceNodes.map((node) => node.id));
@@ -1102,6 +1103,15 @@ export function duplicateNodes(document, ids, offset = 20) {
   document.nodes.push(...copies);
   sortNodesByHierarchy(document);
   return copies;
+}
+
+function duplicateTranslation(offset) {
+  if (Number.isFinite(offset)) return { x: offset, y: offset };
+  if (!offset || typeof offset !== "object") return { x: 0, y: 0 };
+  return {
+    x: Number.isFinite(offset.x) ? offset.x : 0,
+    y: Number.isFinite(offset.y) ? offset.y : 0,
+  };
 }
 
 export function deleteNodes(document, ids) {
