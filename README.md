@@ -45,6 +45,8 @@ GOCACHE=$PWD/.cache/go-build go run .
 - Browser-native text shaping and metrics, embedded document fonts, and editable rich-text color/weight/style ranges
 - Selection, marquee selection, multi-selection, movement, resize, and rotation
 - Multi-selection edge/center alignment and equal-gap distribution with temporary on-canvas measurements
+- Unified multi-selection transform box with corner/edge resize, shared-pivot rotation, Shift aspect/angle constraints, Alt center-resize, live angle feedback, and undo/redo
+- Numeric multi-selection X/Y/W/H Inspector controls with optional aspect-ratio locking and one-click ±90° rotation
 - Shift-constrained drawing and transforms
 - Alt-centered shape drawing and resizing
 - Smart edge and center snapping while moving layers
@@ -87,6 +89,8 @@ GOCACHE=$PWD/.cache/go-build go run .
 | Create mask | `Ctrl/Cmd+Alt+M` |
 | Delete | `Backspace` or `Delete` |
 | Nudge | Arrow keys; hold `Shift` for 10 px |
+| Constrain resize or rotation | Hold `Shift` while dragging a selection handle |
+| Resize from the center | Hold `Alt` while dragging a selection handle |
 | Fit document | `1` |
 | Fit selection | `2` |
 | Actual size | `0` |
@@ -133,7 +137,7 @@ npm run check
 npm run test:browser
 ```
 
-The unit suite covers document migration and sanitization, content-addressed assets and embedded fonts, command history, alignment/distribution geometry, render caches and profiling, rich text, compound/outlined/fuzzed geometry, component synchronization, local variants, nested Auto Layout, frame constraints, SVG parity, Boolean/mask geometry, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies multi-selection arrangement, the layout inspector, responsive resizing, undo/redo, v11 persistence, local component/variant workflows, all four Boolean modes and mask intersection with Canvas and rasterized-SVG pixel samples, vector editing, paint stacks, images, grouping, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
+The unit suite covers document migration and sanitization, content-addressed assets and embedded fonts, command history, alignment/distribution and transform geometry, render caches and profiling, rich text, compound/outlined/fuzzed geometry, component synchronization, local variants, nested Auto Layout, frame constraints, SVG parity, Boolean/mask geometry, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies multi-selection arrangement, transform handles, exact geometry fields, ratio-locked scaling and quick rotation, the layout inspector, responsive resizing, undo/redo, v11 persistence, local component/variant workflows, all four Boolean modes and mask intersection with Canvas and rasterized-SVG pixel samples, vector editing, paint stacks, images, grouping, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
 
 ## Hosted snapshot workflow
 
@@ -156,6 +160,7 @@ This API is currently a development collaboration foundation. It has document va
 │   └── src/
 │       ├── app.js           Editor controller and interactions
 │       ├── alignment.js     Multi-selection alignment, distribution, and guide geometry
+│       ├── transform.js     Shared selection bounds, resize, and rotation geometry
 │       ├── model.js         Document schema and geometry
 │       ├── components.js    Local component and linked-instance synchronization
 │       ├── layout.js        Auto Layout and frame constraints
@@ -172,6 +177,7 @@ This API is currently a development collaboration foundation. It has document va
 │       ├── persistence.js   IndexedDB storage and migration fallback
 │       ├── layout.test.js   Responsive layout unit tests
 │       ├── alignment.test.js Arrangement geometry unit tests
+│       ├── transform.test.js Multi-selection transform unit tests
 │       ├── components.test.js Component and instance unit tests
 │       ├── model.test.js    Document and export unit tests
 │       └── vector.test.js   Bézier geometry unit tests

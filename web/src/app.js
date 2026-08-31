@@ -61,6 +61,14 @@ import {
   DISTRIBUTION_AXES,
 } from "./alignment.js";
 import {
+  combineTransformBounds,
+  resizeTransformBounds,
+  resizeTransformBoundsToDimension,
+  rotateGeometryAroundPoint,
+  rotationDelta,
+  scaleGeometryInBounds,
+} from "./transform.js";
+import {
   createComponent,
   createComponentInstance,
   createComponentSet,
@@ -209,6 +217,7 @@ let guides = [];
 let transformFeedbackGuides = [];
 let transformFeedbackPageId = null;
 let transformFeedbackTimer = null;
+let multiTransformAspectLocked = false;
 let spacePressed = false;
 let saveTimer = null;
 let saveVersion = 0;
@@ -1403,6 +1412,23 @@ function onPointerDown(event) {
     }
   }
 
+  const multiRoots = selectedTransformRootNodes();
+  const multiHandle = multiRoots.length > 1 && !multiRoots.some((node) => isNodeEffectivelyLocked(currentPage(), node))
+    ? renderer.getSelectionHandleAt(screen, multiRoots, camera)
+    : null;
+  if (multiHandle) {
+    const transform = multiTransformSelection(multiHandle === "rotate" ? "rotate" : "resize");
+    if (!transform.valid) {
+      showToast(transform.reason);
+      return;
+    }
+    interaction = multiHandle === "rotate"
+      ? createMultiRotateInteraction(event, transform, world)
+      : createMultiResizeInteraction(event, transform, multiHandle);
+    capturePointer(event);
+    return;
+  }
+
   const selectedNode = selectedIds.length === 1 ? getNode(currentPage(), selectedIds[0]) : null;
   const handle = selectedNode ? renderer.getHandleAt(screen, selectedNode, camera) : null;
 
@@ -1496,6 +1522,8 @@ function onPointerMove(event) {
   if (interaction.type === "move") updateMove(world, event);
   if (interaction.type === "resize") updateResize(world, event);
   if (interaction.type === "rotate") updateRotation(world, event);
+  if (interaction.type === "multi-resize") updateMultiResize(world, event);
+  if (interaction.type === "multi-rotate") updateMultiRotation(world, event);
   if (interaction.type === "vector-point") updateVectorPoint(world, event);
   if (interaction.type === "vector-handle") updateVectorHandle(world, event);
   if (interaction.type === "pen-anchor") updatePenAnchorHandles(world, event);
@@ -1518,10 +1546,16 @@ function onPointerUp(event) {
     syncGroupBounds(currentPage());
     commitDocument();
     setTool("select");
-  } else if (["move", "resize", "rotate"].includes(completedType)) {
+  } else if (["move", "resize", "rotate", "multi-resize", "multi-rotate"].includes(completedType)) {
     if (completedType === "move") reparentMovedRoots(interaction.rootIds);
     syncGroupBounds(currentPage());
-    commitDocument();
+    const labels = {
+      resize: "Resize layer",
+      rotate: "Rotate layer",
+      "multi-resize": "Resize selection",
+      "multi-rotate": "Rotate selection",
+    };
+    commitDocument(labels[completedType]);
   } else if (["vector-point", "vector-handle"].includes(completedType)) {
     const node = getNode(currentPage(), interaction.nodeId);
     if (node?.type === NODE_TYPES.VECTOR) normalizeVectorBounds(node);
@@ -1552,13 +1586,13 @@ function onPointerCancel(event) {
       if (node) Object.assign(node, { x: original.x, y: original.y });
     }
   }
-  if (interaction.type === "resize") {
+  if (["resize", "multi-resize"].includes(interaction.type)) {
     for (const original of interaction.nodes) {
       const node = getNode(currentPage(), original.id);
       if (node) Object.assign(node, original);
     }
   }
-  if (interaction.type === "rotate") {
+  if (["rotate", "multi-rotate"].includes(interaction.type)) {
     for (const original of interaction.nodes) {
       const node = getNode(currentPage(), original.id);
       if (node) Object.assign(node, original);
@@ -1870,6 +1904,274 @@ function updateMove(world, event) {
   syncGroupBounds(currentPage());
 }
 
+function selectedTransformRootNodes(page = currentPage()) {
+  return getTopLevelNodeIds(page, selectedIds)
+    .map((id) => getNode(page, id))
+    .filter(Boolean);
+}
+
+function multiTransformSelection(mode) {
+  const page = currentPage();
+  const roots = selectedTransformRootNodes(page);
+  const rootIds = roots.map((node) => node.id);
+  const nodes = getNodesWithDescendants(page, rootIds);
+  const bounds = combineTransformBounds(roots.map(getNodeAABB));
+  const invalid = (reason) => ({
+    valid: false,
+    reason,
+    page,
+    roots,
+    rootIds,
+    nodes,
+    bounds,
+  });
+  if (roots.length < 2) {
+    return invalid("Select at least two independent layers.");
+  }
+  if (roots.some((node) => isNodeEffectivelyLocked(page, node))) {
+    return invalid("Unlock every selected layer before transforming the selection.");
+  }
+  if (mode === "move" && roots.some((node) => !canMoveComponentNode(node))) {
+    return invalid("Select the instance root, or detach the instance before moving its layers.");
+  }
+  if (roots.some((node) => isAutoLayoutChild(page, node))) {
+    return invalid("Set Auto Layout children to Absolute before transforming them with other layers.");
+  }
+  if (mode !== "move" && nodes.some(isComponentInstanceMember)) {
+    return invalid("Detach linked instances before resizing or rotating this selection.");
+  }
+  if (mode === "rotate" && nodes.some(isAutoLayoutFrame)) {
+    return invalid("Auto Layout frames use an axis-aligned flow and cannot rotate yet.");
+  }
+  return {
+    valid: true,
+    reason: "",
+    page,
+    roots,
+    rootIds,
+    nodes,
+    bounds,
+  };
+}
+
+function createMultiResizeInteraction(event, selection, handle) {
+  const nodes = selection.nodes.map(cloneNode);
+  setMultiResizeRootsFixed(selection.page, selection.rootIds, {
+    horizontal: handle.includes("w") || handle.includes("e"),
+    vertical: handle.includes("n") || handle.includes("s"),
+  });
+  return {
+    type: "multi-resize",
+    pointerId: event.pointerId,
+    rootIds: selection.rootIds,
+    bounds: selection.bounds,
+    handle,
+    nodes,
+    aspectRatio: selection.bounds.width / Math.max(0.001, selection.bounds.height),
+    hasAutoLayout: selection.nodes.some(isAutoLayoutFrame),
+  };
+}
+
+function updateMultiResize(world, event) {
+  const targetBounds = resizeTransformBounds(interaction.bounds, interaction.handle, world, {
+    centered: event.altKey,
+    preserveAspectRatio: event.shiftKey,
+  });
+  interaction.currentBounds = targetBounds;
+  applyMultiResizeSnapshots(
+    currentPage(),
+    interaction.nodes,
+    interaction.bounds,
+    targetBounds,
+    interaction.hasAutoLayout,
+  );
+}
+
+function setMultiResizeRootsFixed(page, rootIds, axes) {
+  for (const rootId of rootIds) {
+    const root = getNode(page, rootId);
+    if (root?.type !== NODE_TYPES.FRAME) continue;
+    if (axes.horizontal) root.layoutSizingHorizontal = LAYOUT_SIZING.FIXED;
+    if (axes.vertical) root.layoutSizingVertical = LAYOUT_SIZING.FIXED;
+  }
+}
+
+function applyMultiResizeSnapshots(page, snapshots, sourceBounds, targetBounds, hasAutoLayout) {
+  const scaleX = targetBounds.width / Math.max(0.001, sourceBounds.width);
+  const scaleY = targetBounds.height / Math.max(0.001, sourceBounds.height);
+
+  for (const snapshot of snapshots) {
+    const node = getNode(page, snapshot.id);
+    if (!node || isAutoBoundsContainer(snapshot)) continue;
+    const geometry = scaleGeometryInBounds(snapshot, sourceBounds, targetBounds);
+    applyMultiScaleGeometry(node, snapshot, geometry, scaleX, scaleY);
+  }
+
+  if (hasAutoLayout) resolvePageGeometry(page);
+  else syncGroupBounds(page);
+}
+
+function applyMultiScaleGeometry(node, snapshot, geometry, scaleX, scaleY) {
+  const width = clamp(geometry.width, snapshot.minWidth, snapshot.maxWidth);
+  const height = clamp(geometry.height, snapshot.minHeight, snapshot.maxHeight);
+  const centerX = geometry.x + geometry.width / 2;
+  const centerY = geometry.y + geometry.height / 2;
+  node.x = centerX - width / 2;
+  node.y = centerY - height / 2;
+  node.width = width;
+  node.height = height;
+  node.rotation = snapshot.rotation;
+
+  if (node.type === NODE_TYPES.VECTOR) {
+    scaleVectorGeometry(
+      node,
+      snapshot,
+      width / Math.max(0.001, snapshot.width),
+      height / Math.max(0.001, snapshot.height),
+    );
+  }
+
+  const typographyScale = Math.min(scaleX, scaleY);
+  if (node.type === NODE_TYPES.TEXT) {
+    node.fontSize = Math.max(1, snapshot.fontSize * typographyScale);
+    node.textRuns = (snapshot.textRuns ?? []).map((run) => ({
+      ...run,
+      fontSize: Math.max(1, run.fontSize * typographyScale),
+      letterSpacing: (run.letterSpacing ?? 0) * typographyScale,
+    }));
+  }
+
+  if (node.type === NODE_TYPES.FRAME && snapshot.layoutMode !== LAYOUT_MODES.NONE) {
+    const horizontal = snapshot.layoutMode === LAYOUT_MODES.HORIZONTAL;
+    node.layoutGap = Math.max(0, snapshot.layoutGap * (horizontal ? scaleX : scaleY));
+    node.paddingTop = Math.max(0, snapshot.paddingTop * scaleY);
+    node.paddingRight = Math.max(0, snapshot.paddingRight * scaleX);
+    node.paddingBottom = Math.max(0, snapshot.paddingBottom * scaleY);
+    node.paddingLeft = Math.max(0, snapshot.paddingLeft * scaleX);
+  }
+}
+
+function createMultiRotateInteraction(event, selection, world) {
+  return {
+    type: "multi-rotate",
+    pointerId: event.pointerId,
+    rootIds: selection.rootIds,
+    center: {
+      x: selection.bounds.x + selection.bounds.width / 2,
+      y: selection.bounds.y + selection.bounds.height / 2,
+    },
+    startWorld: world,
+    currentWorld: world,
+    delta: 0,
+    nodes: selection.nodes.map(cloneNode),
+  };
+}
+
+function updateMultiRotation(world, event) {
+  const delta = rotationDelta(interaction.center, interaction.startWorld, world, event.shiftKey ? 15 : 0);
+  interaction.currentWorld = world;
+  interaction.delta = delta;
+  applyMultiRotationSnapshots(currentPage(), interaction.nodes, interaction.center, delta);
+}
+
+function applyMultiRotationSnapshots(page, snapshots, center, degrees) {
+  for (const snapshot of snapshots) {
+    const node = getNode(page, snapshot.id);
+    if (!node || isAutoBoundsContainer(snapshot)) continue;
+    const geometry = rotateGeometryAroundPoint(snapshot, center, degrees);
+    node.x = geometry.x;
+    node.y = geometry.y;
+    node.rotation = geometry.rotation;
+  }
+  syncGroupBounds(page);
+}
+
+function updateMultiTransformProperty(property, rawValue) {
+  const value = Number.parseFloat(rawValue);
+  if (!Number.isFinite(value)) return false;
+
+  if (["x", "y"].includes(property)) {
+    const selection = multiTransformSelection("move");
+    if (!selection.valid || !selection.bounds) {
+      if (selection.reason) showToast(selection.reason);
+      return false;
+    }
+    const delta = value - selection.bounds[property];
+    if (Math.abs(delta) < 0.0001) return false;
+    const changed = translateArrangementRoots(selection.page, selection.rootIds.map((id) => ({
+      id,
+      dx: property === "x" ? delta : 0,
+      dy: property === "y" ? delta : 0,
+    })));
+    if (!changed) return false;
+    syncGroupBounds(selection.page);
+    liveDocumentChange();
+    refreshMultiTransformFieldValues(property);
+    return true;
+  }
+
+  if (["width", "height"].includes(property)) {
+    const selection = multiTransformSelection("resize");
+    if (!selection.valid || !selection.bounds) {
+      if (selection.reason) showToast(selection.reason);
+      return false;
+    }
+    const targetBounds = resizeTransformBoundsToDimension(
+      selection.bounds,
+      property,
+      clamp(value, 1, 100_000),
+      { preserveAspectRatio: multiTransformAspectLocked },
+    );
+    const horizontal = Math.abs(targetBounds.width - selection.bounds.width) >= 0.0001;
+    const vertical = Math.abs(targetBounds.height - selection.bounds.height) >= 0.0001;
+    if (!horizontal && !vertical) return false;
+    const snapshots = selection.nodes.map(cloneNode);
+    setMultiResizeRootsFixed(selection.page, selection.rootIds, { horizontal, vertical });
+    applyMultiResizeSnapshots(
+      selection.page,
+      snapshots,
+      selection.bounds,
+      targetBounds,
+      selection.nodes.some(isAutoLayoutFrame),
+    );
+    liveDocumentChange();
+    refreshMultiTransformFieldValues(property);
+    return true;
+  }
+
+  return false;
+}
+
+function refreshMultiTransformFieldValues(activeProperty = null) {
+  const bounds = combineTransformBounds(selectedTransformRootNodes().map(getNodeAABB));
+  if (!bounds) return;
+  elements.inspector.querySelectorAll("[data-multi-transform-property]").forEach((input) => {
+    const property = input.dataset.multiTransformProperty;
+    if (property !== activeProperty && property in bounds) {
+      input.value = formatNumber(bounds[property]);
+    }
+  });
+}
+
+function rotateMultiSelectionBy(degrees) {
+  const selection = multiTransformSelection("rotate");
+  if (!selection.valid || !selection.bounds) {
+    showToast(selection.reason || "This selection cannot be rotated.");
+    return;
+  }
+  const center = {
+    x: selection.bounds.x + selection.bounds.width / 2,
+    y: selection.bounds.y + selection.bounds.height / 2,
+  };
+  applyMultiRotationSnapshots(
+    selection.page,
+    selection.nodes.map(cloneNode),
+    center,
+    degrees,
+  );
+  commitDocument(degrees < 0 ? "Rotate selection left" : "Rotate selection right");
+}
+
 function createResizeInteraction(event, node, handle) {
   const nodes = isAutoBoundsContainer(node) || node.type === NODE_TYPES.FRAME
     ? getNodesWithDescendants(currentPage(), [node.id])
@@ -2122,6 +2424,18 @@ function updateHoverCursor(screen) {
   if (activeTool !== "select" || spacePressed) {
     updateCanvasCursor();
     return;
+  }
+  const multiRoots = selectedTransformRootNodes();
+  if (multiRoots.length > 1 && !multiRoots.some((node) => isNodeEffectivelyLocked(currentPage(), node))) {
+    const handle = renderer.getSelectionHandleAt(screen, multiRoots, camera);
+    if (handle) {
+      const transform = multiTransformSelection(handle === "rotate" ? "rotate" : "resize");
+      if (transform.valid) {
+        elements.canvas.dataset.cursor = "";
+        elements.canvas.style.cursor = resizeCursorForHandle(handle, 0);
+        return;
+      }
+    }
   }
   const selected = selectedIds.length === 1 ? getNode(currentPage(), selectedIds[0]) : null;
   if (vectorEdit && selected?.id === vectorEdit.nodeId) {
@@ -3129,6 +3443,20 @@ function renderInspector() {
 
   if (selectedIds.length > 1) {
     const selectedRoots = getTopLevelNodeIds(currentPage(), selectedIds);
+    const moveTransformState = multiTransformSelection("move");
+    const resizeTransformState = multiTransformSelection("resize");
+    const rotateTransformState = multiTransformSelection("rotate");
+    const transformBounds = resizeTransformState.bounds ?? moveTransformState.bounds;
+    const positionDisabled = moveTransformState.valid ? "" : "disabled";
+    const resizeDisabled = resizeTransformState.valid ? "" : "disabled";
+    const rotationDisabled = rotateTransformState.valid ? "" : "disabled";
+    const transformHint = !moveTransformState.valid
+      ? moveTransformState.reason
+      : !resizeTransformState.valid
+        ? `${resizeTransformState.reason} Exact X and Y remain available.`
+        : !rotateTransformState.valid
+          ? `${rotateTransformState.reason} Exact position and size remain available.`
+          : "X and Y move the selection; W and H scale it from the top-left corner.";
     const alignmentState = arrangementSelection(2);
     const distributionState = arrangementSelection(3);
     const alignmentDisabled = alignmentState.valid ? "" : "disabled";
@@ -3146,11 +3474,31 @@ function renderInspector() {
         <input value="${selectedIds.length} layers selected" disabled />
       </div>
       <div class="inspector-section">
+        <p class="inspector-section-title">
+          <span>Position</span>
+          <button class="transform-ratio-toggle ${multiTransformAspectLocked ? "active" : ""}" data-multi-transform-action="toggle-aspect" title="${multiTransformAspectLocked ? "Unlock" : "Lock"} aspect ratio" aria-label="${multiTransformAspectLocked ? "Unlock" : "Lock"} aspect ratio" aria-pressed="${multiTransformAspectLocked}" ${resizeDisabled}>
+            ${aspectRatioIcon(multiTransformAspectLocked)}
+          </button>
+        </p>
+        <div class="field-grid">
+          ${multiTransformField("X", "x", transformBounds?.x, positionDisabled)}
+          ${multiTransformField("Y", "y", transformBounds?.y, positionDisabled)}
+          ${multiTransformField("W", "width", transformBounds?.width, resizeDisabled)}
+          ${multiTransformField("H", "height", transformBounds?.height, resizeDisabled)}
+        </div>
+        <div class="precision-action-grid">
+          <button class="icon-toggle" data-multi-transform-action="rotate" data-degrees="-90" title="Rotate selection left 90 degrees" aria-label="Rotate selection left 90 degrees" ${rotationDisabled}><span aria-hidden="true">↶</span> −90°</button>
+          <button class="icon-toggle" data-multi-transform-action="rotate" data-degrees="90" title="Rotate selection right 90 degrees" aria-label="Rotate selection right 90 degrees" ${rotationDisabled}><span aria-hidden="true">↷</span> +90°</button>
+        </div>
+        <p class="inspector-hint">${escapeHTML(transformHint)}</p>
+      </div>
+      <div class="inspector-section">
         <p class="inspector-section-title">Selection</p>
         <div class="field-grid one-column">
           <button class="button button-quiet" data-multi-action="group">Group selection</button>
           <button class="button button-quiet" data-multi-action="duplicate">Duplicate selection</button>
         </div>
+        <p class="inspector-hint">Canvas handles resize and rotate the whole selection. Shift constrains; Alt resizes from the center.</p>
       </div>
       ${canCreateVariants ? `<div class="inspector-section component-inspector">
         <p class="inspector-section-title">${variantSetIcon()} Component variants</p>
@@ -3200,6 +3548,25 @@ function renderInspector() {
       </div>`;
     elements.inspector.querySelector("[data-multi-action='group']")?.addEventListener("click", groupSelection);
     elements.inspector.querySelector("[data-multi-action='duplicate']")?.addEventListener("click", duplicateSelection);
+    elements.inspector.querySelectorAll("[data-multi-transform-property]").forEach((input) => {
+      input.addEventListener("input", () => {
+        if (updateMultiTransformProperty(input.dataset.multiTransformProperty, input.value)) {
+          input.dataset.transformChanged = "true";
+        }
+      });
+      input.addEventListener("change", () => {
+        if (input.dataset.transformChanged !== "true") return;
+        const property = input.dataset.multiTransformProperty;
+        commitDocument(["x", "y"].includes(property) ? "Move selection" : "Resize selection");
+      });
+    });
+    elements.inspector.querySelector("[data-multi-transform-action='toggle-aspect']")?.addEventListener("click", () => {
+      multiTransformAspectLocked = !multiTransformAspectLocked;
+      renderInspector();
+    });
+    elements.inspector.querySelectorAll("[data-multi-transform-action='rotate']").forEach((button) => {
+      button.addEventListener("click", () => rotateMultiSelectionBy(Number.parseFloat(button.dataset.degrees)));
+    });
     elements.inspector.querySelector("[data-multi-action='create-variants']")?.addEventListener("click", createVariantSetFromSelection);
     elements.inspector.querySelectorAll("[data-multi-action='align']").forEach((button) => {
       button.addEventListener("click", () => alignSelectedLayers(button.dataset.alignment));
@@ -3732,6 +4099,11 @@ function numberField(label, property, value, disabled = false) {
   return `<label class="field ${disabled ? "disabled" : ""}"><span class="field-label">${label}</span><input type="number" data-property="${property}" data-value-type="number" step="1" value="${formatNumber(value)}" ${disabled ? "disabled" : ""} /></label>`;
 }
 
+function multiTransformField(label, property, value, disabled = false) {
+  const formatted = Number.isFinite(value) ? formatNumber(value) : "";
+  return `<label class="field ${disabled ? "disabled" : ""}"><span class="field-label">${label}</span><input type="number" data-multi-transform-property="${property}" step="0.1" value="${formatted}" aria-label="Selection ${property}" ${disabled ? "disabled" : ""} /></label>`;
+}
+
 function colorField(property, color, opacity) {
   return `<div class="color-row">
     <span class="color-swatch"><input type="color" data-property="${property}" value="${toHexColor(color)}" aria-label="Fill color" /></span>
@@ -3871,12 +4243,19 @@ function requestRender() {
     const visibleFeedbackGuides = transformFeedbackPageId === activePageId
       ? transformFeedbackGuides
       : [];
+    const transformReadout = interaction?.type === "multi-rotate"
+      ? {
+          point: interaction.currentWorld ?? interaction.startWorld,
+          degrees: interaction.delta ?? 0,
+        }
+      : null;
     renderer.render(currentPage(), selectedIds, camera, {
       guides: [...guides, ...visibleFeedbackGuides],
       marquee,
       editingId: editingTextId,
       penDraft,
       vectorEdit,
+      transformReadout,
     });
     elements.zoomValue.textContent = `${Math.round(camera.zoom * 100)}%`;
   });
@@ -4529,6 +4908,11 @@ function arrangementIcon(action) {
     "distribute-vertical": '<path d="M4 3h12M6 10h8M4 17h12M10 5v3M10 12v3" />',
   };
   return `<svg class="arrangement-icon" viewBox="0 0 20 20" aria-hidden="true">${paths[action] ?? ""}</svg>`;
+}
+
+function aspectRatioIcon(locked) {
+  const slash = locked ? "" : '<path d="m6.5 13.5 7-7" />';
+  return `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8.2 6H6a4 4 0 0 0 0 8h2.2M11.8 6H14a4 4 0 1 1 0 8h-2.2M6.5 10h7" />${slash}</svg>`;
 }
 
 function componentIcon() {

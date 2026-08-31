@@ -628,10 +628,11 @@ Exit criterion met for the local browser editor: a designer can complete and exp
 ### Milestone 1.5 — professional editing tools and usability (active)
 
 - Rotation-aware multi-selection edge/center alignment, equal-gap distribution, hierarchy-safe branch movement, and temporary canvas measurements (implemented)
-- Unified multi-selection bounding-box resize and rotation
+- Unified multi-selection bounding-box resize and shared-pivot rotation, including Shift/Alt transform modifiers, linked-instance/Auto Layout guards, and one-step history (implemented)
+- Numeric multi-selection X/Y/W/H Inspector editing, optional ratio-locked scaling, ±90° actions, and live rotation readouts (implemented)
 - Persistent rulers, custom guides, grids, and richer distance inspection
 - Faster smart-spacing and duplicate-in-place workflows during direct manipulation
-- More shape/path authoring tools and precision transform controls
+- More shape/path authoring tools, editable transform origins, skew, and matrix-level transforms
 - Keyboard focus, accessibility, and dense-workflow polish across Canvas, Layers, and Inspector
 
 Exit criterion: core layout and vector work feels fast and predictable enough for sustained daily design use, not only feature demonstrations.

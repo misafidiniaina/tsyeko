@@ -1139,6 +1139,39 @@ svg {
   height: 20px;
 }
 
+.transform-ratio-toggle {
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.transform-ratio-toggle:hover,
+.transform-ratio-toggle.active {
+  border-color: var(--border);
+  background: var(--panel-hover);
+  color: var(--accent-bright);
+}
+
+.transform-ratio-toggle:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.transform-ratio-toggle svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .section-shortcut {
   color: var(--text-faint);
   font-size: 9px;
@@ -1294,6 +1327,25 @@ svg {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px;
   margin-top: 4px;
+}
+
+.precision-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.precision-action-grid .icon-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+.precision-action-grid .icon-toggle span {
+  color: var(--accent-bright);
+  font-size: 15px;
 }
 
 .distribution-control-grid .icon-toggle {

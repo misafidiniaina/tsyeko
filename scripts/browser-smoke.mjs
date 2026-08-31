@@ -1272,6 +1272,274 @@ try {
     writeFileSync(process.env.TSYAIKO_COMPONENT_SCREENSHOT, Buffer.from(screenshot.data, "base64"));
   }
 
+  await evaluate(`document.querySelector("#addPageButton").click(); true`);
+  await waitFor(
+    `document.querySelector("#currentPageName")?.textContent === "Page 3" &&
+     document.querySelectorAll(".layer-row").length === 0`,
+    "fresh multi-transform page",
+  );
+  const transformRects = [
+    { x: canvas.left + canvas.width * 0.22, y: canvas.top + canvas.height * 0.28, width: 60, height: 40 },
+    { x: canvas.left + canvas.width * 0.42, y: canvas.top + canvas.height * 0.40, width: 70, height: 50 },
+    { x: canvas.left + canvas.width * 0.64, y: canvas.top + canvas.height * 0.52, width: 50, height: 70 },
+  ];
+  for (const rectangle of transformRects) {
+    await evaluate(`document.querySelector('[data-tool="rectangle"]').click(); true`);
+    await dragPointer(command, { x: rectangle.x, y: rectangle.y }, {
+      x: rectangle.x + rectangle.width,
+      y: rectangle.y + rectangle.height,
+    });
+  }
+  await waitFor(
+    `document.querySelectorAll(".layer-row").length === 3 &&
+     document.querySelector("#saveState").textContent === "Saved locally"`,
+    "multi-transform fixture creation",
+  );
+  const readGeometryByLayer = async (index) => {
+    await evaluate(`
+      document.querySelectorAll(".layer-row")[${index}]
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      true
+    `);
+    return evaluate(`({
+      x: Number(document.querySelector('[data-property="x"]')?.value),
+      y: Number(document.querySelector('[data-property="y"]')?.value),
+      width: Number(document.querySelector('[data-property="width"]')?.value),
+      height: Number(document.querySelector('[data-property="height"]')?.value),
+      rotation: Number(document.querySelector('[data-property="rotation"]')?.value)
+    })`);
+  };
+  const sourceCenters = transformRects.map((rectangle) => ({
+    x: rectangle.x + rectangle.width / 2,
+    y: rectangle.y + rectangle.height / 2,
+  }));
+  const sourceGeometry = [];
+  for (const index of sourceCenters.keys()) sourceGeometry.push(await readGeometryByLayer(index));
+  const sourceBounds = {
+    x: Math.min(...sourceGeometry.map((item) => item.x)),
+    y: Math.min(...sourceGeometry.map((item) => item.y)),
+    width: Math.max(...sourceGeometry.map((item) => item.x + item.width)) - Math.min(...sourceGeometry.map((item) => item.x)),
+    height: Math.max(...sourceGeometry.map((item) => item.y + item.height)) - Math.min(...sourceGeometry.map((item) => item.y)),
+  };
+
+  await evaluate(`document.querySelector('[data-tool="select"]').click(); true`);
+  for (const [index, center] of sourceCenters.entries()) {
+    await dispatchClick(command, center, index ? 8 : 0);
+  }
+  await waitFor(
+    `document.querySelector(".selection-summary input")?.value === "3 layers selected"`,
+    "multi-transform selection",
+  );
+  const sourceScreenBounds = {
+    x: Math.min(...transformRects.map((item) => item.x)),
+    y: Math.min(...transformRects.map((item) => item.y)),
+    width: Math.max(...transformRects.map((item) => item.x + item.width)) - Math.min(...transformRects.map((item) => item.x)),
+    height: Math.max(...transformRects.map((item) => item.y + item.height)) - Math.min(...transformRects.map((item) => item.y)),
+  };
+  const resizedScreenBounds = {
+    x: sourceScreenBounds.x,
+    y: sourceScreenBounds.y,
+    width: sourceScreenBounds.width * 2,
+    height: sourceScreenBounds.height * 2,
+  };
+  await dragPointer(command, {
+    x: sourceScreenBounds.x + sourceScreenBounds.width,
+    y: sourceScreenBounds.y + sourceScreenBounds.height,
+  }, {
+    x: resizedScreenBounds.x + resizedScreenBounds.width,
+    y: resizedScreenBounds.y + resizedScreenBounds.height,
+  });
+  await waitFor(
+    `document.querySelector("#saveState").textContent === "Saved locally"`,
+    "multi-selection resize autosave",
+  );
+  const resizedCenters = sourceCenters.map((center) => ({
+    x: resizedScreenBounds.x + (center.x - sourceScreenBounds.x) * 2,
+    y: resizedScreenBounds.y + (center.y - sourceScreenBounds.y) * 2,
+  }));
+  const resizedGeometry = [];
+  for (const index of resizedCenters.keys()) resizedGeometry.push(await readGeometryByLayer(index));
+  for (const [index, geometry] of resizedGeometry.entries()) {
+    const source = sourceGeometry[index];
+    const expected = {
+      x: sourceBounds.x + (source.x - sourceBounds.x) * 2,
+      y: sourceBounds.y + (source.y - sourceBounds.y) * 2,
+      width: source.width * 2,
+      height: source.height * 2,
+    };
+    if (Object.entries(expected).some(([property, value]) => Math.abs(geometry[property] - value) > 0.2)) {
+      throw new Error(`Multi-selection resize validation failed: ${JSON.stringify({ source, geometry, expected })}`);
+    }
+  }
+
+  for (let index = 0; index < 3; index += 1) {
+    await evaluate(`
+      document.querySelectorAll(".layer-row")[${index}]
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: ${index > 0} }));
+      true
+    `);
+  }
+  await waitFor(
+    `document.querySelector(".selection-summary input")?.value === "3 layers selected"`,
+    "resized multi-transform selection",
+  );
+  const rotationCenter = {
+    x: resizedScreenBounds.x + resizedScreenBounds.width / 2,
+    y: resizedScreenBounds.y + resizedScreenBounds.height / 2,
+  };
+  await dragPointer(command, {
+    x: rotationCenter.x,
+    y: resizedScreenBounds.y - 25,
+  }, {
+    x: rotationCenter.x + 25,
+    y: rotationCenter.y,
+  }, 8);
+  await waitFor(
+    `document.querySelector("#saveState").textContent === "Saved locally"`,
+    "multi-selection rotation autosave",
+  );
+  const rotatedCenters = resizedCenters.map((center) => ({
+    x: rotationCenter.x - (center.y - rotationCenter.y),
+    y: rotationCenter.y + (center.x - rotationCenter.x),
+  }));
+  const rotatedGeometry = [];
+  for (const index of rotatedCenters.keys()) rotatedGeometry.push(await readGeometryByLayer(index));
+  if (rotatedGeometry.some((geometry, index) =>
+    Math.abs(geometry.rotation - 90) > 0.1 ||
+    Math.abs(geometry.width - resizedGeometry[index].width) > 0.1 ||
+    Math.abs(geometry.height - resizedGeometry[index].height) > 0.1)) {
+    throw new Error(`Multi-selection rotation validation failed: ${JSON.stringify(rotatedGeometry)}`);
+  }
+  await evaluate(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true, bubbles: true })); true`);
+  const undoGeometry = await readGeometryByLayer(0);
+  if (Math.abs(undoGeometry.rotation) > 0.1) {
+    throw new Error(`Multi-selection rotation undo failed: ${JSON.stringify(undoGeometry)}`);
+  }
+  await evaluate(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true, shiftKey: true, bubbles: true })); true`);
+  const redoGeometry = await readGeometryByLayer(0);
+  if (Math.abs(redoGeometry.rotation - 90) > 0.1) {
+    throw new Error(`Multi-selection rotation redo failed: ${JSON.stringify(redoGeometry)}`);
+  }
+  await waitFor(
+    `document.querySelector("#saveState").textContent === "Saved locally"`,
+    "multi-transform history autosave",
+  );
+
+  await evaluate(`
+    [...document.querySelectorAll(".layer-row")].map((row) => row.dataset.layerId).forEach((id, index) => {
+      document.querySelector('[data-layer-id="' + id + '"]')
+        .dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: index > 0 }));
+    });
+    true
+  `);
+  await waitFor(
+    `document.querySelectorAll("[data-multi-transform-property]").length === 4 &&
+     document.querySelector('[data-multi-transform-property="x"]')?.disabled === false &&
+     document.querySelector('[data-multi-transform-property="width"]')?.disabled === false &&
+     document.querySelector('[data-multi-transform-action="rotate"][data-degrees="90"]')?.disabled === false`,
+    "multi-transform precision controls",
+  );
+  const precisionBoundsBeforeMove = await evaluate(`Object.fromEntries(
+    [...document.querySelectorAll("[data-multi-transform-property]")]
+      .map((input) => [input.dataset.multiTransformProperty, Number(input.value)])
+  )`);
+  const precisionMoveX = precisionBoundsBeforeMove.x + 37;
+  await evaluate(`
+    (() => {
+      const input = document.querySelector('[data-multi-transform-property="x"]');
+      input.value = ${precisionMoveX};
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    })()
+  `);
+  await waitFor(
+    `Math.abs(Number(document.querySelector('[data-multi-transform-property="x"]')?.value) - ${precisionMoveX}) < 0.2 &&
+     document.querySelector("#saveState").textContent === "Saved locally"`,
+    "exact multi-selection position",
+  );
+  const movedGeometry = [];
+  for (const index of rotatedGeometry.keys()) movedGeometry.push(await readGeometryByLayer(index));
+  if (movedGeometry.some((geometry, index) =>
+    Math.abs(geometry.x - rotatedGeometry[index].x - 37) > 0.2 ||
+    Math.abs(geometry.y - rotatedGeometry[index].y) > 0.2 ||
+    Math.abs(geometry.rotation - rotatedGeometry[index].rotation) > 0.1)) {
+    throw new Error(`Exact multi-selection position validation failed: ${JSON.stringify({ rotatedGeometry, movedGeometry })}`);
+  }
+
+  await evaluate(`
+    [...document.querySelectorAll(".layer-row")].map((row) => row.dataset.layerId).forEach((id, index) => {
+      document.querySelector('[data-layer-id="' + id + '"]')
+        .dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: index > 0 }));
+    });
+    document.querySelector('[data-multi-transform-action="toggle-aspect"]')?.click();
+    true
+  `);
+  await waitFor(
+    `document.querySelector('[data-multi-transform-action="toggle-aspect"]')?.getAttribute("aria-pressed") === "true"`,
+    "multi-transform aspect ratio lock",
+  );
+  const precisionBoundsBeforeScale = await evaluate(`Object.fromEntries(
+    [...document.querySelectorAll("[data-multi-transform-property]")]
+      .map((input) => [input.dataset.multiTransformProperty, Number(input.value)])
+  )`);
+  const precisionScaleWidth = precisionBoundsBeforeScale.width * 1.25;
+  await evaluate(`
+    (() => {
+      const input = document.querySelector('[data-multi-transform-property="width"]');
+      input.value = ${precisionScaleWidth};
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    })()
+  `);
+  await waitFor(
+    `Math.abs(Number(document.querySelector('[data-multi-transform-property="width"]')?.value) - ${precisionScaleWidth}) < 0.3 &&
+     Math.abs(Number(document.querySelector('[data-multi-transform-property="height"]')?.value) - ${precisionBoundsBeforeScale.height * 1.25}) < 0.3 &&
+     document.querySelector("#saveState").textContent === "Saved locally"`,
+    "locked-ratio multi-selection size",
+  );
+  const scaledGeometry = [];
+  for (const index of movedGeometry.keys()) scaledGeometry.push(await readGeometryByLayer(index));
+  if (scaledGeometry.some((geometry, index) =>
+    Math.abs(geometry.width - movedGeometry[index].width * 1.25) > 0.3 ||
+    Math.abs(geometry.height - movedGeometry[index].height * 1.25) > 0.3 ||
+    Math.abs(geometry.rotation - 90) > 0.1)) {
+    throw new Error(`Locked-ratio multi-selection size validation failed: ${JSON.stringify({ movedGeometry, scaledGeometry })}`);
+  }
+
+  await evaluate(`
+    [...document.querySelectorAll(".layer-row")].map((row) => row.dataset.layerId).forEach((id, index) => {
+      document.querySelector('[data-layer-id="' + id + '"]')
+        .dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: index > 0 }));
+    });
+    document.querySelector('[data-multi-transform-action="rotate"][data-degrees="90"]')?.click();
+    true
+  `);
+  await waitFor(
+    `document.querySelector("#saveState").textContent === "Saved locally"`,
+    "quick multi-selection rotation",
+  );
+  const quickRotatedGeometry = [];
+  for (const index of scaledGeometry.keys()) quickRotatedGeometry.push(await readGeometryByLayer(index));
+  if (quickRotatedGeometry.some((geometry) => Math.abs(geometry.rotation - 180) > 0.1)) {
+    throw new Error(`Quick multi-selection rotation validation failed: ${JSON.stringify(quickRotatedGeometry)}`);
+  }
+  await evaluate(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true, bubbles: true })); true`);
+  const quickRotationUndo = await readGeometryByLayer(0);
+  if (Math.abs(quickRotationUndo.rotation - 90) > 0.1) {
+    throw new Error(`Quick multi-selection rotation undo failed: ${JSON.stringify(quickRotationUndo)}`);
+  }
+  await evaluate(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true, shiftKey: true, bubbles: true })); true`);
+  const quickRotationRedo = await readGeometryByLayer(0);
+  if (Math.abs(quickRotationRedo.rotation - 180) > 0.1) {
+    throw new Error(`Quick multi-selection rotation redo failed: ${JSON.stringify(quickRotationRedo)}`);
+  }
+  await waitFor(
+    `document.querySelector("#saveState").textContent === "Saved locally"`,
+    "precision multi-transform history autosave",
+  );
+
   const result = await evaluate(`({
     currentPage: document.querySelector("#currentPageName").textContent,
     pageCount: document.querySelectorAll(".page-list-row").length,
@@ -1286,7 +1554,20 @@ try {
   result.curves = reloadedCurveCount;
   result.layout = layoutState;
   result.documentVersion = storedDocumentVersion;
+  result.precisionTransform = {
+    movedBy: movedGeometry[0].x - rotatedGeometry[0].x,
+    scale: scaledGeometry[0].width / movedGeometry[0].width,
+    rotation: quickRotationRedo.rotation
+  };
   if (process.env.TSYAIKO_SCREENSHOT) {
+    await evaluate(`
+      [...document.querySelectorAll(".layer-row")].map((row) => row.dataset.layerId).forEach((id, index) => {
+        document.querySelector('[data-layer-id="' + id + '"]')
+          .dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: index > 0 }));
+      });
+      true
+    `);
+    await delay(150);
     const screenshot = await command("Page.captureScreenshot", { format: "png" });
     writeFileSync(process.env.TSYAIKO_SCREENSHOT, Buffer.from(screenshot.data, "base64"));
   }

@@ -5,6 +5,7 @@ import {
   getEffectiveOpacity,
   getNodeAABB,
   getNodesWithDescendants,
+  getTopLevelNodeIds,
   getVectorContours,
   getRenderableNodeIds,
   isCompositeNode,
@@ -27,6 +28,7 @@ import {
   renderBranchSignature,
   summarizeFrameProfiles,
 } from "./render-cache.js";
+import { combineTransformBounds } from "./transform.js";
 
 const HANDLE_SIZE = 8;
 const HANDLE_HIT_RADIUS = 8;
@@ -141,10 +143,15 @@ export class CanvasRenderer {
     }
 
     if (options.selection !== false) {
+      const selectedRootIds = new Set(getTopLevelNodeIds(document, [...selectedSet]));
       const selectedNodes = document.nodes.filter(
-        (node) => selectedSet.has(node.id) && isNodeEffectivelyVisible(document, node),
+        (node) => selectedRootIds.has(node.id) && isNodeEffectivelyVisible(document, node),
       );
       this.drawSelection(selectedNodes, camera, document, options.vectorEdit?.nodeId ?? null);
+    }
+
+    if (options.transformReadout) {
+      this.drawTransformReadout(options.transformReadout, camera);
     }
 
     if (options.vectorEdit) {
@@ -544,19 +551,35 @@ export class CanvasRenderer {
 
   captureRenderState(document, selectedIds, camera, options) {
     const selectedSet = new Set(options.selection === false ? [] : selectedIds);
+    const selectedRootIds = new Set(getTopLevelNodeIds(document, [...selectedSet]));
+    const selectedRoots = document.nodes.filter((node) => selectedRootIds.has(node.id));
+    const selectionWorldBounds = selectedRoots.length > 1
+      ? combineTransformBounds(selectedRoots.map(getNodeAABB))
+      : null;
+    const selectionScreenBounds = selectionWorldBounds
+      ? expandBounds({
+          x: selectionWorldBounds.x * camera.zoom + camera.x,
+          y: selectionWorldBounds.y * camera.zoom + camera.y,
+          width: selectionWorldBounds.width * camera.zoom,
+          height: selectionWorldBounds.height * camera.zoom,
+        }, 40)
+      : null;
     const nodes = new Map(document.nodes.map((node, index) => {
       const signatureNodes = isCompositeNode(node)
         ? getNodesWithDescendants(document, [node.id])
         : [node];
+      const nodeBounds = this.getNodeScreenBounds(node, camera);
       return [node.id, {
         signature: `${index}:${renderBranchSignature(signatureNodes)}`,
         bounds: selectedSet.has(node.id)
-          ? expandBounds(this.getNodeScreenBounds(node, camera), 40)
-          : this.getNodeScreenBounds(node, camera),
+          ? selectionScreenBounds
+            ? unionBounds(expandBounds(nodeBounds, 40), selectionScreenBounds)
+            : expandBounds(nodeBounds, 40)
+          : nodeBounds,
       }];
     }));
     const transient = Boolean(
-      options.guides?.length || options.marquee || options.penDraft || options.vectorEdit,
+      options.guides?.length || options.marquee || options.penDraft || options.vectorEdit || options.transformReadout,
     );
     return {
       nodes,
@@ -1016,14 +1039,30 @@ export class CanvasRenderer {
 
   drawSelection(nodes, camera, document = null, vectorEditId = null) {
     if (!nodes.length) return;
+    if (nodes.length === 1) {
+      const [node] = nodes;
+      this.drawSelectionOutline(
+        node,
+        camera,
+        node.id !== vectorEditId,
+        document ? isNodeEffectivelyLocked(document, node) : node.locked,
+      );
+      return;
+    }
     for (const node of nodes) {
       this.drawSelectionOutline(
         node,
         camera,
-        nodes.length === 1 && node.id !== vectorEditId,
+        false,
         document ? isNodeEffectivelyLocked(document, node) : node.locked,
       );
     }
+    const bounds = combineTransformBounds(nodes.map(getNodeAABB));
+    if (!bounds) return;
+    const locked = document
+      ? nodes.some((node) => isNodeEffectivelyLocked(document, node))
+      : nodes.some((node) => node.locked);
+    this.drawSelectionOutline({ ...bounds, rotation: 0, locked }, camera, true, locked);
   }
 
   drawVectorEdit(node, camera, editState = {}) {
@@ -1196,6 +1235,28 @@ export class CanvasRenderer {
     context.textAlign = "center";
     context.textBaseline = "middle";
     context.fillText(label, bottom.x, y + 9);
+    context.restore();
+  }
+
+  drawTransformReadout(readout, camera) {
+    if (!readout?.point || !Number.isFinite(readout.degrees)) return;
+    const context = this.context;
+    const point = this.worldToScreen(readout.point, camera);
+    const degrees = Math.round(readout.degrees * 10) / 10;
+    const label = `Δ ${degrees > 0 ? "+" : ""}${degrees}°`;
+    context.save();
+    context.font = "600 11px Inter, ui-sans-serif, sans-serif";
+    const labelWidth = context.measureText(label).width + 12;
+    const x = Math.min(Math.max(4, point.x + 12), Math.max(4, this.width - labelWidth - 4));
+    const y = Math.min(Math.max(4, point.y + 12), Math.max(4, this.height - 24));
+    context.fillStyle = "rgba(124, 58, 237, 0.96)";
+    context.beginPath();
+    context.roundRect(x, y, labelWidth, 20, 5);
+    context.fill();
+    context.fillStyle = "#ffffff";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillText(label, x + labelWidth / 2, y + 10);
     context.restore();
   }
 
@@ -1384,10 +1445,17 @@ export class CanvasRenderer {
     }
 
     for (const [handle, [xRatio, yRatio]] of Object.entries(HANDLE_POINTS)) {
+      if ((width < 34 || height < 34) && ["n", "e", "s", "w"].includes(handle)) continue;
       const point = { x: width * xRatio, y: height * yRatio };
       if (distance(localScreenPoint, point) <= HANDLE_HIT_RADIUS) return handle;
     }
     return null;
+  }
+
+  getSelectionHandleAt(screenPoint, nodes, camera) {
+    const bounds = combineTransformBounds(nodes.map(getNodeAABB));
+    if (!bounds) return null;
+    return this.getHandleAt(screenPoint, { ...bounds, rotation: 0, locked: false }, camera);
   }
 
   worldToScreen(point, camera) {
