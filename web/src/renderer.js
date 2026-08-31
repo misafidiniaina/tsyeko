@@ -29,13 +29,17 @@ import {
   summarizeFrameProfiles,
 } from "./render-cache.js";
 import { combineTransformBounds } from "./transform.js";
+import { GUIDE_AXES, rulerStep } from "./canvas-aids.js";
 
 const HANDLE_SIZE = 8;
 const HANDLE_HIT_RADIUS = 8;
 const ROTATION_HANDLE_OFFSET = 25;
+const PAGE_GUIDE_HIT_RADIUS = 6;
 const MAX_LOCAL_SURFACE_PIXELS = 16_777_216;
 const PROFILE_HISTORY_LIMIT = 120;
 const imageCache = new Map();
+
+export const CANVAS_RULER_SIZE = 24;
 
 const HANDLE_POINTS = Object.freeze({
   nw: [0, 0],
@@ -119,7 +123,7 @@ export class CanvasRenderer {
     context.fillRect(0, 0, this.width, this.height);
 
     if (options.grid !== false) {
-      this.drawGrid(camera);
+      this.drawGrid(camera, options.gridSize);
     }
 
     const idSet = options.ids
@@ -128,6 +132,14 @@ export class CanvasRenderer {
     const sceneOptions = { ...options, idSet };
     for (const node of getChildNodes(document)) {
       this.drawSceneNode(document, node, camera, sceneOptions);
+    }
+
+    if (options.pageGuides?.length) {
+      this.drawPageGuides(options.pageGuides, camera, {
+        activeGuideId: options.activeGuideId,
+        removing: options.activeGuideRemoving,
+        rulersVisible: options.rulers === true,
+      });
     }
 
     if (options.guides?.length) {
@@ -159,6 +171,9 @@ export class CanvasRenderer {
       if (vector?.type === NODE_TYPES.VECTOR && isNodeEffectivelyVisible(document, vector)) {
         this.drawVectorEdit(vector, camera, options.vectorEdit);
       }
+    }
+    if (options.rulers === true) {
+      this.drawRulers(camera, options.pageGuides ?? [], options.activeGuideId);
     }
     if (!dirtyPlan.full) context.restore();
     this.finishFrameProfile(startedAt, options);
@@ -579,7 +594,8 @@ export class CanvasRenderer {
       }];
     }));
     const transient = Boolean(
-      options.guides?.length || options.marquee || options.penDraft || options.vectorEdit || options.transformReadout,
+      options.guides?.length || options.marquee || options.penDraft || options.vectorEdit ||
+      options.transformReadout || options.activeGuideId,
     );
     return {
       nodes,
@@ -592,6 +608,9 @@ export class CanvasRenderer {
         pixelRatio: this.pixelRatio,
         background: options.background ?? document.background ?? "#101114",
         grid: options.grid !== false,
+        gridSize: options.gridSize ?? null,
+        rulers: options.rulers === true,
+        pageGuides: options.pageGuides ?? null,
         ids: options.ids ?? null,
         editingId: options.editingId ?? null,
         frameLabels: options.frameLabels !== false,
@@ -719,11 +738,10 @@ export class CanvasRenderer {
     }
   }
 
-  drawGrid(camera) {
+  drawGrid(camera, requestedSize = 16) {
     const context = this.context;
-    let worldStep = 16;
-    while (worldStep * camera.zoom < 12) worldStep *= 2;
-    while (worldStep * camera.zoom > 32) worldStep /= 2;
+    let worldStep = Math.max(1, Number(requestedSize) || 16);
+    while (worldStep * camera.zoom < 10) worldStep *= 2;
     const step = worldStep * camera.zoom;
     const offsetX = modulo(camera.x, step);
     const offsetY = modulo(camera.y, step);
@@ -735,6 +753,151 @@ export class CanvasRenderer {
         context.fillRect(Math.round(x), Math.round(y), 1, 1);
       }
     }
+    context.restore();
+  }
+
+  drawPageGuides(guides, camera, options = {}) {
+    const context = this.context;
+    const rulerInset = options.rulersVisible ? CANVAS_RULER_SIZE : 0;
+    for (const guide of guides) {
+      const active = guide.id === options.activeGuideId;
+      context.save();
+      context.strokeStyle = options.removing && active
+        ? "rgba(248, 113, 113, 0.95)"
+        : active
+          ? "rgba(147, 197, 253, 1)"
+          : "rgba(96, 165, 250, 0.82)";
+      context.lineWidth = active ? 1.5 : 1;
+      context.setLineDash(options.removing && active ? [5, 4] : []);
+      context.beginPath();
+      if (guide.axis === GUIDE_AXES.VERTICAL) {
+        const x = this.worldToScreen({ x: guide.position, y: 0 }, camera).x;
+        context.moveTo(x, rulerInset);
+        context.lineTo(x, this.height);
+      } else {
+        const y = this.worldToScreen({ x: 0, y: guide.position }, camera).y;
+        context.moveTo(rulerInset, y);
+        context.lineTo(this.width, y);
+      }
+      context.stroke();
+      context.restore();
+      if (active && !options.removing) this.drawPageGuideReadout(guide, camera, rulerInset);
+    }
+  }
+
+  drawPageGuideReadout(guide, camera, rulerInset) {
+    const context = this.context;
+    const label = `${guide.axis.toUpperCase()} ${formatGuideMeasurement(guide.position)}`;
+    const coordinate = guide.axis === GUIDE_AXES.VERTICAL
+      ? this.worldToScreen({ x: guide.position, y: 0 }, camera).x
+      : this.worldToScreen({ x: 0, y: guide.position }, camera).y;
+    context.save();
+    context.font = "600 10px Inter, ui-sans-serif, sans-serif";
+    const width = context.measureText(label).width + 10;
+    const x = guide.axis === GUIDE_AXES.VERTICAL
+      ? Math.min(Math.max(rulerInset + 4, coordinate + 7), Math.max(4, this.width - width - 4))
+      : rulerInset + 6;
+    const y = guide.axis === GUIDE_AXES.VERTICAL
+      ? rulerInset + 6
+      : Math.min(Math.max(rulerInset + 4, coordinate + 7), Math.max(4, this.height - 22));
+    context.fillStyle = "rgba(37, 99, 235, 0.96)";
+    context.beginPath();
+    context.roundRect(x, y, width, 18, 4);
+    context.fill();
+    context.fillStyle = "#ffffff";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillText(label, x + width / 2, y + 9);
+    context.restore();
+  }
+
+  drawRulers(camera, guides = [], activeGuideId = null) {
+    const context = this.context;
+    const size = CANVAS_RULER_SIZE;
+    const majorStep = rulerStep(camera.zoom);
+    const minorStep = majorStep / 5;
+    const minimumX = (size - camera.x) / camera.zoom;
+    const maximumX = (this.width - camera.x) / camera.zoom;
+    const minimumY = (size - camera.y) / camera.zoom;
+    const maximumY = (this.height - camera.y) / camera.zoom;
+
+    context.save();
+    context.fillStyle = "rgba(30, 31, 34, 0.97)";
+    context.fillRect(0, 0, this.width, size);
+    context.fillRect(0, 0, size, this.height);
+    context.strokeStyle = "rgba(92, 94, 101, 0.75)";
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(0, size - 0.5);
+    context.lineTo(this.width, size - 0.5);
+    context.moveTo(size - 0.5, 0);
+    context.lineTo(size - 0.5, this.height);
+    context.stroke();
+
+    context.strokeStyle = "rgba(171, 173, 181, 0.68)";
+    context.fillStyle = "rgba(214, 216, 224, 0.82)";
+    context.font = "500 9px Inter, ui-sans-serif, sans-serif";
+    context.textBaseline = "top";
+    let iterations = 0;
+    for (let value = Math.floor(minimumX / minorStep) * minorStep; value <= maximumX && iterations < 2_000; value += minorStep, iterations += 1) {
+      const x = value * camera.zoom + camera.x;
+      if (x < size - 0.5) continue;
+      const major = isRulerMajorTick(value, majorStep);
+      context.beginPath();
+      context.moveTo(Math.round(x) + 0.5, major ? 13 : 19);
+      context.lineTo(Math.round(x) + 0.5, size);
+      context.stroke();
+      if (major) context.fillText(formatGuideMeasurement(value), x + 3, 2);
+    }
+
+    iterations = 0;
+    for (let value = Math.floor(minimumY / minorStep) * minorStep; value <= maximumY && iterations < 2_000; value += minorStep, iterations += 1) {
+      const y = value * camera.zoom + camera.y;
+      if (y < size - 0.5) continue;
+      const major = isRulerMajorTick(value, majorStep);
+      context.beginPath();
+      context.moveTo(major ? 13 : 19, Math.round(y) + 0.5);
+      context.lineTo(size, Math.round(y) + 0.5);
+      context.stroke();
+      if (major) {
+        context.save();
+        context.translate(2, y - 3);
+        context.rotate(-Math.PI / 2);
+        context.fillText(formatGuideMeasurement(value), 0, 0);
+        context.restore();
+      }
+    }
+
+    for (const guide of guides) {
+      const active = guide.id === activeGuideId;
+      context.fillStyle = active ? "#bfdbfe" : "#60a5fa";
+      context.beginPath();
+      if (guide.axis === GUIDE_AXES.VERTICAL) {
+        const x = guide.position * camera.zoom + camera.x;
+        if (x < size || x > this.width) continue;
+        context.moveTo(x - 4, size - 1);
+        context.lineTo(x + 4, size - 1);
+        context.lineTo(x, size + 5);
+      } else {
+        const y = guide.position * camera.zoom + camera.y;
+        if (y < size || y > this.height) continue;
+        context.moveTo(size - 1, y - 4);
+        context.lineTo(size - 1, y + 4);
+        context.lineTo(size + 5, y);
+      }
+      context.closePath();
+      context.fill();
+    }
+
+    context.fillStyle = "#25262a";
+    context.fillRect(0, 0, size, size);
+    context.strokeStyle = "rgba(92, 94, 101, 0.9)";
+    context.beginPath();
+    context.moveTo(7, 12);
+    context.lineTo(17, 12);
+    context.moveTo(12, 7);
+    context.lineTo(12, 17);
+    context.stroke();
     context.restore();
   }
 
@@ -1458,6 +1621,17 @@ export class CanvasRenderer {
     return this.getHandleAt(screenPoint, { ...bounds, rotation: 0, locked: false }, camera);
   }
 
+  getPageGuideAt(screenPoint, guides, camera) {
+    for (const guide of [...(guides ?? [])].reverse()) {
+      const coordinate = guide.axis === GUIDE_AXES.VERTICAL
+        ? this.worldToScreen({ x: guide.position, y: 0 }, camera).x
+        : this.worldToScreen({ x: 0, y: guide.position }, camera).y;
+      const pointerCoordinate = guide.axis === GUIDE_AXES.VERTICAL ? screenPoint.x : screenPoint.y;
+      if (Math.abs(pointerCoordinate - coordinate) <= PAGE_GUIDE_HIT_RADIUS) return guide;
+    }
+    return null;
+  }
+
   worldToScreen(point, camera) {
     return {
       x: point.x * camera.zoom + camera.x,
@@ -1976,6 +2150,11 @@ function monotonicNow() {
 function formatGuideMeasurement(value) {
   const rounded = Math.abs(value) < 0.05 ? 0 : Math.round(value * 10) / 10;
   return String(rounded).replace("-", "−");
+}
+
+function isRulerMajorTick(value, step) {
+  const ratio = value / step;
+  return Math.abs(ratio - Math.round(ratio)) < 0.0001;
 }
 
 function subpixelPhase(value, pixelRatio) {

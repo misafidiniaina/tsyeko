@@ -2,8 +2,9 @@ import {
   getVectorControlBounds,
   VECTOR_HANDLE_MODES,
 } from "./vector.js";
+import { DEFAULT_GRID_SIZE, normalizeGuides } from "./canvas-aids.js";
 
-export const DOCUMENT_VERSION = 11;
+export const DOCUMENT_VERSION = 12;
 const MAX_HIERARCHY_DEPTH = 256;
 
 export const COMPONENT_ROLES = Object.freeze({
@@ -326,6 +327,12 @@ export function createPage(name = "Untitled page", overrides = {}) {
     id: makeId("page"),
     name,
     background: "#101114",
+    rulersVisible: true,
+    guidesVisible: true,
+    gridVisible: true,
+    gridSize: DEFAULT_GRID_SIZE,
+    snapToGrid: false,
+    guides: [],
     nodes: [],
     ...overrides,
   });
@@ -502,6 +509,12 @@ export function normalizePage(input, fallbackName = "Untitled page", fallbackBac
     id: cleanString(page.id, makeId("page"), 160),
     name: cleanString(page.name, fallbackName, 120),
     background: cleanColor(page.background, fallbackBackground),
+    rulersVisible: page.rulersVisible !== false,
+    guidesVisible: page.guidesVisible !== false,
+    gridVisible: page.gridVisible !== false,
+    gridSize: finiteNumber(page.gridSize, DEFAULT_GRID_SIZE, 1, 10_000),
+    snapToGrid: page.snapToGrid === true,
+    guides: normalizeGuides(page.guides, () => makeId("guide")),
     nodes: Array.isArray(page.nodes)
       ? page.nodes
           .filter((node) => node && Object.values(NODE_TYPES).includes(node.type))
@@ -808,6 +821,7 @@ export function duplicatePage(document, id) {
     ...cloneValue(source),
     id: makeId("page"),
     name: `${source.name} copy`,
+    guides: source.guides.map((guide) => ({ ...cloneValue(guide), id: makeId("guide") })),
     nodes: source.nodes.map((node) => ({
       ...cloneValue(node),
       id: idMap.get(node.id),

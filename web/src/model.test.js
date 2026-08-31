@@ -49,7 +49,7 @@ test("migrates v1 documents and clamps untrusted geometry", () => {
   });
 
   assert.equal(document.name, "Imported");
-  assert.equal(document.version, 11);
+  assert.equal(document.version, 12);
   assert.equal(document.pages.length, 1);
   assert.equal(document.pages[0].nodes[0].x, 12);
   assert.equal(document.pages[0].nodes[0].width, 1);
@@ -74,6 +74,43 @@ test("normalizes multi-page documents and repairs duplicate ids", () => {
   assert.notEqual(document.pages[0].id, document.pages[1].id);
   assert.notEqual(document.pages[0].nodes[0].id, document.pages[1].nodes[0].id);
   assert.equal(document.pages[1].nodes[1].parentId, document.pages[1].nodes[0].id);
+});
+
+test("migrates and duplicates persistent page canvas aids", () => {
+  const document = normalizeDocument({
+    version: 11,
+    pages: [{
+      id: "page",
+      name: "Guides",
+      rulersVisible: false,
+      guidesVisible: true,
+      gridVisible: false,
+      gridSize: "24",
+      snapToGrid: true,
+      guides: [
+        { id: "guide-a", axis: "x", position: "120.5" },
+        { id: "guide-b", axis: "y", position: -80 },
+        { id: "bad", axis: "diagonal", position: 20 },
+      ],
+      nodes: [],
+    }],
+  });
+  const page = getFirstPage(document);
+
+  assert.equal(document.version, 12);
+  assert.equal(page.rulersVisible, false);
+  assert.equal(page.guidesVisible, true);
+  assert.equal(page.gridVisible, false);
+  assert.equal(page.gridSize, 24);
+  assert.equal(page.snapToGrid, true);
+  assert.deepEqual(page.guides, [
+    { id: "guide-a", axis: "x", position: 120.5 },
+    { id: "guide-b", axis: "y", position: -80 },
+  ]);
+
+  const copy = duplicatePage(document, page.id);
+  assert.deepEqual(copy.guides.map((guide) => [guide.axis, guide.position]), [["x", 120.5], ["y", -80]]);
+  assert.notDeepEqual(copy.guides.map((guide) => guide.id), page.guides.map((guide) => guide.id));
 });
 
 test("hit testing accounts for rotation", () => {
@@ -253,7 +290,7 @@ test("migrates and sanitizes v7 Boolean and mask containers", () => {
   });
   const page = getFirstPage(document);
 
-  assert.equal(document.version, 11);
+  assert.equal(document.version, 12);
   assert.equal(page.nodes.find((node) => node.id === "boolean").booleanOperation, "union");
   assert.equal(page.nodes.find((node) => node.id === "shape").parentId, "boolean");
   assert.equal(page.nodes.find((node) => node.id === "content").parentId, "mask");
@@ -358,7 +395,7 @@ test("normalizes gradient paints and bounded shadow effects", () => {
   assert.deepEqual(getNodeVisualBounds(node), { x: -5, y: 8, width: 140, height: 90 });
 });
 
-test("migrates v10 documents into v11 paint, effect, contour, rich-text, and asset records", () => {
+test("migrates v10 documents into v12 paint, effect, contour, rich-text, asset, and canvas-aid records", () => {
   const hash = "a".repeat(64);
   const document = normalizeDocument({
     version: 10,
@@ -409,7 +446,7 @@ test("migrates v10 documents into v11 paint, effect, contour, rich-text, and ass
   });
   const [painted, copy, compound] = getFirstPage(document).nodes;
 
-  assert.equal(document.version, 11);
+  assert.equal(document.version, 12);
   assert.equal(document.assets[0].kind, "font");
   assert.equal(document.assets[0].fontFamily, "Studio");
   assert.equal(painted.fills.length, 2);
@@ -472,7 +509,7 @@ test("migrates implicit frame shadows into explicit v6 effects", () => {
   });
   const frame = getFirstPage(document).nodes[0];
 
-  assert.equal(document.version, 11);
+  assert.equal(document.version, 12);
   assert.equal(frame.fillType, "solid");
   assert.equal(frame.shadow.enabled, true);
   assert.equal(frame.shadow.blur, 16);
@@ -611,7 +648,7 @@ test("normalizes vector paths and rejects invalid point data", () => {
   });
   const vector = getFirstPage(document).nodes[0];
 
-  assert.equal(document.version, 11);
+  assert.equal(document.version, 12);
   assert.equal(vector.type, NODE_TYPES.VECTOR);
   assert.equal(vector.vectorPoints.length, 2);
   assert.equal(vector.vectorClosed, false);
@@ -702,7 +739,7 @@ test("migrates v5 corner anchors and sanitizes Bézier handles", () => {
   const first = vector.vectorPoints[0];
   const second = vector.vectorPoints[1];
 
-  assert.equal(document.version, 11);
+  assert.equal(document.version, 12);
   assert.equal(first.handleMode, "mirrored");
   assert.ok(first.in && first.out);
   assert.equal(first.in.x - first.x, -(first.out.x - first.x));
@@ -770,7 +807,7 @@ test("exports cubic Bézier controls as SVG path commands", () => {
   assert.doesNotMatch(svg, /d="M 0 40 L 100 40"/);
 });
 
-test("v11 imports accept a compound vector whose primary geometry lives in contours", () => {
+test("v11 imports migrate compound vectors whose primary geometry lives in contours", () => {
   const document = normalizeDocument({
     version: 11,
     pages: [{

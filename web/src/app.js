@@ -32,6 +32,7 @@ import {
   LAYOUT_POSITIONING,
   LAYOUT_SIZING,
   maskNodes,
+  makeId,
   NODE_TYPES,
   PAINT_TYPES,
   normalizeDocument,
@@ -114,6 +115,14 @@ import {
 } from "./hosted.js";
 import { loadWorkspace, saveWorkspace } from "./persistence.js";
 import {
+  closestGridSnap,
+  createGuide,
+  GUIDE_AXES,
+  MAX_PAGE_GUIDES,
+  snapGuidePosition,
+} from "./canvas-aids.js";
+import {
+  CANVAS_RULER_SIZE,
   CanvasRenderer,
   preloadDocumentImages,
   renderDocumentToCanvas,
@@ -1073,6 +1082,7 @@ function bindMenus() {
     if (action === "undo") undo();
     if (action === "redo") redo();
     if (action === "fit") fitToContent();
+    if (action === "rulers") togglePageRulers();
     if (action === "performance") {
       const profile = renderer.getPerformanceStats();
       const history = profile.history;
@@ -1084,7 +1094,7 @@ function bindMenus() {
       );
     }
     if (action === "shortcuts") {
-      showToast("V select · P pen · Enter edit · ⌘G group · ⌘⌥K component · ⌘⌥U/S/I/X Boolean · ⌘⌥M mask · ⌘D duplicate");
+      showToast("V select · P pen · Enter edit · Shift+R rulers · ⌘G group · ⌘⌥K component · ⌘⌥U/S/I/X Boolean · ⌘⌥M mask · ⌘D duplicate");
     }
   });
 
@@ -1122,6 +1132,12 @@ function bindKeyboard() {
     if (isTypingTarget(event.target)) return;
     const command = event.metaKey || event.ctrlKey;
     const key = event.key.toLowerCase();
+
+    if (!command && !event.altKey && event.shiftKey && event.code === "KeyR") {
+      event.preventDefault();
+      togglePageRulers();
+      return;
+    }
 
     if (command && key === "z") {
       event.preventDefault();
@@ -1278,6 +1294,11 @@ function bindKeyboard() {
   window.addEventListener("blur", () => {
     spacePressed = false;
     if (interaction?.type === "pan") interaction = null;
+    if (interaction?.type === "guide") {
+      cancelGuideInteraction();
+      interaction = null;
+      refreshUI();
+    }
     updateCanvasCursor();
   });
 }
@@ -1301,6 +1322,22 @@ function onPointerDown(event) {
     capturePointer(event);
     updateCanvasCursor("grabbing");
     return;
+  }
+
+  if (event.button === 0 && currentPage().rulersVisible) {
+    const rulerAxis = guideAxisFromRuler(screen);
+    if (rulerAxis) {
+      startGuideInteraction(event, rulerAxis, screen, world);
+      return;
+    }
+  }
+
+  if (event.button === 0 && activeTool === "select" && currentPage().guidesVisible) {
+    const guide = renderer.getPageGuideAt(screen, currentPage().guides, camera);
+    if (guide) {
+      startGuideInteraction(event, guide.axis, screen, world, guide);
+      return;
+    }
   }
 
   if (activeTool === "pen") {
@@ -1510,6 +1547,12 @@ function onPointerMove(event) {
   }
   if (interaction.pointerId !== event.pointerId) return;
 
+  if (interaction.type === "guide") {
+    updateGuideInteraction(screen, renderer.screenToWorld(screen, camera), event);
+    requestRender();
+    return;
+  }
+
   if (interaction.type === "pan") {
     camera.x = interaction.camera.x + screen.x - interaction.start.x;
     camera.y = interaction.camera.y + screen.y - interaction.start.y;
@@ -1534,6 +1577,15 @@ function onPointerMove(event) {
 function onPointerUp(event) {
   if (!interaction || interaction.pointerId !== event.pointerId) return;
   const completedType = interaction.type;
+
+  if (completedType === "guide") {
+    completeGuideInteraction();
+    releasePointer(event);
+    interaction = null;
+    updateCanvasCursor();
+    refreshUI();
+    return;
+  }
 
   if (completedType === "draw") {
     const node = getNode(currentPage(), interaction.nodeId);
@@ -1576,6 +1628,14 @@ function onPointerUp(event) {
 
 function onPointerCancel(event) {
   if (!interaction || interaction.pointerId !== event.pointerId) return;
+  if (interaction.type === "guide") {
+    cancelGuideInteraction();
+    releasePointer(event);
+    interaction = null;
+    updateCanvasCursor();
+    refreshUI();
+    return;
+  }
   if (interaction.type === "draw") {
     currentPage().nodes = currentPage().nodes.filter((node) => node.id !== interaction.nodeId);
     selectedIds = [];
@@ -1617,6 +1677,15 @@ function onDoubleClick(event) {
     return;
   }
   const screen = eventPoint(event);
+  if (currentPage().guidesVisible) {
+    const guide = renderer.getPageGuideAt(screen, currentPage().guides, camera);
+    if (guide) {
+      currentPage().guides = currentPage().guides.filter((item) => item.id !== guide.id);
+      commitDocument("Remove guide");
+      showToast("Guide removed");
+      return;
+    }
+  }
   const node = renderer.hitTest(currentPage(), screen, camera);
   if (vectorEdit && node?.id === vectorEdit.nodeId && node.type === NODE_TYPES.VECTOR) {
     const pointIndex = renderer.getVectorPointAt(screen, node, camera);
@@ -1902,6 +1971,110 @@ function updateMove(world, event) {
 
   guides = event.altKey ? [] : snapSelection(interaction.nodes.map((item) => item.id));
   syncGroupBounds(currentPage());
+}
+
+function guideAxisFromRuler(screen) {
+  if (screen.y >= 0 && screen.y <= CANVAS_RULER_SIZE && screen.x > CANVAS_RULER_SIZE) {
+    return GUIDE_AXES.HORIZONTAL;
+  }
+  if (screen.x >= 0 && screen.x <= CANVAS_RULER_SIZE && screen.y > CANVAS_RULER_SIZE) {
+    return GUIDE_AXES.VERTICAL;
+  }
+  return null;
+}
+
+function startGuideInteraction(event, axis, screen, world, existingGuide = null) {
+  const page = currentPage();
+  if (!existingGuide && page.guides.length >= MAX_PAGE_GUIDES) {
+    showToast(`A page can contain up to ${MAX_PAGE_GUIDES} guides.`);
+    return;
+  }
+  const guide = existingGuide ?? createGuide(axis, world[axis], makeId("guide"));
+  const originalGuidesVisible = page.guidesVisible;
+  if (!existingGuide) {
+    page.guidesVisible = true;
+    page.guides.push(guide);
+  }
+  interaction = {
+    type: "guide",
+    pointerId: event.pointerId,
+    guideId: guide.id,
+    axis,
+    created: !existingGuide,
+    originalGuidesVisible,
+    originalPosition: existingGuide?.position ?? null,
+    startScreen: screen,
+    currentScreen: screen,
+    remove: !existingGuide,
+  };
+  updateGuideInteraction(screen, world, event);
+  capturePointer(event);
+  setCanvasGuideCursor(axis);
+  requestRender();
+}
+
+function updateGuideInteraction(screen, world, event) {
+  const page = currentPage();
+  const guide = page.guides.find((item) => item.id === interaction.guideId);
+  if (!guide) return;
+  const rawPosition = world[interaction.axis];
+  const references = page.nodes
+    .filter((node) => isNodeEffectivelyVisible(page, node))
+    .flatMap((node) => edgeValues(getNodeAABB(node), interaction.axis));
+  references.push(...page.guides
+    .filter((item) => item.id !== guide.id && item.axis === interaction.axis)
+    .map((item) => item.position));
+  if (page.snapToGrid) {
+    references.push(Math.round(rawPosition / page.gridSize) * page.gridSize);
+  }
+  guide.position = clamp(
+    event.altKey
+      ? Math.round(rawPosition * 10) / 10
+      : snapGuidePosition(rawPosition, references, SNAP_DISTANCE_PX / camera.zoom),
+    -1_000_000,
+    1_000_000,
+  );
+  interaction.currentScreen = screen;
+  interaction.remove = isGuideRemovalZone(screen, interaction.axis);
+  setCanvasGuideCursor(interaction.axis);
+}
+
+function completeGuideInteraction() {
+  const page = currentPage();
+  const state = interaction;
+  const guide = page.guides.find((item) => item.id === state.guideId);
+  if (!guide) return;
+  if (state.remove) {
+    page.guides = page.guides.filter((item) => item.id !== state.guideId);
+    if (state.created) page.guidesVisible = state.originalGuidesVisible;
+    else commitDocument("Remove guide");
+    return;
+  }
+  if (state.created) {
+    commitDocument("Add guide");
+    return;
+  }
+  if (Math.abs(guide.position - state.originalPosition) >= 0.0001) {
+    commitDocument("Move guide");
+  }
+}
+
+function cancelGuideInteraction() {
+  const page = currentPage();
+  if (interaction.created) {
+    page.guides = page.guides.filter((item) => item.id !== interaction.guideId);
+    page.guidesVisible = interaction.originalGuidesVisible;
+    return;
+  }
+  const guide = page.guides.find((item) => item.id === interaction.guideId);
+  if (guide) guide.position = interaction.originalPosition;
+}
+
+function isGuideRemovalZone(screen, axis) {
+  if (screen.x < 0 || screen.y < 0 || screen.x > renderer.width || screen.y > renderer.height) return true;
+  return axis === GUIDE_AXES.VERTICAL
+    ? screen.x <= CANVAS_RULER_SIZE
+    : screen.y <= CANVAS_RULER_SIZE;
 }
 
 function selectedTransformRootNodes(page = currentPage()) {
@@ -2373,19 +2546,30 @@ function updateMarquee(screen) {
 }
 
 function snapSelection(ids) {
+  const page = currentPage();
   const idSet = new Set(ids);
-  const selected = currentPage().nodes.filter((node) => idSet.has(node.id));
-  const references = currentPage().nodes.filter((node) => isNodeEffectivelyVisible(currentPage(), node) && !idSet.has(node.id));
-  if (!selected.length || !references.length) return [];
+  const selected = page.nodes.filter((node) => idSet.has(node.id));
+  const references = page.nodes.filter((node) => isNodeEffectivelyVisible(page, node) && !idSet.has(node.id));
+  if (!selected.length) return [];
 
   const selectionBounds = combinedBounds(selected.map(getNodeAABB));
   const xTargets = edgeValues(selectionBounds, "x");
   const yTargets = edgeValues(selectionBounds, "y");
   const referenceX = references.flatMap((node) => edgeValues(getNodeAABB(node), "x"));
   const referenceY = references.flatMap((node) => edgeValues(getNodeAABB(node), "y"));
+  if (page.guidesVisible) {
+    referenceX.push(...page.guides.filter((guide) => guide.axis === GUIDE_AXES.VERTICAL).map((guide) => guide.position));
+    referenceY.push(...page.guides.filter((guide) => guide.axis === GUIDE_AXES.HORIZONTAL).map((guide) => guide.position));
+  }
   const threshold = SNAP_DISTANCE_PX / camera.zoom;
-  const xSnap = closestSnap(xTargets, referenceX, threshold);
-  const ySnap = closestSnap(yTargets, referenceY, threshold);
+  const xSnap = closestSelectionSnap(
+    closestSnap(xTargets, referenceX, threshold),
+    page.snapToGrid ? closestGridSnap(xTargets, page.gridSize, threshold) : null,
+  );
+  const ySnap = closestSelectionSnap(
+    closestSnap(yTargets, referenceY, threshold),
+    page.snapToGrid ? closestGridSnap(yTargets, page.gridSize, threshold) : null,
+  );
 
   if (xSnap) selected.forEach((node) => { node.x += xSnap.delta; });
   if (ySnap) selected.forEach((node) => { node.y += ySnap.delta; });
@@ -2412,6 +2596,10 @@ function updateCanvasCursor(forced = null) {
     elements.canvas.dataset.cursor = forced;
     return;
   }
+  if (interaction?.type === "guide") {
+    setCanvasGuideCursor(interaction.axis);
+    return;
+  }
   if (interaction?.type === "pan") elements.canvas.dataset.cursor = "grabbing";
   else if (spacePressed || activeTool === "hand") elements.canvas.dataset.cursor = "grab";
   else if (["frame", "rectangle", "ellipse", "pen"].includes(activeTool)) elements.canvas.dataset.cursor = "crosshair";
@@ -2420,8 +2608,29 @@ function updateCanvasCursor(forced = null) {
   elements.canvas.style.cursor = "";
 }
 
+function setCanvasGuideCursor(axis) {
+  elements.canvas.dataset.cursor = "";
+  elements.canvas.style.cursor = axis === GUIDE_AXES.VERTICAL ? "ew-resize" : "ns-resize";
+}
+
 function updateHoverCursor(screen) {
-  if (activeTool !== "select" || spacePressed) {
+  if (spacePressed || activeTool === "hand") {
+    updateCanvasCursor();
+    return;
+  }
+  const rulerAxis = currentPage().rulersVisible ? guideAxisFromRuler(screen) : null;
+  if (rulerAxis) {
+    setCanvasGuideCursor(rulerAxis);
+    return;
+  }
+  if (activeTool === "select" && currentPage().guidesVisible) {
+    const guide = renderer.getPageGuideAt(screen, currentPage().guides, camera);
+    if (guide) {
+      setCanvasGuideCursor(guide.axis);
+      return;
+    }
+  }
+  if (activeTool !== "select") {
     updateCanvasCursor();
     return;
   }
@@ -3422,9 +3631,105 @@ function renderPages() {
     </div>`).join("");
 }
 
+function bindCanvasAidsInspector(page) {
+  elements.inspector.querySelectorAll("[data-canvas-aid-action]").forEach((button) => {
+    button.addEventListener("click", () => handleCanvasAidAction(page, button));
+  });
+  const gridSizeInput = elements.inspector.querySelector("[data-page-grid-size]");
+  gridSizeInput?.addEventListener("input", () => {
+    const value = Number.parseFloat(gridSizeInput.value);
+    if (!Number.isFinite(value)) return;
+    page.gridSize = clamp(value, 1, 10_000);
+    gridSizeInput.dataset.canvasAidChanged = "true";
+    liveDocumentChange();
+  });
+  gridSizeInput?.addEventListener("change", () => {
+    if (gridSizeInput.dataset.canvasAidChanged === "true") commitDocument("Change grid size");
+  });
+  elements.inspector.querySelectorAll("[data-page-guide-position]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const value = Number.parseFloat(input.value);
+      const guide = page.guides.find((item) => item.id === input.dataset.pageGuidePosition);
+      if (!guide || !Number.isFinite(value)) return;
+      guide.position = clamp(value, -1_000_000, 1_000_000);
+      input.dataset.canvasAidChanged = "true";
+      liveDocumentChange();
+    });
+    input.addEventListener("change", () => {
+      if (input.dataset.canvasAidChanged === "true") commitDocument("Move guide");
+    });
+  });
+}
+
+function handleCanvasAidAction(page, button) {
+  const action = button.dataset.canvasAidAction;
+  if (action === "toggle-rulers") {
+    togglePageRulers();
+    return;
+  }
+  if (action === "toggle-guides") {
+    page.guidesVisible = !page.guidesVisible;
+    commitDocument(page.guidesVisible ? "Show guides" : "Hide guides");
+    return;
+  }
+  if (action === "toggle-grid") {
+    page.gridVisible = !page.gridVisible;
+    commitDocument(page.gridVisible ? "Show grid" : "Hide grid");
+    return;
+  }
+  if (action === "toggle-grid-snap") {
+    page.snapToGrid = !page.snapToGrid;
+    if (page.snapToGrid) page.gridVisible = true;
+    commitDocument(page.snapToGrid ? "Enable grid snapping" : "Disable grid snapping");
+    return;
+  }
+  if (["add-vertical-guide", "add-horizontal-guide"].includes(action)) {
+    const axis = action === "add-vertical-guide" ? GUIDE_AXES.VERTICAL : GUIDE_AXES.HORIZONTAL;
+    addPageGuideAtViewportCenter(page, axis);
+    return;
+  }
+  if (action === "remove-guide") {
+    const previousLength = page.guides.length;
+    page.guides = page.guides.filter((guide) => guide.id !== button.dataset.guideId);
+    if (page.guides.length !== previousLength) commitDocument("Remove guide");
+    return;
+  }
+  if (action === "clear-guides" && page.guides.length) {
+    page.guides = [];
+    commitDocument("Clear guides");
+    showToast("All page guides cleared");
+  }
+}
+
+function togglePageRulers() {
+  const page = currentPage();
+  page.rulersVisible = !page.rulersVisible;
+  commitDocument(page.rulersVisible ? "Show rulers" : "Hide rulers");
+}
+
+function addPageGuideAtViewportCenter(page, axis) {
+  if (page.guides.length >= MAX_PAGE_GUIDES) {
+    showToast(`A page can contain up to ${MAX_PAGE_GUIDES} guides.`);
+    return;
+  }
+  const center = renderer.screenToWorld({
+    x: (CANVAS_RULER_SIZE + renderer.width) / 2,
+    y: (CANVAS_RULER_SIZE + renderer.height) / 2,
+  }, camera);
+  page.guidesVisible = true;
+  page.guides.push(createGuide(axis, center[axis], makeId("guide")));
+  commitDocument(axis === GUIDE_AXES.VERTICAL ? "Add vertical guide" : "Add horizontal guide");
+}
+
 function renderInspector() {
   if (!selectedIds.length) {
     const page = currentPage();
+    const visibleGuideRows = page.guides.slice(0, 24).map((guide) => `
+      <div class="page-guide-row" data-page-guide-id="${escapeAttribute(guide.id)}">
+        <span class="page-guide-axis" title="${guide.axis === GUIDE_AXES.VERTICAL ? "Vertical" : "Horizontal"} guide">${guide.axis === GUIDE_AXES.VERTICAL ? "V" : "H"}</span>
+        <label class="field"><span class="field-label">${guide.axis.toUpperCase()}</span><input type="number" step="0.1" data-page-guide-position="${escapeAttribute(guide.id)}" value="${formatNumber(guide.position)}" aria-label="${guide.axis === GUIDE_AXES.VERTICAL ? "Vertical" : "Horizontal"} guide position" /></label>
+        <button class="icon-button small" data-canvas-aid-action="remove-guide" data-guide-id="${escapeAttribute(guide.id)}" title="Remove guide" aria-label="Remove guide">×</button>
+      </div>`).join("");
     elements.inspector.innerHTML = `
       <div class="inspector-section">
         <p class="inspector-section-title">Canvas</p>
@@ -3434,10 +3739,36 @@ function renderInspector() {
           <div class="field"><span class="field-label">%</span><input value="100" disabled /></div>
         </div>
       </div>
+      <div class="inspector-section">
+        <p class="inspector-section-title">Canvas aids <span class="section-shortcut">Shift+R</span></p>
+        <div class="canvas-aid-toggle-grid">
+          <button class="icon-toggle ${page.rulersVisible ? "active" : ""}" data-canvas-aid-action="toggle-rulers" aria-pressed="${page.rulersVisible}">Rulers</button>
+          <button class="icon-toggle ${page.guidesVisible ? "active" : ""}" data-canvas-aid-action="toggle-guides" aria-pressed="${page.guidesVisible}">Guides</button>
+          <button class="icon-toggle ${page.gridVisible ? "active" : ""}" data-canvas-aid-action="toggle-grid" aria-pressed="${page.gridVisible}">Grid</button>
+        </div>
+        <div class="canvas-grid-controls">
+          <label class="field"><span class="field-label">Grid</span><input type="number" min="1" max="10000" step="1" data-page-grid-size value="${formatNumber(page.gridSize)}" aria-label="Grid size" /></label>
+          <button class="icon-toggle ${page.snapToGrid ? "active" : ""}" data-canvas-aid-action="toggle-grid-snap" aria-pressed="${page.snapToGrid}">Snap to grid</button>
+        </div>
+        <p class="inspector-hint">Drag from either ruler to create a guide. Hold Alt while dragging for free positioning.</p>
+      </div>
+      <div class="inspector-section">
+        <p class="inspector-section-title">Guides <span class="section-shortcut">${page.guides.length}</span></p>
+        <div class="guide-action-grid">
+          <button class="button button-quiet" data-canvas-aid-action="add-vertical-guide">+ Vertical</button>
+          <button class="button button-quiet" data-canvas-aid-action="add-horizontal-guide">+ Horizontal</button>
+        </div>
+        <div class="page-guide-list">
+          ${visibleGuideRows || '<p class="inspector-hint guide-empty-hint">No page guides yet.</p>'}
+        </div>
+        ${page.guides.length > 24 ? `<p class="inspector-hint">Showing the first 24 of ${page.guides.length} guides.</p>` : ""}
+        <button class="button button-quiet clear-guides-button" data-canvas-aid-action="clear-guides" ${page.guides.length ? "" : "disabled"}>Clear all guides</button>
+      </div>
       <div class="no-selection">
         <strong>Nothing selected</strong>
         Choose a layer or draw a shape. Hold Space and drag to move around the canvas.
       </div>`;
+    bindCanvasAidsInspector(page);
     return;
   }
 
@@ -4249,8 +4580,16 @@ function requestRender() {
           degrees: interaction.delta ?? 0,
         }
       : null;
-    renderer.render(currentPage(), selectedIds, camera, {
+    const page = currentPage();
+    const activeGuideId = interaction?.type === "guide" ? interaction.guideId : null;
+    renderer.render(page, selectedIds, camera, {
+      grid: page.gridVisible,
+      gridSize: page.gridSize,
       guides: [...guides, ...visibleFeedbackGuides],
+      pageGuides: page.guidesVisible ? page.guides : [],
+      rulers: page.rulersVisible,
+      activeGuideId,
+      activeGuideRemoving: interaction?.type === "guide" && interaction.remove,
       marquee,
       editingId: editingTextId,
       penDraft,
@@ -4801,6 +5140,12 @@ function closestSnap(targets, references, threshold) {
     }
   }
   return best;
+}
+
+function closestSelectionSnap(referenceSnap, gridSnap) {
+  if (!referenceSnap) return gridSnap;
+  if (!gridSnap) return referenceSnap;
+  return Math.abs(referenceSnap.delta) <= Math.abs(gridSnap.delta) ? referenceSnap : gridSnap;
 }
 
 function normalizeDegrees(degrees) {

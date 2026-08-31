@@ -50,6 +50,8 @@ GOCACHE=$PWD/.cache/go-build go run .
 - Shift-constrained drawing and transforms
 - Alt-centered shape drawing and resizing
 - Smart edge and center snapping while moving layers
+- Persistent per-page rulers with adaptive ticks, draggable horizontal/vertical guides, exact guide positions, and undo/redo
+- Configurable per-page grids with visibility controls and optional snap-to-grid behavior
 - Collapsible nested layers panel with visibility and locking
 - Inspector for geometry, paints, effects, opacity, stroke, corners, and typography
 - Recursive layer ordering, grouping/ungrouping, duplication, copy/paste, nudging, and deletion
@@ -60,7 +62,7 @@ GOCACHE=$PWD/.cache/go-build go run .
 - JSON import/export, SVG export, and high-resolution PNG export
 - Prototype preview surface
 - Responsive editor shell
-- Sanitized, cycle-safe v11 document imports with automatic v1–v10 migration
+- Sanitized, cycle-safe v12 document imports with automatic v1–v11 migration
 - Embedded Go server with a health endpoint and security headers
 
 ## Useful shortcuts
@@ -91,6 +93,7 @@ GOCACHE=$PWD/.cache/go-build go run .
 | Nudge | Arrow keys; hold `Shift` for 10 px |
 | Constrain resize or rotation | Hold `Shift` while dragging a selection handle |
 | Resize from the center | Hold `Alt` while dragging a selection handle |
+| Toggle rulers | `Shift+R` |
 | Fit document | `1` |
 | Fit selection | `2` |
 | Actual size | `0` |
@@ -137,7 +140,7 @@ npm run check
 npm run test:browser
 ```
 
-The unit suite covers document migration and sanitization, content-addressed assets and embedded fonts, command history, alignment/distribution and transform geometry, render caches and profiling, rich text, compound/outlined/fuzzed geometry, component synchronization, local variants, nested Auto Layout, frame constraints, SVG parity, Boolean/mask geometry, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies multi-selection arrangement, transform handles, exact geometry fields, ratio-locked scaling and quick rotation, the layout inspector, responsive resizing, undo/redo, v11 persistence, local component/variant workflows, all four Boolean modes and mask intersection with Canvas and rasterized-SVG pixel samples, vector editing, paint stacks, images, grouping, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
+The unit suite covers document migration and sanitization, canvas-aid geometry, content-addressed assets and embedded fonts, command history, alignment/distribution and transform geometry, render caches and profiling, rich text, compound/outlined/fuzzed geometry, component synchronization, local variants, nested Auto Layout, frame constraints, SVG parity, Boolean/mask geometry, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies multi-selection arrangement, transform handles, exact geometry fields, ratio-locked scaling and quick rotation, rulers, draggable guides, custom grid snapping, the layout inspector, responsive resizing, undo/redo, v12 persistence, local component/variant workflows, all four Boolean modes and mask intersection with Canvas and rasterized-SVG pixel samples, vector editing, paint stacks, images, grouping, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
 
 ## Hosted snapshot workflow
 
@@ -160,6 +163,7 @@ This API is currently a development collaboration foundation. It has document va
 │   └── src/
 │       ├── app.js           Editor controller and interactions
 │       ├── alignment.js     Multi-selection alignment, distribution, and guide geometry
+│       ├── canvas-aids.js   Persistent guide, grid-snap, and ruler geometry
 │       ├── transform.js     Shared selection bounds, resize, and rotation geometry
 │       ├── model.js         Document schema and geometry
 │       ├── components.js    Local component and linked-instance synchronization
@@ -177,6 +181,7 @@ This API is currently a development collaboration foundation. It has document va
 │       ├── persistence.js   IndexedDB storage and migration fallback
 │       ├── layout.test.js   Responsive layout unit tests
 │       ├── alignment.test.js Arrangement geometry unit tests
+│       ├── canvas-aids.test.js Canvas-aid geometry unit tests
 │       ├── transform.test.js Multi-selection transform unit tests
 │       ├── components.test.js Component and instance unit tests
 │       ├── model.test.js    Document and export unit tests
@@ -189,7 +194,7 @@ This API is currently a development collaboration foundation. It has document va
 
 ## Current product boundary
 
-The MVP stores one hierarchical, multi-page document and content-addressed image/font assets locally, with an optional durable hosted snapshot API. Compound cubic paths, non-destructive and flattened Booleans, silhouette masks, wrapping and baseline-aware Auto Layout, browser-measured rich text, frame constraints, local linked components, and variant sets are implemented. The current browser-native text pipeline is internally consistent but does not yet guarantee identical shaping across browser engines or a future server exporter. Stroke outlines are high-resolution polygonal approximations rather than exact Bézier offset curves. Bounds-local Canvas caches and dirty redraws improve ordinary editing, but there is no spatial index or GPU renderer for very large scenes. Rotated Auto Layout frames, nested component composition, typed component properties, published libraries, and remote library updates remain out of scope. There is also no account system, authorization model, remote database, WebSocket presence, or multiplayer operation stream yet. These are explicit follow-on milestones described in [the architecture document](docs/ARCHITECTURE.md).
+The MVP stores one hierarchical, multi-page document and content-addressed image/font assets locally, with an optional durable hosted snapshot API. Compound cubic paths, non-destructive and flattened Booleans, silhouette masks, wrapping and baseline-aware Auto Layout, browser-measured rich text, frame constraints, local linked components, variant sets, and per-page rulers/guides/grids are implemented. The current browser-native text pipeline is internally consistent but does not yet guarantee identical shaping across browser engines or a future server exporter. Stroke outlines are high-resolution polygonal approximations rather than exact Bézier offset curves. Bounds-local Canvas caches and dirty redraws improve ordinary editing, but there is no spatial index or GPU renderer for very large scenes. Rotated Auto Layout frames, nested component composition, typed component properties, published libraries, and remote library updates remain out of scope. There is also no account system, authorization model, remote database, WebSocket presence, or multiplayer operation stream yet. These are explicit follow-on milestones described in [the architecture document](docs/ARCHITECTURE.md).
 
 ## Core design decision
 

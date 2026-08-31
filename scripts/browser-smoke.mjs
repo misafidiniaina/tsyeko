@@ -1001,8 +1001,8 @@ try {
       request.addEventListener("error", () => reject(request.error), { once: true });
     })
   `);
-  if (storedDocumentVersion !== 11) {
-    throw new Error(`Expected persisted document v11, received ${storedDocumentVersion}.`);
+  if (storedDocumentVersion !== 12) {
+    throw new Error(`Expected persisted document v12, received ${storedDocumentVersion}.`);
   }
   await evaluate(`
     [...document.querySelectorAll(".layer-row")]
@@ -1540,6 +1540,110 @@ try {
     "precision multi-transform history autosave",
   );
 
+  await evaluate(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true })); true`);
+  await waitFor(
+    `document.querySelector('[data-canvas-aid-action="toggle-rulers"]')?.classList.contains("active") &&
+     document.querySelector('[data-canvas-aid-action="toggle-guides"]')?.classList.contains("active") &&
+     document.querySelector('[data-page-grid-size]')?.value === "16"`,
+    "canvas aid inspector",
+  );
+  await evaluate(`
+    (() => {
+      const input = document.querySelector("[data-page-grid-size]");
+      input.value = "24";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      document.querySelector('[data-canvas-aid-action="toggle-grid-snap"]').click();
+      return true;
+    })()
+  `);
+  await waitFor(
+    `document.querySelector('[data-page-grid-size]')?.value === "24" &&
+     document.querySelector('[data-canvas-aid-action="toggle-grid-snap"]')?.classList.contains("active") &&
+     document.querySelector("#saveState").textContent === "Saved locally"`,
+    "custom grid settings",
+  );
+
+  const verticalGuideX = canvas.left + canvas.width * 0.34;
+  const horizontalGuideY = canvas.top + canvas.height * 0.63;
+  await dragPointer(command, {
+    x: canvas.left + 10,
+    y: canvas.top + canvas.height * 0.72,
+  }, {
+    x: verticalGuideX,
+    y: canvas.top + canvas.height * 0.72,
+  });
+  await dragPointer(command, {
+    x: canvas.left + canvas.width * 0.82,
+    y: canvas.top + 10,
+  }, {
+    x: canvas.left + canvas.width * 0.82,
+    y: horizontalGuideY,
+  });
+  await waitFor(
+    `document.querySelectorAll("[data-page-guide-id]").length === 2 &&
+     [...document.querySelectorAll(".page-guide-axis")].some((item) => item.textContent === "V") &&
+     [...document.querySelectorAll(".page-guide-axis")].some((item) => item.textContent === "H") &&
+     document.querySelector("#saveState").textContent === "Saved locally"`,
+    "ruler guide creation",
+  );
+  const guidePositionsBeforeMove = await evaluate(`Object.fromEntries(
+    [...document.querySelectorAll("[data-page-guide-id]")].map((row) => [
+      row.querySelector(".page-guide-axis").textContent,
+      Number(row.querySelector("[data-page-guide-position]").value)
+    ])
+  )`);
+  await dragPointer(command, {
+    x: verticalGuideX,
+    y: canvas.top + canvas.height * 0.82,
+  }, {
+    x: verticalGuideX + 53,
+    y: canvas.top + canvas.height * 0.82,
+  });
+  await waitFor(
+    `Math.abs(Number([...document.querySelectorAll("[data-page-guide-id]")]
+       .find((row) => row.querySelector(".page-guide-axis")?.textContent === "V")
+       ?.querySelector("[data-page-guide-position]")?.value) - ${guidePositionsBeforeMove.V}) > 10`,
+    "guide repositioning",
+  );
+  await dragPointer(command, {
+    x: canvas.left + canvas.width * 0.88,
+    y: horizontalGuideY,
+  }, {
+    x: canvas.left + canvas.width * 0.88,
+    y: canvas.top + 10,
+  });
+  await waitFor(
+    `document.querySelectorAll("[data-page-guide-id]").length === 1`,
+    "guide removal through ruler",
+  );
+  await evaluate(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true, bubbles: true })); true`);
+  await waitFor(`document.querySelectorAll("[data-page-guide-id]").length === 2`, "guide removal undo");
+  await evaluate(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true, shiftKey: true, bubbles: true })); true`);
+  await waitFor(
+    `document.querySelectorAll("[data-page-guide-id]").length === 1 &&
+     document.querySelector("#saveState").textContent === "Saved locally"`,
+    "guide removal redo",
+  );
+
+  await command("Page.reload", { ignoreCache: true });
+  await waitFor(
+    `document.readyState === "complete" &&
+     document.querySelector("#currentPageName")?.textContent === "Page 3" &&
+     document.querySelectorAll(".layer-row").length === 3 &&
+     document.querySelectorAll("[data-page-guide-id]").length === 1 &&
+     document.querySelector('[data-page-grid-size]')?.value === "24" &&
+     document.querySelector('[data-canvas-aid-action="toggle-grid-snap"]')?.classList.contains("active")`,
+    "canvas aid reload persistence",
+  );
+  const canvasAidState = await evaluate(`({
+    guides: document.querySelectorAll("[data-page-guide-id]").length,
+    verticalPosition: Number(document.querySelector("[data-page-guide-position]")?.value),
+    gridSize: Number(document.querySelector("[data-page-grid-size]")?.value),
+    snapToGrid: document.querySelector('[data-canvas-aid-action="toggle-grid-snap"]')?.classList.contains("active"),
+    rulersVisible: document.querySelector('[data-canvas-aid-action="toggle-rulers"]')?.classList.contains("active")
+  })`);
+
   const result = await evaluate(`({
     currentPage: document.querySelector("#currentPageName").textContent,
     pageCount: document.querySelectorAll(".page-list-row").length,
@@ -1559,6 +1663,7 @@ try {
     scale: scaledGeometry[0].width / movedGeometry[0].width,
     rotation: quickRotationRedo.rotation
   };
+  result.canvasAids = canvasAidState;
   if (process.env.TSYAIKO_SCREENSHOT) {
     await evaluate(`
       [...document.querySelectorAll(".layer-row")].map((row) => row.dataset.layerId).forEach((id, index) => {
