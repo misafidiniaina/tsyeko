@@ -110,6 +110,14 @@ export class CanvasRenderer {
     }
 
     context.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
+    context.globalAlpha = 1;
+    context.globalCompositeOperation = "source-over";
+    context.filter = "none";
+    context.shadowColor = "transparent";
+    context.shadowBlur = 0;
+    context.shadowOffsetX = 0;
+    context.shadowOffsetY = 0;
+    context.setLineDash([]);
     if (!dirtyPlan.full) {
       context.save();
       context.beginPath();
@@ -595,7 +603,7 @@ export class CanvasRenderer {
     }));
     const transient = Boolean(
       options.guides?.length || options.marquee || options.penDraft || options.vectorEdit ||
-      options.transformReadout || options.activeGuideId,
+      options.transformReadout || options.activeGuideId || options.activeTransform,
     );
     return {
       nodes,
@@ -1343,12 +1351,20 @@ export class CanvasRenderer {
     const width = node.width * camera.zoom;
     const height = node.height * camera.zoom;
     context.save();
+    context.globalAlpha = 1;
+    context.globalCompositeOperation = "source-over";
+    context.filter = "none";
+    context.shadowColor = "transparent";
+    context.shadowBlur = 0;
+    context.shadowOffsetX = 0;
+    context.shadowOffsetY = 0;
     context.translate(center.x, center.y);
     context.rotate((node.rotation * Math.PI) / 180);
     context.strokeStyle = "#a78bfa";
     context.lineWidth = 1;
+    context.lineJoin = "miter";
     context.setLineDash(locked ? [4, 3] : []);
-    context.strokeRect(-width / 2 - 0.5, -height / 2 - 0.5, width + 1, height + 1);
+    context.strokeRect(-width / 2, -height / 2, width, height);
 
     if (showHandles && !locked) {
       context.setLineDash([]);

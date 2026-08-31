@@ -4582,6 +4582,16 @@ function requestRender() {
       : null;
     const page = currentPage();
     const activeGuideId = interaction?.type === "guide" ? interaction.guideId : null;
+    const activeTransform = [
+      "draw",
+      "move",
+      "resize",
+      "rotate",
+      "multi-resize",
+      "multi-rotate",
+      "vector-point",
+      "vector-handle",
+    ].includes(interaction?.type);
     renderer.render(page, selectedIds, camera, {
       grid: page.gridVisible,
       gridSize: page.gridSize,
@@ -4590,6 +4600,7 @@ function requestRender() {
       rulers: page.rulersVisible,
       activeGuideId,
       activeGuideRemoving: interaction?.type === "guide" && interaction.remove,
+      activeTransform,
       marquee,
       editingId: editingTextId,
       penDraft,
