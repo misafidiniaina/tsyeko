@@ -50,6 +50,7 @@ GOCACHE=$PWD/.cache/go-build go run .
 - Shift-constrained drawing and transforms
 - Alt-centered shape drawing and resizing
 - Smart edge and center snapping while moving layers
+- Rotation-aware live sibling-gap measurements plus Alt/Option distance inspection against hovered layers and parent frames
 - Persistent per-page rulers with adaptive ticks, draggable horizontal/vertical guides, exact guide positions, and undo/redo
 - Configurable per-page grids with visibility controls and optional snap-to-grid behavior
 - Collapsible nested layers panel with visibility and locking
@@ -93,6 +94,7 @@ GOCACHE=$PWD/.cache/go-build go run .
 | Nudge | Arrow keys; hold `Shift` for 10 px |
 | Constrain resize or rotation | Hold `Shift` while dragging a selection handle |
 | Resize from the center | Hold `Alt` while dragging a selection handle |
+| Inspect layer distances | Hold `Alt/Option` while pointing at or transforming layers |
 | Toggle rulers | `Shift+R` |
 | Fit document | `1` |
 | Fit selection | `2` |
@@ -140,7 +142,7 @@ npm run check
 npm run test:browser
 ```
 
-The unit suite covers document migration and sanitization, canvas-aid geometry, content-addressed assets and embedded fonts, command history, alignment/distribution and transform geometry, render caches and profiling, rich text, compound/outlined/fuzzed geometry, component synchronization, local variants, nested Auto Layout, frame constraints, SVG parity, Boolean/mask geometry, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies multi-selection arrangement, transform handles, exact geometry fields, ratio-locked scaling and quick rotation, rulers, draggable guides, custom grid snapping, the layout inspector, responsive resizing, undo/redo, v12 persistence, local component/variant workflows, all four Boolean modes and mask intersection with Canvas and rasterized-SVG pixel samples, vector editing, paint stacks, images, grouping, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
+The unit suite covers document migration and sanitization, canvas-aid and distance-measurement geometry, content-addressed assets and embedded fonts, command history, alignment/distribution and transform geometry, render caches and profiling, rich text, compound/outlined/fuzzed geometry, component synchronization, local variants, nested Auto Layout, frame constraints, SVG parity, Boolean/mask geometry, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies multi-selection arrangement, transform handles, Alt distance inspection, exact geometry fields, ratio-locked scaling and quick rotation, rulers, draggable guides, custom grid snapping, the layout inspector, responsive resizing, undo/redo, v12 persistence, local component/variant workflows, all four Boolean modes and mask intersection with Canvas and rasterized-SVG pixel samples, vector editing, paint stacks, images, grouping, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
 
 ## Hosted snapshot workflow
 
@@ -164,6 +166,7 @@ This API is currently a development collaboration foundation. It has document va
 │       ├── app.js           Editor controller and interactions
 │       ├── alignment.js     Multi-selection alignment, distribution, and guide geometry
 │       ├── canvas-aids.js   Persistent guide, grid-snap, and ruler geometry
+│       ├── measurements.js  Live sibling-gap and parent-distance geometry
 │       ├── transform.js     Shared selection bounds, resize, and rotation geometry
 │       ├── model.js         Document schema and geometry
 │       ├── components.js    Local component and linked-instance synchronization
@@ -182,6 +185,7 @@ This API is currently a development collaboration foundation. It has document va
 │       ├── layout.test.js   Responsive layout unit tests
 │       ├── alignment.test.js Arrangement geometry unit tests
 │       ├── canvas-aids.test.js Canvas-aid geometry unit tests
+│       ├── measurements.test.js Distance and spacing geometry unit tests
 │       ├── transform.test.js Multi-selection transform unit tests
 │       ├── components.test.js Component and instance unit tests
 │       ├── model.test.js    Document and export unit tests

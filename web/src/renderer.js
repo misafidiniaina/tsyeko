@@ -641,6 +641,12 @@ export class CanvasRenderer {
     ) {
       return { full: true, skip: false, regions: [] };
     }
+    if (
+      previous.nodes.size !== current.nodes.size ||
+      [...previous.nodes.keys()].some((id) => !current.nodes.has(id))
+    ) {
+      return { full: true, skip: false, regions: [] };
+    }
 
     const dirty = [];
     const ids = new Set([...previous.nodes.keys(), ...current.nodes.keys()]);
@@ -1443,7 +1449,7 @@ export class CanvasRenderer {
     const context = this.context;
     context.save();
     for (const guide of guides) {
-      if (guide.type === "spacing") {
+      if (guide.type === "spacing" || guide.type === "distance") {
         this.drawSpacingGuide(guide, camera);
         continue;
       }
@@ -1479,6 +1485,10 @@ export class CanvasRenderer {
 
   drawSpacingGuide(guide, camera) {
     const context = this.context;
+    const color = guide.type === "distance" ? "#f87171" : "#ec4899";
+    const labelColor = guide.type === "distance"
+      ? "rgba(220, 38, 38, 0.96)"
+      : "rgba(236, 72, 153, 0.96)";
     const horizontal = guide.axis === "x";
     const start = horizontal
       ? this.worldToScreen({ x: guide.start, y: guide.cross }, camera)
@@ -1488,7 +1498,7 @@ export class CanvasRenderer {
       : this.worldToScreen({ x: guide.cross, y: guide.end }, camera);
 
     context.save();
-    context.strokeStyle = "#ec4899";
+    context.strokeStyle = color;
     context.lineWidth = 1;
     context.setLineDash([]);
     context.beginPath();
@@ -1516,7 +1526,7 @@ export class CanvasRenderer {
     const preferredY = horizontal ? midpoint.y - labelHeight - 6 : midpoint.y - labelHeight / 2;
     const x = Math.min(Math.max(2, preferredX), Math.max(2, this.width - labelWidth - 2));
     const y = Math.min(Math.max(2, preferredY), Math.max(2, this.height - labelHeight - 2));
-    context.fillStyle = "rgba(236, 72, 153, 0.96)";
+    context.fillStyle = labelColor;
     context.beginPath();
     context.roundRect(x, y, labelWidth, labelHeight, 4);
     context.fill();
@@ -1543,12 +1553,14 @@ export class CanvasRenderer {
     context.restore();
   }
 
-  hitTest(document, screenPoint, camera) {
+  hitTest(document, screenPoint, camera, excludedIds = []) {
     const worldPoint = this.screenToWorld(screenPoint, camera);
     const padding = 4 / camera.zoom;
+    const excluded = excludedIds instanceof Set ? excludedIds : new Set(excludedIds);
     for (let index = document.nodes.length - 1; index >= 0; index -= 1) {
       const node = document.nodes[index];
-      if (node.type === NODE_TYPES.GROUP ||
+      if (excluded.has(node.id) ||
+        node.type === NODE_TYPES.GROUP ||
         !isNodeEffectivelyVisible(document, node) ||
         getAncestors(document, node).some(isCompositeNode) ||
         !pointInNode(node, worldPoint, padding)) continue;

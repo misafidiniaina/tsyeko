@@ -70,6 +70,10 @@ import {
   scaleGeometryInBounds,
 } from "./transform.js";
 import {
+  createDistanceGuides,
+  createNearestSpacingGuides,
+} from "./measurements.js";
+import {
   createComponent,
   createComponentInstance,
   createComponentSet,
@@ -144,6 +148,7 @@ import { baseTextStyle, rebaseTextRuns } from "./text.js";
 const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 16;
 const SNAP_DISTANCE_PX = 6;
+const LIVE_MEASUREMENT_DISTANCE_PX = 96;
 
 const elements = {
   canvas: document.querySelector("#designCanvas"),
@@ -223,11 +228,14 @@ let vectorEdit = null;
 let suppressDoubleClickUntil = 0;
 let clipboardNodes = [];
 let guides = [];
+let measurementGuides = [];
+let lastCanvasPointer = null;
 let transformFeedbackGuides = [];
 let transformFeedbackPageId = null;
 let transformFeedbackTimer = null;
 let multiTransformAspectLocked = false;
 let spacePressed = false;
+let altPressed = false;
 let saveTimer = null;
 let saveVersion = 0;
 let hostedSaveQueue = Promise.resolve();
@@ -309,6 +317,11 @@ function bindCanvas() {
   elements.canvas.addEventListener("pointermove", onPointerMove);
   elements.canvas.addEventListener("pointerup", onPointerUp);
   elements.canvas.addEventListener("pointercancel", onPointerCancel);
+  elements.canvas.addEventListener("pointerleave", () => {
+    if (interaction) return;
+    lastCanvasPointer = null;
+    clearDistanceMeasurements();
+  });
   elements.canvas.addEventListener("dblclick", onDoubleClick);
   elements.canvas.addEventListener("wheel", onWheel, { passive: false });
   elements.canvas.addEventListener("contextmenu", (event) => event.preventDefault());
@@ -1123,6 +1136,13 @@ function bindMenus() {
 
 function bindKeyboard() {
   window.addEventListener("keydown", (event) => {
+    if (event.key === "Alt" && !isTypingTarget(event.target)) {
+      altPressed = true;
+      if (!interaction && lastCanvasPointer) {
+        updateDetailedDistanceMeasurements(lastCanvasPointer, true);
+        requestRender();
+      }
+    }
     if (event.code === "Space" && !isTypingTarget(event.target)) {
       spacePressed = true;
       updateCanvasCursor();
@@ -1285,6 +1305,10 @@ function bindKeyboard() {
   });
 
   window.addEventListener("keyup", (event) => {
+    if (event.key === "Alt") {
+      altPressed = false;
+      clearDistanceMeasurements();
+    }
     if (event.code === "Space") {
       spacePressed = false;
       updateCanvasCursor();
@@ -1293,6 +1317,8 @@ function bindKeyboard() {
 
   window.addEventListener("blur", () => {
     spacePressed = false;
+    altPressed = false;
+    clearDistanceMeasurements();
     if (interaction?.type === "pan") interaction = null;
     if (interaction?.type === "guide") {
       cancelGuideInteraction();
@@ -1306,10 +1332,12 @@ function bindKeyboard() {
 function onPointerDown(event) {
   if (event.button !== 0 && event.button !== 1) return;
   clearTransformFeedback();
+  clearDistanceMeasurements();
   closePopovers();
   if (editingTextId) finishTextEditing(true);
   elements.canvas.focus();
   const screen = eventPoint(event);
+  lastCanvasPointer = screen;
   const world = renderer.screenToWorld(screen, camera);
 
   if (event.button === 1 || spacePressed || activeTool === "hand") {
@@ -1532,8 +1560,10 @@ function onPointerDown(event) {
 
 function onPointerMove(event) {
   const screen = eventPoint(event);
+  lastCanvasPointer = screen;
   if (!interaction) {
     if (activeTool === "pen" && penDraft) {
+      clearDistanceMeasurements(false);
       penDraft.hoverWorld = constrainPenPoint(
         penDraft.points.at(-1),
         renderer.screenToWorld(screen, camera),
@@ -1543,17 +1573,20 @@ function onPointerMove(event) {
       return;
     }
     updateHoverCursor(screen);
+    if (updateDetailedDistanceMeasurements(screen, event.altKey)) requestRender();
     return;
   }
   if (interaction.pointerId !== event.pointerId) return;
 
   if (interaction.type === "guide") {
+    clearDistanceMeasurements(false);
     updateGuideInteraction(screen, renderer.screenToWorld(screen, camera), event);
     requestRender();
     return;
   }
 
   if (interaction.type === "pan") {
+    clearDistanceMeasurements(false);
     camera.x = interaction.camera.x + screen.x - interaction.start.x;
     camera.y = interaction.camera.y + screen.y - interaction.start.y;
     requestRender();
@@ -1571,6 +1604,7 @@ function onPointerMove(event) {
   if (interaction.type === "vector-handle") updateVectorHandle(world, event);
   if (interaction.type === "pen-anchor") updatePenAnchorHandles(world, event);
   if (interaction.type === "marquee") updateMarquee(screen);
+  updateInteractionDistanceMeasurements(screen, event.altKey);
   requestRender();
 }
 
@@ -1579,6 +1613,7 @@ function onPointerUp(event) {
   const completedType = interaction.type;
 
   if (completedType === "guide") {
+    clearDistanceMeasurements(false);
     completeGuideInteraction();
     releasePointer(event);
     interaction = null;
@@ -1622,6 +1657,7 @@ function onPointerUp(event) {
   releasePointer(event);
   interaction = null;
   guides = [];
+  clearDistanceMeasurements();
   updateCanvasCursor();
   refreshUI();
 }
@@ -1629,6 +1665,7 @@ function onPointerUp(event) {
 function onPointerCancel(event) {
   if (!interaction || interaction.pointerId !== event.pointerId) return;
   if (interaction.type === "guide") {
+    clearDistanceMeasurements(false);
     cancelGuideInteraction();
     releasePointer(event);
     interaction = null;
@@ -1666,6 +1703,7 @@ function onPointerCancel(event) {
   releasePointer(event);
   interaction = null;
   guides = [];
+  clearDistanceMeasurements(false);
   updateCanvasCursor();
   refreshUI();
 }
@@ -2580,10 +2618,99 @@ function snapSelection(ids) {
   ];
 }
 
+function updateDetailedDistanceMeasurements(screen, enabled = altPressed) {
+  if (!enabled || activeTool !== "select" || !selectedIds.length) {
+    return replaceDistanceMeasurements([]);
+  }
+  const selection = distanceMeasurementSelection();
+  if (!selection) return replaceDistanceMeasurements([]);
+  const target = findDistanceMeasurementTarget(selection, screen);
+  return replaceDistanceMeasurements(target
+    ? createDistanceGuides(selection.bounds, getNodeAABB(target), target.id)
+    : []);
+}
+
+function updateInteractionDistanceMeasurements(screen, detailed) {
+  if (!["move", "resize", "rotate", "multi-resize", "multi-rotate"].includes(interaction?.type)) {
+    clearDistanceMeasurements(false);
+    return;
+  }
+  const selection = distanceMeasurementSelection();
+  if (!selection) {
+    clearDistanceMeasurements(false);
+    return;
+  }
+  if (detailed) {
+    const target = findDistanceMeasurementTarget(selection, screen);
+    replaceDistanceMeasurements(target
+      ? createDistanceGuides(selection.bounds, getNodeAABB(target), target.id)
+      : []);
+    return;
+  }
+  replaceDistanceMeasurements(createNearestSpacingGuides(
+    selection.bounds,
+    siblingDistanceMeasurementTargets(selection),
+    LIVE_MEASUREMENT_DISTANCE_PX / camera.zoom,
+  ));
+}
+
+function distanceMeasurementSelection() {
+  const page = currentPage();
+  const rootIds = getTopLevelNodeIds(page, selectedIds);
+  const nodes = rootIds.map((id) => getNode(page, id)).filter(Boolean);
+  if (!nodes.length) return null;
+  return {
+    page,
+    rootIds,
+    nodes,
+    bounds: combinedBounds(nodes.map(getNodeAABB)),
+    excludedIds: new Set(getNodesWithDescendants(page, rootIds).map((node) => node.id)),
+  };
+}
+
+function findDistanceMeasurementTarget(selection, screen) {
+  const hovered = renderer.hitTest(
+    selection.page,
+    screen,
+    camera,
+    selection.excludedIds,
+  );
+  if (hovered) return hovered;
+  const parentIds = new Set(selection.nodes.map((node) => node.parentId ?? null));
+  if (parentIds.size !== 1) return null;
+  const parentId = [...parentIds][0];
+  return parentId ? getNode(selection.page, parentId) : null;
+}
+
+function siblingDistanceMeasurementTargets(selection) {
+  const parentIds = new Set(selection.nodes.map((node) => node.parentId ?? null));
+  if (parentIds.size !== 1) return [];
+  const parentId = [...parentIds][0];
+  return getChildNodes(selection.page, parentId)
+    .filter((node) =>
+      !selection.excludedIds.has(node.id) && isNodeEffectivelyVisible(selection.page, node))
+    .map((node) => ({ id: node.id, bounds: getNodeAABB(node) }));
+}
+
+function replaceDistanceMeasurements(nextGuides) {
+  const next = Array.isArray(nextGuides) ? nextGuides : [];
+  if (JSON.stringify(measurementGuides) === JSON.stringify(next)) return false;
+  measurementGuides = next;
+  return true;
+}
+
+function clearDistanceMeasurements(render = true) {
+  if (!measurementGuides.length) return false;
+  measurementGuides = [];
+  if (render) requestRender();
+  return true;
+}
+
 function setTool(tool) {
   if (editingTextId) finishTextEditing(true);
   if (activeTool === "pen" && tool !== "pen" && penDraft) finishPenPath(false, false);
   if (tool !== "select" && vectorEdit) vectorEdit = null;
+  clearDistanceMeasurements();
   activeTool = tool;
   document.querySelectorAll("[data-tool]").forEach((button) => {
     button.classList.toggle("active", button.dataset.tool === activeTool);
@@ -3201,6 +3328,7 @@ function switchPage(pageId) {
   selectedIds = [];
   interaction = null;
   guides = [];
+  clearDistanceMeasurements(false);
   const savedView = pageViews[pageId];
   camera = savedView
     ? { ...savedView }
@@ -3300,6 +3428,7 @@ function synchronizeDocumentGeometry() {
 
 function commitDocument(label = "Edit document") {
   clearTransformFeedback(false);
+  clearDistanceMeasurements(false);
   synchronizeDocumentGeometry();
   designDocument.updatedAt = new Date().toISOString();
   history.commit(designDocument, label);
@@ -3309,6 +3438,7 @@ function commitDocument(label = "Edit document") {
 
 function liveDocumentChange() {
   clearTransformFeedback(false);
+  clearDistanceMeasurements(false);
   synchronizeDocumentGeometry();
   designDocument.updatedAt = new Date().toISOString();
   elements.saveState.textContent = "Saving…";
@@ -3318,6 +3448,7 @@ function liveDocumentChange() {
 
 function undo() {
   clearTransformFeedback(false);
+  clearDistanceMeasurements(false);
   finishTextEditing(false);
   penDraft = null;
   vectorEdit = null;
@@ -3336,6 +3467,7 @@ function undo() {
 
 function redo() {
   clearTransformFeedback(false);
+  clearDistanceMeasurements(false);
   finishTextEditing(false);
   penDraft = null;
   vectorEdit = null;
@@ -4592,10 +4724,11 @@ function requestRender() {
       "vector-point",
       "vector-handle",
     ].includes(interaction?.type);
+    elements.canvas.dataset.measurementCount = String(measurementGuides.length);
     renderer.render(page, selectedIds, camera, {
       grid: page.gridVisible,
       gridSize: page.gridSize,
-      guides: [...guides, ...visibleFeedbackGuides],
+      guides: [...guides, ...measurementGuides, ...visibleFeedbackGuides],
       pageGuides: page.guidesVisible ? page.guides : [],
       rulers: page.rulersVisible,
       activeGuideId,
@@ -4607,6 +4740,7 @@ function requestRender() {
       vectorEdit,
       transformReadout,
     });
+    elements.canvas.dataset.fullRedraw = String(renderer.lastFrameStats.fullRedraw);
     elements.zoomValue.textContent = `${Math.round(camera.zoom * 100)}%`;
   });
 }

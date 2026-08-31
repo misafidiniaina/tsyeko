@@ -640,7 +640,7 @@ Exit criterion met for the local browser editor: a designer can complete and exp
 - Unified multi-selection bounding-box resize and shared-pivot rotation, including Shift/Alt transform modifiers, linked-instance/Auto Layout guards, and one-step history (implemented)
 - Numeric multi-selection X/Y/W/H Inspector editing, optional ratio-locked scaling, ±90° actions, and live rotation readouts (implemented)
 - Persistent adaptive rulers, draggable page guides, exact guide editing, configurable grids, grid/object/guide snapping, history, and v12 persistence (implemented)
-- Richer distance inspection and always-available spacing measurements
+- Rotation-aware Alt/Option distance inspection, parent insets, and nearest-sibling gap measurements during direct transforms (implemented)
 - Faster smart-spacing and duplicate-in-place workflows during direct manipulation
 - More shape/path authoring tools, editable transform origins, skew, and matrix-level transforms
 - Keyboard focus, accessibility, and dense-workflow polish across Canvas, Layers, and Inspector

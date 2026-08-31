@@ -1295,6 +1295,49 @@ try {
      document.querySelector("#saveState").textContent === "Saved locally"`,
     "multi-transform fixture creation",
   );
+  const measurementTarget = {
+    x: transformRects[0].x + transformRects[0].width / 2,
+    y: transformRects[0].y + transformRects[0].height / 2,
+  };
+  await command("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: measurementTarget.x,
+    y: measurementTarget.y,
+    button: "none",
+    buttons: 0,
+    modifiers: 1,
+  });
+  await waitFor(
+    `Number(document.querySelector("#designCanvas")?.dataset.measurementCount) > 0`,
+    "Alt distance inspection",
+  );
+  await command("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: measurementTarget.x,
+    y: measurementTarget.y,
+    button: "none",
+    buttons: 0,
+    modifiers: 0,
+  });
+  await waitFor(
+    `document.querySelector("#designCanvas")?.dataset.measurementCount === "0"`,
+    "distance inspection cleanup",
+  );
+  await evaluate(`
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", code: "Delete", bubbles: true }));
+    true
+  `);
+  await waitFor(
+    `document.querySelectorAll(".layer-row").length === 2 &&
+     document.querySelector("#designCanvas")?.dataset.fullRedraw === "true"`,
+    "structural deletion cleanup redraw",
+  );
+  await evaluate(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true, bubbles: true })); true`);
+  await waitFor(
+    `document.querySelectorAll(".layer-row").length === 3 &&
+     document.querySelector("#saveState").textContent === "Saved locally"`,
+    "structural deletion undo",
+  );
   const readGeometryByLayer = async (index) => {
     await evaluate(`
       document.querySelectorAll(".layer-row")[${index}]
@@ -1664,6 +1707,7 @@ try {
     rotation: quickRotationRedo.rotation
   };
   result.canvasAids = canvasAidState;
+  result.distanceInspection = true;
   if (process.env.TSYAIKO_SCREENSHOT) {
     await evaluate(`
       [...document.querySelectorAll(".layer-row")].map((row) => row.dataset.layerId).forEach((id, index) => {
