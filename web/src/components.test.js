@@ -83,7 +83,7 @@ function addSecondaryButtonComponent(document, page, options = {}) {
   return { button, label, component: created.component };
 }
 
-test("migrates v8 documents to v10 with safe component metadata", () => {
+test("migrates v8 documents to v11 with safe component metadata", () => {
   const document = normalizeDocument({
     version: 8,
     name: "Imported components",
@@ -130,7 +130,7 @@ test("migrates v8 documents to v10 with safe component metadata", () => {
 
   const library = document.pages[0];
   const screen = document.pages[1];
-  assert.equal(document.version, 10);
+  assert.equal(document.version, 11);
   assert.equal(document.components.length, 1);
   assert.equal(getNode(library, "main").componentRole, COMPONENT_ROLES.MAIN);
   assert.equal(getNode(library, "label").componentRole, COMPONENT_ROLES.SOURCE);
@@ -184,7 +184,7 @@ test("migrates v9 variant records and repairs unsafe component-set membership", 
     ],
   });
 
-  assert.equal(document.version, 10);
+  assert.equal(document.version, 11);
   assert.deepEqual(document.componentSets.map(({ id, propertyNames }) => ({ id, propertyNames })), [
     { id: "buttons", propertyNames: ["State", "Size"] },
   ]);
@@ -303,6 +303,27 @@ test("describes overrides and resets one property without disturbing the others"
   assert.deepEqual(getNode(page, instance.id).componentOverrides, {
     [label.id]: { text: "Only here" },
   });
+});
+
+test("shadow overrides keep legacy and effect-stack properties synchronized", () => {
+  const { document, page, button, component } = makeComponentFixture();
+  const instance = createComponentInstance(document, component.id, page.id, { x: 360, y: 160 });
+  instance.shadow = {
+    enabled: true,
+    color: "#112233",
+    opacity: 0.5,
+    offsetX: 4,
+    offsetY: 9,
+    blur: 18,
+  };
+  assert.equal(recordComponentOverride(document, page, instance, "shadow"), true);
+
+  button.fill = "#ef4444";
+  syncDocumentComponents(document);
+  const synced = getNode(page, instance.id);
+  assert.deepEqual(synced.shadow, instance.shadow);
+  assert.equal(synced.effects.find((effect) => effect.type === "drop-shadow").blur, 18);
+  assert.equal(synced.effects.find((effect) => effect.type === "drop-shadow").visible, true);
 });
 
 test("swaps linked instances while preserving placement, ids, and compatible overrides", () => {

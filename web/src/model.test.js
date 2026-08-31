@@ -15,6 +15,7 @@ import {
   getFirstPage,
   getNodesWithDescendants,
   getNodeVisualBounds,
+  getVectorContours,
   getVectorWorldHandle,
   getVectorWorldPoints,
   groupNodes,
@@ -48,7 +49,7 @@ test("migrates v1 documents and clamps untrusted geometry", () => {
   });
 
   assert.equal(document.name, "Imported");
-  assert.equal(document.version, 10);
+  assert.equal(document.version, 11);
   assert.equal(document.pages.length, 1);
   assert.equal(document.pages[0].nodes[0].x, 12);
   assert.equal(document.pages[0].nodes[0].width, 1);
@@ -252,7 +253,7 @@ test("migrates and sanitizes v7 Boolean and mask containers", () => {
   });
   const page = getFirstPage(document);
 
-  assert.equal(document.version, 10);
+  assert.equal(document.version, 11);
   assert.equal(page.nodes.find((node) => node.id === "boolean").booleanOperation, "union");
   assert.equal(page.nodes.find((node) => node.id === "shape").parentId, "boolean");
   assert.equal(page.nodes.find((node) => node.id === "content").parentId, "mask");
@@ -357,6 +358,112 @@ test("normalizes gradient paints and bounded shadow effects", () => {
   assert.deepEqual(getNodeVisualBounds(node), { x: -5, y: 8, width: 140, height: 90 });
 });
 
+test("migrates v10 documents into v11 paint, effect, contour, rich-text, and asset records", () => {
+  const hash = "a".repeat(64);
+  const document = normalizeDocument({
+    version: 10,
+    name: "Milestone one migration",
+    assets: [{
+      id: `asset_${hash}`,
+      hash,
+      kind: "font",
+      name: "Studio.woff2",
+      fontFamily: "Studio",
+      data: "data:font/woff2;base64,d09GRg==",
+    }],
+    pages: [{
+      name: "Page",
+      nodes: [
+        {
+          id: "painted",
+          type: "rectangle",
+          fills: [
+            { id: "base", type: "radial-gradient", opacity: 0.8, gradient: { centerX: 0.2, centerY: 0.7, radius: 0.9 } },
+            { id: "tint", type: "solid", color: "#ff0000", blendMode: "multiply" },
+          ],
+          effects: [
+            { id: "drop", type: "drop-shadow", color: "#112233", opacity: 0.4, blur: 12 },
+            { id: "blur", type: "layer-blur", radius: 9 },
+          ],
+        },
+        {
+          id: "copy",
+          type: "text",
+          text: "Styled copy",
+          fontFamily: "Studio",
+          fontRef: `asset_${hash}`,
+          textRuns: [{ start: 0, end: 6, fontWeight: 700, fill: "#123456" }],
+        },
+        {
+          id: "compound",
+          type: "vector",
+          vectorPoints: [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }],
+          vectorContours: [
+            { id: "outer", points: [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }] },
+            { id: "hole", points: [{ x: 25, y: 25 }, { x: 25, y: 75 }, { x: 75, y: 75 }, { x: 75, y: 25 }] },
+          ],
+          vectorFillRule: "evenodd",
+        },
+      ],
+    }],
+  });
+  const [painted, copy, compound] = getFirstPage(document).nodes;
+
+  assert.equal(document.version, 11);
+  assert.equal(document.assets[0].kind, "font");
+  assert.equal(document.assets[0].fontFamily, "Studio");
+  assert.equal(painted.fills.length, 2);
+  assert.equal(painted.fills[0].type, "radial-gradient");
+  assert.equal(painted.fills[1].blendMode, "multiply");
+  assert.equal(painted.effects.find((effect) => effect.type === "drop-shadow").enabled, true);
+  assert.equal(painted.layerBlur, 9);
+  assert.equal(copy.fontRef, `asset_${hash}`);
+  assert.equal(copy.textRuns[0].fontWeight, 700);
+  assert.equal(getVectorContours(compound).length, 2);
+  assert.equal(compound.vectorFillRule, "evenodd");
+});
+
+test("SVG export preserves paint stacks, radial and angular gradients, blur, and rich text", () => {
+  const page = createPage("Milestone paints");
+  page.nodes.push(
+    createNode(NODE_TYPES.RECTANGLE, 0, 0, {
+      fills: [
+        { id: "radial", type: "radial-gradient", opacity: 1, gradient: { centerX: 0.3, centerY: 0.4, radius: 0.8 } },
+        { id: "angular", type: "angular-gradient", opacity: 0.5, gradient: { angle: 45 } },
+      ],
+      layerBlur: 8,
+    }),
+    createNode(NODE_TYPES.TEXT, 140, 0, {
+      text: "Rich text",
+      textRuns: [{ start: 0, end: 4, fontWeight: 700, fontStyle: "italic", fill: "#ff0000" }],
+    }),
+  );
+  const svg = documentToSVG(page);
+  assert.match(svg, /<radialGradient/);
+  assert.match(svg, /<radialGradient[^>]+gradientUnits="userSpaceOnUse"/);
+  assert.match(svg, /data-paint-type="angular-gradient"/);
+  assert.match(svg, /mix-blend-mode:normal/);
+  assert.match(svg, /<feGaussianBlur/);
+  assert.match(svg, /font-style="italic"/);
+  assert.match(svg, />Rich</);
+});
+
+test("explicitly hidden effects do not fall back to legacy blur or shadow fields", () => {
+  const page = createPage("Hidden effects");
+  const node = createNode(NODE_TYPES.RECTANGLE, 0, 0, {
+    layerBlur: 20,
+    shadow: { enabled: true, color: "#000000", opacity: 0.5, offsetX: 4, offsetY: 8, blur: 12 },
+    effects: [
+      { id: "blur", type: "layer-blur", visible: false, radius: 20 },
+      { id: "shadow", type: "drop-shadow", visible: false, opacity: 0.5, offsetX: 4, offsetY: 8, blur: 12 },
+    ],
+  });
+  page.nodes.push(node);
+  assert.equal(node.layerBlur, 0);
+  assert.equal(node.shadow.enabled, false);
+  assert.doesNotMatch(documentToSVG(page), /<filter/);
+});
+
 test("migrates implicit frame shadows into explicit v6 effects", () => {
   const document = normalizeDocument({
     version: 3,
@@ -365,7 +472,7 @@ test("migrates implicit frame shadows into explicit v6 effects", () => {
   });
   const frame = getFirstPage(document).nodes[0];
 
-  assert.equal(document.version, 10);
+  assert.equal(document.version, 11);
   assert.equal(frame.fillType, "solid");
   assert.equal(frame.shadow.enabled, true);
   assert.equal(frame.shadow.blur, 16);
@@ -504,7 +611,7 @@ test("normalizes vector paths and rejects invalid point data", () => {
   });
   const vector = getFirstPage(document).nodes[0];
 
-  assert.equal(document.version, 10);
+  assert.equal(document.version, 11);
   assert.equal(vector.type, NODE_TYPES.VECTOR);
   assert.equal(vector.vectorPoints.length, 2);
   assert.equal(vector.vectorClosed, false);
@@ -595,7 +702,7 @@ test("migrates v5 corner anchors and sanitizes Bézier handles", () => {
   const first = vector.vectorPoints[0];
   const second = vector.vectorPoints[1];
 
-  assert.equal(document.version, 10);
+  assert.equal(document.version, 11);
   assert.equal(first.handleMode, "mirrored");
   assert.ok(first.in && first.out);
   assert.equal(first.in.x - first.x, -(first.out.x - first.x));
@@ -661,4 +768,27 @@ test("exports cubic Bézier controls as SVG path commands", () => {
 
   assert.match(svg, /d="M 0 40 C 30 0 70 80 100 40"/);
   assert.doesNotMatch(svg, /d="M 0 40 L 100 40"/);
+});
+
+test("v11 imports accept a compound vector whose primary geometry lives in contours", () => {
+  const document = normalizeDocument({
+    version: 11,
+    pages: [{
+      id: "page",
+      name: "Contours",
+      nodes: [{
+        id: "vector",
+        type: "vector",
+        vectorContours: [{
+          id: "primary",
+          closed: false,
+          points: [{ x: 10, y: 20 }, { x: 90, y: 70 }],
+        }],
+      }],
+    }],
+  });
+  const vector = getFirstPage(document).nodes[0];
+  assert.equal(vector.vectorPoints.length, 2);
+  assert.equal(vector.vectorClosed, false);
+  assert.equal(getVectorContours(vector)[0].id, "primary");
 });

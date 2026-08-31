@@ -3,7 +3,7 @@ import {
   VECTOR_HANDLE_MODES,
 } from "./vector.js";
 
-export const DOCUMENT_VERSION = 10;
+export const DOCUMENT_VERSION = 11;
 const MAX_HIERARCHY_DEPTH = 256;
 
 export const COMPONENT_ROLES = Object.freeze({
@@ -23,20 +23,27 @@ export const COMPONENT_OVERRIDE_PROPERTIES = Object.freeze([
   "fill",
   "fillType",
   "gradient",
+  "fills",
+  "strokes",
+  "effects",
   "stroke",
   "strokeWidth",
   "cornerRadius",
   "shadow",
   "text",
+  "textRuns",
+  "fontRef",
   "fontFamily",
   "fontSize",
   "fontWeight",
   "lineHeight",
   "textAlign",
   "imageData",
+  "assetId",
   "imageFit",
   "altText",
   "vectorPoints",
+  "vectorContours",
   "vectorClosed",
   "vectorFillRule",
   "booleanOperation",
@@ -58,6 +65,18 @@ export const BOOLEAN_OPERATIONS = Object.freeze({
   SUBTRACT: "subtract",
   INTERSECT: "intersect",
   EXCLUDE: "exclude",
+});
+
+export const PAINT_TYPES = Object.freeze({
+  SOLID: "solid",
+  LINEAR: "linear-gradient",
+  RADIAL: "radial-gradient",
+  ANGULAR: "angular-gradient",
+});
+
+export const EFFECT_TYPES = Object.freeze({
+  DROP_SHADOW: "drop-shadow",
+  LAYER_BLUR: "layer-blur",
 });
 
 export const LAYOUT_MODES = Object.freeze({
@@ -297,6 +316,7 @@ export function createEmptyDocument(name = "Untitled design") {
     updatedAt: new Date().toISOString(),
     components: [],
     componentSets: [],
+    assets: [],
     pages: [createPage("Page 1")],
   };
 }
@@ -463,6 +483,7 @@ export function normalizeDocument(input) {
   document.background = cleanColor(input.background, "#101114");
   document.createdAt = cleanString(input.createdAt, document.createdAt, 64);
   document.updatedAt = cleanString(input.updatedAt, document.updatedAt, 64);
+  document.assets = normalizeAssetRecords(input.assets);
   document.pages = hasPages
     ? input.pages.slice(0, 1_000).map((page, index) => normalizePage(page, `Page ${index + 1}`, document.background))
     : [createPage("Page 1", { background: document.background, nodes: input.nodes })];
@@ -545,31 +566,84 @@ export function normalizeNode(input) {
   node.maxHeight = Math.max(node.minHeight, node.maxHeight);
   node.width = Math.min(node.maxWidth, Math.max(node.minWidth, node.width));
   node.height = Math.min(node.maxHeight, Math.max(node.minHeight, node.height));
-  node.fillType = input.fillType === "linear-gradient" ? "linear-gradient" : "solid";
+  node.fillType = Object.values(PAINT_TYPES).includes(input.fillType) ? input.fillType : PAINT_TYPES.SOLID;
   node.gradient = normalizeGradient(input.gradient, node.fill);
   node.shadow = normalizeShadow(input.shadow, defaults.shadow ?? DEFAULT_SHADOW);
+  node.fills = normalizePaintStack(input.fills, {
+    type: node.fillType,
+    color: node.fill,
+    gradient: node.gradient,
+  });
+  node.strokes = normalizePaintStack(input.strokes, {
+    type: PAINT_TYPES.SOLID,
+    color: node.stroke,
+  });
+  node.effects = normalizeEffects(input.effects, node.shadow, input.layerBlur);
+  node.layerBlur = node.effects.find((effect) =>
+    effect.type === EFFECT_TYPES.LAYER_BLUR && effect.visible !== false && effect.radius > 0)?.radius ?? 0;
+  const primaryShadow = node.effects.find((effect) => effect.type === EFFECT_TYPES.DROP_SHADOW);
+  if (primaryShadow) {
+    node.shadow = {
+      enabled: primaryShadow.visible !== false && primaryShadow.enabled !== false,
+      color: primaryShadow.color,
+      opacity: primaryShadow.opacity,
+      offsetX: primaryShadow.offsetX,
+      offsetY: primaryShadow.offsetY,
+      blur: primaryShadow.blur,
+    };
+  }
+  const primaryFill = node.fills[0];
+  if (primaryFill) {
+    node.fillType = primaryFill.type;
+    node.fill = primaryFill.color;
+    node.gradient = primaryFill.gradient;
+  }
+  const primaryStroke = node.strokes[0];
+  if (primaryStroke) node.stroke = primaryStroke.color;
 
   if (node.type === NODE_TYPES.TEXT) {
     node.text = cleanString(input.text, defaults.text, 20_000, true);
     node.fontFamily = cleanString(input.fontFamily, defaults.fontFamily, 200);
+    node.fontRef = typeof input.fontRef === "string" ? cleanString(input.fontRef, "", 160) || null : null;
     node.fontSize = finiteNumber(input.fontSize, defaults.fontSize, 1, 1_000);
     node.fontWeight = finiteNumber(input.fontWeight, defaults.fontWeight, 100, 900);
     node.lineHeight = finiteNumber(input.lineHeight, defaults.lineHeight, 0.5, 5);
     node.textAlign = ["left", "center", "right"].includes(input.textAlign)
       ? input.textAlign
       : "left";
+    node.textRuns = normalizeTextRuns(input.textRuns, node.text.length, node);
   }
 
   if (node.type === NODE_TYPES.IMAGE) {
     node.imageData = cleanImageData(input.imageData);
+    node.assetId = typeof input.assetId === "string"
+      ? cleanString(input.assetId, "", 160) || null
+      : null;
     node.imageFit = ["cover", "contain"].includes(input.imageFit) ? input.imageFit : "cover";
     node.altText = cleanString(input.altText, "", 500);
   }
 
   if (node.type === NODE_TYPES.VECTOR) {
-    node.vectorPoints = normalizeVectorPoints(input.vectorPoints, defaults.vectorPoints);
-    node.vectorClosed = input.vectorClosed !== false && node.vectorPoints.length >= 3;
+    const primaryContour = Array.isArray(input.vectorContours) ? input.vectorContours[0] : null;
+    const primaryPoints = Array.isArray(input.vectorPoints) ? input.vectorPoints : primaryContour?.points;
+    node.vectorPoints = normalizeVectorPoints(primaryPoints, defaults.vectorPoints);
+    const requestedClosed = typeof input.vectorClosed === "boolean"
+      ? input.vectorClosed
+      : primaryContour?.closed !== false;
+    node.vectorClosed = requestedClosed && node.vectorPoints.length >= 3;
     node.vectorFillRule = input.vectorFillRule === "evenodd" ? "evenodd" : "nonzero";
+    const extraContours = Array.isArray(input.vectorContours)
+      ? input.vectorContours.slice(1, 128).map((contour) => ({
+          id: cleanString(contour?.id, makeId("contour"), 160),
+          points: normalizeVectorPoints(contour?.points, defaults.vectorPoints),
+          closed: contour?.closed !== false,
+        }))
+      : [];
+    node.vectorContours = [{
+      id: cleanString(input.vectorContours?.[0]?.id, makeId("contour"), 160),
+      points: node.vectorPoints,
+      closed: node.vectorClosed,
+    }, ...extraContours];
     normalizeVectorBounds(node);
   }
 
@@ -649,6 +723,16 @@ export function createVectorNodeFromWorldPoints(points, closed = false, override
   });
 }
 
+export function getVectorContours(node) {
+  if (node?.type !== NODE_TYPES.VECTOR) return [];
+  const primary = {
+    id: node.vectorContours?.[0]?.id ?? `${node.id}_contour_0`,
+    points: node.vectorPoints,
+    closed: node.vectorClosed,
+  };
+  return [primary, ...(node.vectorContours ?? []).slice(1)];
+}
+
 export function getVectorWorldPoints(node) {
   if (node?.type !== NODE_TYPES.VECTOR) return [];
   return node.vectorPoints.map((point) => localToWorld(node, point));
@@ -662,7 +746,8 @@ export function getVectorWorldHandle(node, pointIndex, kind) {
 
 export function normalizeVectorBounds(node) {
   if (node?.type !== NODE_TYPES.VECTOR || node.vectorPoints.length < 2) return node;
-  const bounds = getVectorControlBounds(node.vectorPoints);
+  const contours = getVectorContours(node);
+  const bounds = getVectorControlBounds(contours.flatMap((contour) => contour.points));
   const { minX, minY, maxX, maxY } = bounds;
   const rawWidth = maxX - minX;
   const rawHeight = maxY - minY;
@@ -672,7 +757,7 @@ export function normalizeVectorBounds(node) {
   const worldCenter = localToWorld(node, localCenter);
   const paddingX = (width - rawWidth) / 2;
   const paddingY = (height - rawHeight) / 2;
-  node.vectorPoints = node.vectorPoints.map((point) => ({
+  const projectPoint = (point) => ({
     x: point.x - minX + paddingX,
     y: point.y - minY + paddingY,
     in: point.in ? {
@@ -686,6 +771,11 @@ export function normalizeVectorBounds(node) {
     handleMode: point.handleMode ?? (point.in || point.out
       ? VECTOR_HANDLE_MODES.FREE
       : VECTOR_HANDLE_MODES.CORNER),
+  });
+  node.vectorPoints = node.vectorPoints.map(projectPoint);
+  node.vectorContours = contours.map((contour, index) => ({
+    ...contour,
+    points: index === 0 ? node.vectorPoints : contour.points.map(projectPoint),
   }));
   node.width = width;
   node.height = height;
@@ -888,21 +978,37 @@ export function getNodeAABB(node) {
 
 export function getNodeVisualBounds(node) {
   const geometryBounds = getNodeAABB(node);
-  const strokeExtent = node.strokeWidth > 0 && node.stroke !== "transparent"
+  const hasVisibleStroke = (node.strokes ?? []).length
+    ? node.strokes.some((paint) =>
+        paint.visible !== false && paint.opacity > 0 &&
+        (paint.type !== PAINT_TYPES.SOLID || paint.color !== "transparent")) || node.stroke !== "transparent"
+    : node.stroke !== "transparent";
+  const strokeExtent = node.strokeWidth > 0 && hasVisibleStroke
     ? node.type === NODE_TYPES.BOOLEAN ? node.strokeWidth : node.strokeWidth / 2
     : 0;
+  const hasLayerBlurEffect = node.effects?.some((effect) => effect.type === EFFECT_TYPES.LAYER_BLUR);
+  const layerBlur = hasLayerBlurEffect
+    ? node.effects.find((effect) =>
+        effect.type === EFFECT_TYPES.LAYER_BLUR && effect.visible !== false && effect.radius > 0)?.radius ?? 0
+    : node.layerBlur ?? 0;
+  const blurExtent = layerBlur * 2;
   const bounds = {
-    x: geometryBounds.x - strokeExtent,
-    y: geometryBounds.y - strokeExtent,
-    width: geometryBounds.width + strokeExtent * 2,
-    height: geometryBounds.height + strokeExtent * 2,
+    x: geometryBounds.x - strokeExtent - blurExtent,
+    y: geometryBounds.y - strokeExtent - blurExtent,
+    width: geometryBounds.width + (strokeExtent + blurExtent) * 2,
+    height: geometryBounds.height + (strokeExtent + blurExtent) * 2,
   };
-  if (!node.shadow?.enabled || node.shadow.opacity <= 0) return bounds;
-  const extent = node.shadow.blur * 2;
-  const shadowLeft = bounds.x + node.shadow.offsetX - extent;
-  const shadowTop = bounds.y + node.shadow.offsetY - extent;
-  const shadowRight = bounds.x + bounds.width + node.shadow.offsetX + extent;
-  const shadowBottom = bounds.y + bounds.height + node.shadow.offsetY + extent;
+  const hasShadowEffect = node.effects?.some((effect) => effect.type === EFFECT_TYPES.DROP_SHADOW);
+  const shadow = hasShadowEffect
+    ? node.effects.find((effect) =>
+        effect.type === EFFECT_TYPES.DROP_SHADOW && effect.visible !== false && effect.enabled !== false && effect.opacity > 0)
+    : node.shadow;
+  if (!shadow || shadow.enabled === false || shadow.opacity <= 0) return bounds;
+  const extent = shadow.blur * 2;
+  const shadowLeft = bounds.x + shadow.offsetX - extent;
+  const shadowTop = bounds.y + shadow.offsetY - extent;
+  const shadowRight = bounds.x + bounds.width + shadow.offsetX + extent;
+  const shadowBottom = bounds.y + bounds.height + shadow.offsetY + extent;
   const minX = Math.min(bounds.x, shadowLeft);
   const minY = Math.min(bounds.y, shadowTop);
   const maxX = Math.max(bounds.x + bounds.width, shadowRight);
@@ -1421,8 +1527,137 @@ function normalizeGradient(input, fallbackColor) {
   stops.sort((a, b) => a.position - b.position);
   return {
     angle: normalizeAngle(finiteNumber(source.angle, 0, -36_000, 36_000)),
+    centerX: finiteNumber(source.centerX, 0.5, 0, 1),
+    centerY: finiteNumber(source.centerY, 0.5, 0, 1),
+    radius: finiteNumber(source.radius, 0.5, 0.001, 4),
     stops,
   };
+}
+
+function normalizePaintStack(input, fallback) {
+  const source = Array.isArray(input) && input.length ? input : [fallback];
+  return source
+    .filter((paint) => paint && typeof paint === "object")
+    .slice(0, 8)
+    .map((paint) => {
+      const type = Object.values(PAINT_TYPES).includes(paint.type) ? paint.type : PAINT_TYPES.SOLID;
+      const color = cleanColor(paint.color, fallback.color ?? "transparent");
+      return {
+        id: cleanString(paint.id, makeId("paint"), 160),
+        type,
+        visible: paint.visible !== false,
+        opacity: finiteNumber(paint.opacity, 1, 0, 1),
+        blendMode: ["normal", "multiply", "screen", "overlay", "darken", "lighten"].includes(paint.blendMode)
+          ? paint.blendMode
+          : "normal",
+        color,
+        gradient: normalizeGradient(paint.gradient ?? fallback.gradient, color),
+      };
+    });
+}
+
+function normalizeTextRuns(input, textLength, defaults) {
+  if (!Array.isArray(input) || textLength <= 0) return [];
+  const runs = input
+    .filter((run) => run && typeof run === "object")
+    .slice(0, 2_000)
+    .map((run) => ({
+      start: Math.floor(finiteNumber(run.start, 0, 0, textLength)),
+      end: Math.floor(finiteNumber(run.end, textLength, 0, textLength)),
+      fontFamily: cleanString(run.fontFamily, defaults.fontFamily, 200),
+      fontRef: typeof run.fontRef === "string" ? cleanString(run.fontRef, "", 160) || null : null,
+      fontSize: finiteNumber(run.fontSize, defaults.fontSize, 1, 1_000),
+      fontWeight: finiteNumber(run.fontWeight, defaults.fontWeight, 100, 900),
+      fontStyle: run.fontStyle === "italic" ? "italic" : "normal",
+      letterSpacing: finiteNumber(run.letterSpacing, 0, -100, 1_000),
+      textDecoration: ["none", "underline", "line-through"].includes(run.textDecoration)
+        ? run.textDecoration
+        : "none",
+      fill: cleanColor(run.fill, defaults.fill),
+    }))
+    .filter((run) => run.end > run.start)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+  const output = [];
+  let cursor = 0;
+  for (const run of runs) {
+    const start = Math.max(cursor, run.start);
+    if (run.end <= start) continue;
+    output.push({ ...run, start, end: run.end });
+    cursor = run.end;
+  }
+  return output;
+}
+
+function normalizeEffects(input, shadow, legacyBlur) {
+  const effects = Array.isArray(input)
+    ? input.filter((effect) => effect && typeof effect === "object").slice(0, 16).map((effect) => {
+        if (effect.type === EFFECT_TYPES.LAYER_BLUR) {
+          return {
+            id: cleanString(effect.id, makeId("effect"), 160),
+            type: EFFECT_TYPES.LAYER_BLUR,
+            visible: effect.visible !== false,
+            radius: finiteNumber(effect.radius, 0, 0, 500),
+          };
+        }
+        return {
+          id: cleanString(effect.id, makeId("effect"), 160),
+          type: EFFECT_TYPES.DROP_SHADOW,
+          visible: effect.visible !== false,
+          ...normalizeShadow({ ...effect, enabled: effect.enabled !== false }, shadow),
+        };
+      })
+    : [];
+  if (!effects.some((effect) => effect.type === EFFECT_TYPES.DROP_SHADOW) && shadow.enabled) {
+    effects.push({ id: makeId("effect"), type: EFFECT_TYPES.DROP_SHADOW, visible: true, ...shadow });
+  }
+  const blur = finiteNumber(legacyBlur, 0, 0, 500);
+  if (!effects.some((effect) => effect.type === EFFECT_TYPES.LAYER_BLUR) && blur > 0) {
+    effects.push({ id: makeId("effect"), type: EFFECT_TYPES.LAYER_BLUR, visible: true, radius: blur });
+  }
+  return effects;
+}
+
+function normalizeAssetRecords(input) {
+  if (!Array.isArray(input)) return [];
+  const seenIDs = new Set();
+  let totalBytes = 0;
+  const assets = [];
+  for (const source of input.slice(0, 2_000)) {
+    if (!source || typeof source !== "object") continue;
+    const data = cleanAssetData(source.data);
+    const hash = typeof source.hash === "string" && /^[a-f\d]{64}$/i.test(source.hash)
+      ? source.hash.toLowerCase()
+      : "";
+    const id = cleanString(source.id, hash ? `asset_${hash}` : "", 160);
+    if (!id || !hash || !data || seenIDs.has(id)) continue;
+    const encoded = data.split(",")[1] ?? "";
+    const bytes = Math.max(0, Math.floor(encoded.length * 0.75) - (encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0));
+    if (bytes > 15 * 1024 * 1024) continue;
+    if (totalBytes + bytes > 100 * 1024 * 1024) continue;
+    totalBytes += bytes;
+    seenIDs.add(id);
+    const mimeType = /^data:([^;]+);/i.exec(data)?.[1]?.toLowerCase() ?? "application/octet-stream";
+    const kind = mimeType.startsWith("font/") || mimeType.includes("font-woff")
+      ? "font"
+      : "image";
+    const asset = {
+      id,
+      hash,
+      kind,
+      mimeType,
+      name: cleanString(source.name, kind === "font" ? "Font" : "Image", 200),
+      bytes,
+      data,
+      createdAt: cleanString(source.createdAt, new Date().toISOString(), 64),
+    };
+    if (kind === "font") {
+      asset.fontFamily = cleanString(source.fontFamily, asset.name.replace(/\.(?:woff2?)$/i, "") || "Embedded font", 200);
+      asset.fontWeight = finiteNumber(source.fontWeight, 400, 100, 900);
+      asset.fontStyle = source.fontStyle === "italic" ? "italic" : "normal";
+    }
+    assets.push(asset);
+  }
+  return assets;
 }
 
 function normalizeVectorPoints(input, fallback) {
@@ -1521,6 +1756,13 @@ function cleanOpaqueColor(value, fallback) {
 function cleanImageData(value) {
   if (typeof value !== "string" || value.length > 40_000_000) return "";
   return /^data:image\/(?:png|jpe?g|webp|gif);base64,[a-z\d+/=\s]+$/i.test(value)
+    ? value.replace(/\s/g, "")
+    : "";
+}
+
+function cleanAssetData(value) {
+  if (typeof value !== "string" || value.length > 40_000_000) return "";
+  return /^data:(?:image\/(?:png|jpe?g|webp|gif)|font\/woff2?|application\/font-woff2?);base64,[a-z\d+/=\s]+$/i.test(value)
     ? value.replace(/\s/g, "")
     : "";
 }

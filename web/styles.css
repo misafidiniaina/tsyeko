@@ -557,6 +557,52 @@ svg {
   padding: 2px 10px 10px;
 }
 
+.asset-records-list {
+  display: grid;
+  gap: 5px;
+  padding: 2px 10px 10px;
+}
+
+.asset-record {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: #202020;
+}
+
+.asset-record-icon {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  color: var(--accent-bright);
+  background: rgba(139, 92, 246, 0.18);
+}
+
+.asset-record-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.asset-record-copy strong,
+.asset-record-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.asset-record-copy strong { font-size: 11px; }
+.asset-record-copy small,
+.asset-record-usage { color: var(--text-faint); font-size: 9px; }
+
 .component-card {
   width: 100%;
   min-height: 52px;

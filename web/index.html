@@ -69,7 +69,7 @@
           <div id="assetsPanel" class="panel-content">
             <div class="assets-search">
               <svg viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="4.5" /><path d="m12 12 4 4" /></svg>
-              <input id="assetsSearch" placeholder="Search components" aria-label="Search local components" />
+              <input id="assetsSearch" placeholder="Search assets" aria-label="Search local assets" />
             </div>
             <p class="panel-label">Local components</p>
             <div class="components-list" id="componentsList"></div>
@@ -77,8 +77,12 @@
               <span class="empty-panel-icon">▧</span>
               <p>Create a reusable component from the selected layer or layers.</p>
             </div>
+            <p class="panel-label">Embedded files</p>
+            <div class="asset-records-list" id="assetRecordsList"></div>
             <div class="assets-actions">
               <button class="button button-quiet" id="importImageButton">Import image</button>
+              <button class="button button-quiet" id="importFontButton">Import font</button>
+              <button class="button button-quiet" id="cleanAssetsButton">Clean unused</button>
               <button class="button button-primary" id="createComponentButton">Create component</button>
               <button class="button button-quiet" id="createVariantSetButton" disabled>Combine as variants</button>
             </div>
@@ -158,6 +162,7 @@
       <button data-action="redo"><span>Redo</span><kbd>⇧⌘Z</kbd></button>
       <span class="menu-separator"></span>
       <button data-action="fit"><span>Zoom to fit</span><kbd>1</kbd></button>
+      <button data-action="performance"><span>Render performance</span><kbd></kbd></button>
       <button data-action="shortcuts"><span>Keyboard shortcuts</span><kbd>?</kbd></button>
     </div>
 
@@ -194,6 +199,7 @@
     <div class="toast-region" id="toastRegion" aria-live="polite"></div>
     <input type="file" id="fileInput" accept="application/json,.json" hidden />
     <input type="file" id="imageFileInput" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
+    <input type="file" id="fontFileInput" accept="font/woff,font/woff2,.woff,.woff2" hidden />
 
     <script type="module" src="/src/app.js"></script>
   </body>

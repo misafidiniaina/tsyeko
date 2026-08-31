@@ -3,6 +3,9 @@ import {
   getChildNodes,
   getDocumentBounds,
   getEffectiveOpacity,
+  getNodeAABB,
+  getNodesWithDescendants,
+  getVectorContours,
   getRenderableNodeIds,
   isCompositeNode,
   isNodeEffectivelyLocked,
@@ -12,17 +15,24 @@ import {
   pointInNode,
   worldToLocal,
 } from "./model.js";
-import { wrapTextLines } from "./text.js";
+import { layoutRichText, wrapTextLines } from "./text.js";
 import { createResolvedLayoutSnapshot } from "./layout.js";
 import {
   flattenVectorPath,
   getVectorSegments,
   nearestPointOnCubic,
 } from "./vector.js";
+import {
+  BoundsSurfaceCache,
+  renderBranchSignature,
+  summarizeFrameProfiles,
+} from "./render-cache.js";
 
 const HANDLE_SIZE = 8;
 const HANDLE_HIT_RADIUS = 8;
 const ROTATION_HANDLE_OFFSET = 25;
+const MAX_LOCAL_SURFACE_PIXELS = 16_777_216;
+const PROFILE_HISTORY_LIMIT = 120;
 const imageCache = new Map();
 
 const HANDLE_POINTS = Object.freeze({
@@ -44,6 +54,13 @@ export class CanvasRenderer {
     this.height = 1;
     this.pixelRatio = 1;
     this.onInvalidate = null;
+    this.resolveAsset = null;
+    this.compositeCache = new BoundsSurfaceCache();
+    this.frameStats = emptyFrameStats();
+    this.lastFrameStats = emptyFrameStats();
+    this.profileHistory = [];
+    this.previousRenderState = null;
+    this.sceneInvalidated = true;
   }
 
   resize() {
@@ -62,14 +79,39 @@ export class CanvasRenderer {
       this.pixelRatio = pixelRatio;
       this.canvas.width = Math.round(width * pixelRatio);
       this.canvas.height = Math.round(height * pixelRatio);
+      this.compositeCache.clear();
+      this.previousRenderState = null;
+      this.sceneInvalidated = true;
     }
     return changed;
   }
 
   render(document, selectedIds, camera, options = {}) {
+    const startedAt = monotonicNow();
+    this.frameStats = emptyFrameStats();
     const context = this.context;
     const selectedSet = new Set(selectedIds);
+    const renderState = this.captureRenderState(document, selectedIds, camera, options);
+    const dirtyPlan = this.createDirtyPlan(renderState);
+    this.previousRenderState = renderState;
+    this.sceneInvalidated = false;
+    this.frameStats.fullRedraw = dirtyPlan.full;
+    this.frameStats.dirtyRegions = dirtyPlan.regions.length;
+    if (dirtyPlan.skip) {
+      this.frameStats.skipped = true;
+      this.finishFrameProfile(startedAt, options);
+      return;
+    }
+
     context.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
+    if (!dirtyPlan.full) {
+      context.save();
+      context.beginPath();
+      for (const region of dirtyPlan.regions) {
+        context.rect(region.x, region.y, region.width, region.height);
+      }
+      context.clip();
+    }
     context.clearRect(0, 0, this.width, this.height);
     context.fillStyle = options.background ?? document.background ?? "#101114";
     context.fillRect(0, 0, this.width, this.height);
@@ -111,10 +153,17 @@ export class CanvasRenderer {
         this.drawVectorEdit(vector, camera, options.vectorEdit);
       }
     }
+    if (!dirtyPlan.full) context.restore();
+    this.finishFrameProfile(startedAt, options);
   }
 
   drawSceneNode(document, node, camera, options = {}) {
+    this.frameStats.nodesVisited += 1;
     if (!isNodeEffectivelyVisible(document, node) || !branchIntersectsSet(document, node, options.idSet)) return;
+    if (node.type !== NODE_TYPES.GROUP && !this.nodeIntersectsViewport(node, camera)) {
+      this.frameStats.nodesCulled += 1;
+      return;
+    }
     const children = getChildNodes(document, node.id);
 
     if (node.type === NODE_TYPES.GROUP) {
@@ -123,17 +172,20 @@ export class CanvasRenderer {
     }
 
     if (node.type === NODE_TYPES.BOOLEAN) {
+      this.frameStats.nodesDrawn += 1;
       this.drawBooleanComposite(document, node, camera, options);
       return;
     }
 
     if (node.type === NODE_TYPES.MASK) {
+      this.frameStats.nodesDrawn += 1;
       this.drawMaskComposite(document, node, camera, options);
       return;
     }
 
     const shouldDrawNode = !options.idSet || options.idSet.has(node.id);
     if (shouldDrawNode && node.id !== options.editingId) {
+      this.frameStats.nodesDrawn += 1;
       this.drawNode(node, camera, {
         ...options,
         effectiveOpacity: getOpacityUntil(document, node, options.opacityStopId),
@@ -163,38 +215,72 @@ export class CanvasRenderer {
     context.beginPath();
     roundedRect(context, -width / 2, -height / 2, width, height, radius);
     context.clip();
-    context.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
+    this.setScreenTransform(context);
   }
 
   drawBooleanComposite(document, node, camera, options = {}) {
-    const mask = this.createBooleanMaskLayer(document, node, camera, options);
-    const painted = this.colorizeMask(mask, node, camera, false);
-    const output = this.createLayer();
+    const bounds = this.getCompositeLayerBounds(node, camera);
+    const cached = this.getCachedComposite(document, node, camera, options, "boolean", bounds);
+    if (cached) {
+      this.drawCompositeLayer(cached, document, node, camera, options);
+      return;
+    }
+    const mask = this.createBooleanMaskLayer(document, node, camera, options, bounds);
+    const output = this.createLayer(bounds);
     const outputContext = output.getContext("2d");
-    outputContext.drawImage(painted, 0, 0);
-
-    if (node.strokeWidth > 0 && node.stroke !== "transparent") {
-      const expanded = this.expandMask(mask, node.strokeWidth * camera.zoom);
-      const stroke = this.colorizeMask(expanded, node, camera, true);
-      outputContext.globalCompositeOperation = "destination-over";
-      outputContext.drawImage(stroke, 0, 0);
+    const fills = visiblePaints(node.fills, {
+      type: node.fillType,
+      color: node.fill,
+      gradient: node.gradient,
+    }, "fill");
+    for (const paint of fills) {
+      const painted = this.colorizeMask(mask, node, camera, paint);
+      outputContext.save();
+      outputContext.globalAlpha = paint.opacity ?? 1;
+      outputContext.globalCompositeOperation = paintBlendMode(paint.blendMode);
+      this.drawScreenLayer(outputContext, painted);
+      outputContext.restore();
     }
 
+    const strokes = visiblePaints(node.strokes, { type: "solid", color: node.stroke }, "stroke")
+      .filter((paint) => paint.color !== "transparent" || paint.type !== "solid");
+    if (node.strokeWidth > 0 && strokes.length) {
+      const expanded = this.expandMask(mask, node.strokeWidth * camera.zoom);
+      for (const paint of strokes) {
+        const stroke = this.colorizeMask(expanded, node, camera, paint);
+        outputContext.save();
+        outputContext.globalAlpha = paint.opacity ?? 1;
+        outputContext.globalCompositeOperation = "destination-over";
+        this.drawScreenLayer(outputContext, stroke);
+        outputContext.restore();
+      }
+    }
+
+    this.cacheComposite(document, node, camera, options, "boolean", bounds, output);
     this.drawCompositeLayer(output, document, node, camera, options);
   }
 
   drawMaskComposite(document, node, camera, options = {}) {
-    const output = this.createMaskOutputLayer(document, node, camera, options);
+    const bounds = this.getCompositeLayerBounds(node, camera);
+    const cached = this.getCachedComposite(document, node, camera, options, "mask", bounds);
+    if (cached) {
+      this.drawCompositeLayer(cached, document, node, camera, options);
+      return;
+    }
+    const output = this.createMaskOutputLayer(document, node, camera, options, bounds);
+    this.cacheComposite(document, node, camera, options, "mask", bounds, output);
     this.drawCompositeLayer(output, document, node, camera, options);
   }
 
   drawCompositeLayer(layer, document, node, camera, options = {}) {
     const context = this.context;
     context.save();
-    context.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
+    this.setScreenTransform(context);
     context.globalAlpha = getOpacityUntil(document, node, options.opacityStopId);
+    const layerBlur = effectiveNodeLayerBlur(node);
+    context.filter = layerBlur > 0 ? `blur(${Math.min(250, layerBlur * camera.zoom)}px)` : "none";
     this.applyNodeShadow(node, camera.zoom, options);
-    context.drawImage(layer, 0, 0, this.width, this.height);
+    this.drawScreenLayer(context, layer);
     context.restore();
 
     if (isNodeEffectivelyLocked(document, node) && options.lockIndicators !== false) {
@@ -202,32 +288,32 @@ export class CanvasRenderer {
     }
   }
 
-  createBooleanMaskLayer(document, node, camera, options = {}) {
+  createBooleanMaskLayer(document, node, camera, options = {}, bounds = this.getCompositeLayerBounds(node, camera)) {
     const children = getChildNodes(document, node.id)
       .filter((child) => isNodeEffectivelyVisible(document, child));
-    const output = this.createLayer();
+    const output = this.createLayer(bounds);
     if (!children.length) return output;
     const context = output.getContext("2d");
 
     children.forEach((child, index) => {
-      const source = this.createBranchMaskLayer(document, child, camera, options);
+      const source = this.createBranchMaskLayer(document, child, camera, options, bounds);
       context.globalCompositeOperation = index === 0
         ? "source-over"
         : booleanCompositeOperation(node.booleanOperation);
-      context.drawImage(source, 0, 0);
+      this.drawScreenLayer(context, source);
     });
     context.globalCompositeOperation = "source-over";
     return output;
   }
 
-  createMaskOutputLayer(document, node, camera, options = {}) {
+  createMaskOutputLayer(document, node, camera, options = {}, bounds = this.getCompositeLayerBounds(node, camera)) {
     const children = getChildNodes(document, node.id);
-    const output = this.createLayer();
+    const output = this.createLayer(bounds);
     if (children.length < 2 || !isNodeEffectivelyVisible(document, children[0])) return output;
 
-    const source = this.createBranchMaskLayer(document, children[0], camera, options);
+    const source = this.createBranchMaskLayer(document, children[0], camera, options, bounds);
     const context = output.getContext("2d");
-    context.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
+    this.setScreenTransform(context);
     this.withContext(context, () => {
       const contentOptions = {
         ...options,
@@ -241,17 +327,16 @@ export class CanvasRenderer {
       }
     });
     context.save();
-    context.setTransform(1, 0, 0, 1, 0, 0);
     context.globalCompositeOperation = "destination-in";
-    context.drawImage(source, 0, 0);
+    this.drawScreenLayer(context, source);
     context.restore();
     return output;
   }
 
-  createBranchMaskLayer(document, root, camera, options = {}) {
-    const output = this.createLayer();
+  createBranchMaskLayer(document, root, camera, options = {}, bounds = this.getCompositeLayerBounds(root, camera)) {
+    const output = this.createLayer(bounds);
     const context = output.getContext("2d");
-    context.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
+    this.setScreenTransform(context);
     this.withContext(context, () => this.drawBranchMask(document, root, camera, options));
     return output;
   }
@@ -312,7 +397,13 @@ export class CanvasRenderer {
       context.ellipse(0, 0, width / 2, height / 2, 0, 0, Math.PI * 2);
       context.fill();
     } else if (node.type === NODE_TYPES.TEXT) {
-      this.drawText({ ...node, fill: "#ffffff", fillType: "solid" }, width, height, zoom);
+      this.drawText({
+        ...node,
+        fill: "#ffffff",
+        fillType: "solid",
+        fills: [{ type: "solid", color: "#ffffff", opacity: 1, visible: true, blendMode: "normal" }],
+        textRuns: (node.textRuns ?? []).map((run) => ({ ...run, fill: "#ffffff" })),
+      }, width, height, zoom);
     } else {
       const radius = Math.min(node.cornerRadius * zoom, width / 2, height / 2);
       context.beginPath();
@@ -322,8 +413,8 @@ export class CanvasRenderer {
     context.restore();
   }
 
-  colorizeMask(mask, node, camera, useStroke) {
-    const output = this.createLayer();
+  colorizeMask(mask, node, camera, paint) {
+    const output = this.createLayer(getLayerBounds(mask));
     const context = output.getContext("2d");
     const center = this.worldToScreen(
       { x: node.x + node.width / 2, y: node.y + node.height / 2 },
@@ -331,12 +422,10 @@ export class CanvasRenderer {
     );
     const width = node.width * camera.zoom;
     const height = node.height * camera.zoom;
-    context.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
+    this.setScreenTransform(context);
     context.translate(center.x, center.y);
     context.rotate((node.rotation * Math.PI) / 180);
-    context.fillStyle = useStroke
-      ? node.stroke
-      : createNodeFill(context, node, width, height);
+    context.fillStyle = createNodeFill(context, node, width, height, paint);
     const paintExtent = Math.max(this.width, this.height) * 3 + width + height;
     context.fillRect(-paintExtent, -paintExtent, paintExtent * 2, paintExtent * 2);
     context.setTransform(1, 0, 0, 1, 0, 0);
@@ -346,7 +435,7 @@ export class CanvasRenderer {
   }
 
   expandMask(mask, screenRadius) {
-    const output = this.createLayer();
+    const output = this.createLayer(getLayerBounds(mask));
     const context = output.getContext("2d");
     const radius = Math.max(0, screenRadius * this.pixelRatio);
     context.drawImage(mask, 0, 0);
@@ -360,18 +449,241 @@ export class CanvasRenderer {
   }
 
   drawPhysicalLayer(layer) {
-    const context = this.context;
+    this.drawScreenLayer(this.context, layer);
+  }
+
+  createLayer(bounds = { x: 0, y: 0, width: this.width, height: this.height }) {
+    const normalized = normalizeSurfaceBounds(bounds, this.pixelRatio);
+    const canvas = this.canvas.ownerDocument.createElement("canvas");
+    canvas.width = Math.max(1, Math.ceil(normalized.width * this.pixelRatio));
+    canvas.height = Math.max(1, Math.ceil(normalized.height * this.pixelRatio));
+    canvas.__tsyaikoBounds = {
+      ...normalized,
+      width: canvas.width / this.pixelRatio,
+      height: canvas.height / this.pixelRatio,
+    };
+    return canvas;
+  }
+
+  setScreenTransform(context) {
+    const bounds = getLayerBounds(context.canvas);
+    context.setTransform(
+      this.pixelRatio,
+      0,
+      0,
+      this.pixelRatio,
+      -bounds.x * this.pixelRatio,
+      -bounds.y * this.pixelRatio,
+    );
+  }
+
+  drawScreenLayer(context, layer) {
+    const bounds = getLayerBounds(layer);
     context.save();
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.drawImage(layer, 0, 0);
+    this.setScreenTransform(context);
+    context.drawImage(layer, bounds.x, bounds.y, bounds.width, bounds.height);
     context.restore();
   }
 
-  createLayer() {
-    const canvas = this.canvas.ownerDocument.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(this.width * this.pixelRatio));
-    canvas.height = Math.max(1, Math.round(this.height * this.pixelRatio));
-    return canvas;
+  getCompositeLayerBounds(node, camera) {
+    const world = getNodeAABB(node);
+    const stroke = Math.max(2, (node.strokeWidth ?? 0) * camera.zoom + 2);
+    let bounds = {
+      x: world.x * camera.zoom + camera.x - stroke,
+      y: world.y * camera.zoom + camera.y - stroke,
+      width: world.width * camera.zoom + stroke * 2,
+      height: world.height * camera.zoom + stroke * 2,
+      clipped: false,
+    };
+    const physicalPixels = bounds.width * this.pixelRatio * bounds.height * this.pixelRatio;
+    if (physicalPixels > MAX_LOCAL_SURFACE_PIXELS) {
+      bounds = intersectBounds(bounds, {
+        x: -256,
+        y: -256,
+        width: this.width + 512,
+        height: this.height + 512,
+      });
+      bounds.clipped = true;
+    }
+    return normalizeSurfaceBounds(bounds, this.pixelRatio);
+  }
+
+  getNodeScreenBounds(node, camera, extraPadding = 0) {
+    const world = getNodeAABB(node);
+    const shadow = effectiveNodeShadow(node);
+    const blur = Math.max(
+      shadow ? shadow.blur * 2 + Math.abs(shadow.offsetX) + Math.abs(shadow.offsetY) : 0,
+      effectiveNodeLayerBlur(node) * 2,
+    ) * camera.zoom;
+    const padding = Math.max(8, blur, (node.strokeWidth ?? 0) * camera.zoom) + extraPadding;
+    let bounds = {
+      x: world.x * camera.zoom + camera.x - padding,
+      y: world.y * camera.zoom + camera.y - padding,
+      width: world.width * camera.zoom + padding * 2,
+      height: world.height * camera.zoom + padding * 2,
+    };
+    if (node.type === NODE_TYPES.FRAME) {
+      const topLeft = this.worldToScreen(localToWorld(node, { x: 0, y: 0 }), camera);
+      const estimatedLabelWidth = Math.min(900, Math.max(24, String(node.name).length * 6.5));
+      bounds = unionBounds(bounds, {
+        x: topLeft.x - 2,
+        y: topLeft.y - 20,
+        width: estimatedLabelWidth + 4,
+        height: 22,
+      });
+    }
+    return bounds;
+  }
+
+  nodeIntersectsViewport(node, camera) {
+    return boundsIntersect(
+      this.getNodeScreenBounds(node, camera),
+      { x: 0, y: 0, width: this.width, height: this.height },
+    );
+  }
+
+  captureRenderState(document, selectedIds, camera, options) {
+    const selectedSet = new Set(options.selection === false ? [] : selectedIds);
+    const nodes = new Map(document.nodes.map((node, index) => {
+      const signatureNodes = isCompositeNode(node)
+        ? getNodesWithDescendants(document, [node.id])
+        : [node];
+      return [node.id, {
+        signature: `${index}:${renderBranchSignature(signatureNodes)}`,
+        bounds: selectedSet.has(node.id)
+          ? expandBounds(this.getNodeScreenBounds(node, camera), 40)
+          : this.getNodeScreenBounds(node, camera),
+      }];
+    }));
+    const transient = Boolean(
+      options.guides?.length || options.marquee || options.penDraft || options.vectorEdit,
+    );
+    return {
+      nodes,
+      selectedIds: selectedSet,
+      camera: { x: camera.x, y: camera.y, zoom: camera.zoom },
+      transient,
+      baseKey: JSON.stringify({
+        width: this.width,
+        height: this.height,
+        pixelRatio: this.pixelRatio,
+        background: options.background ?? document.background ?? "#101114",
+        grid: options.grid !== false,
+        ids: options.ids ?? null,
+        editingId: options.editingId ?? null,
+        frameLabels: options.frameLabels !== false,
+        lockIndicators: options.lockIndicators !== false,
+      }),
+    };
+  }
+
+  createDirtyPlan(current) {
+    const previous = this.previousRenderState;
+    if (
+      this.sceneInvalidated ||
+      !previous ||
+      previous.baseKey !== current.baseKey ||
+      previous.transient ||
+      current.transient ||
+      previous.camera.x !== current.camera.x ||
+      previous.camera.y !== current.camera.y ||
+      previous.camera.zoom !== current.camera.zoom
+    ) {
+      return { full: true, skip: false, regions: [] };
+    }
+
+    const dirty = [];
+    const ids = new Set([...previous.nodes.keys(), ...current.nodes.keys()]);
+    for (const id of ids) {
+      const before = previous.nodes.get(id);
+      const after = current.nodes.get(id);
+      if (before?.signature === after?.signature) continue;
+      if (before) dirty.push(before.bounds);
+      if (after) dirty.push(after.bounds);
+    }
+
+    const selected = new Set([...previous.selectedIds, ...current.selectedIds]);
+    for (const id of selected) {
+      if (previous.selectedIds.has(id) === current.selectedIds.has(id)) continue;
+      const before = previous.nodes.get(id)?.bounds;
+      const after = current.nodes.get(id)?.bounds;
+      if (before) dirty.push(expandBounds(before, 40));
+      if (after) dirty.push(expandBounds(after, 40));
+    }
+
+    const viewport = { x: 0, y: 0, width: this.width, height: this.height };
+    const regions = mergeDirtyBounds(dirty
+      .filter((bounds) => boundsIntersect(bounds, viewport))
+      .map((bounds) => intersectBounds(expandBounds(bounds, 2), viewport)));
+    if (!regions.length) return { full: false, skip: true, regions: [] };
+    const dirtyArea = regions.reduce((total, region) => total + region.width * region.height, 0);
+    if (regions.length > 16 || dirtyArea > this.width * this.height * 0.65) {
+      return { full: true, skip: false, regions: [] };
+    }
+    return { full: false, skip: false, regions };
+  }
+
+  finishFrameProfile(startedAt, options) {
+    this.frameStats.frameMs = monotonicNow() - startedAt;
+    this.frameStats.cacheEntries = this.compositeCache.stats.entries;
+    this.frameStats.cacheBytes = this.compositeCache.stats.bytes;
+    this.lastFrameStats = { ...this.frameStats };
+    this.profileHistory.push(this.lastFrameStats);
+    if (this.profileHistory.length > PROFILE_HISTORY_LIMIT) this.profileHistory.shift();
+    options.onProfile?.(this.getPerformanceStats());
+  }
+
+  compositeDescriptor(document, node, camera, options, kind, bounds) {
+    if (options.idSet || options.editingId || options.opacityStopId) return null;
+    const branch = getNodesWithDescendants(document, [node.id]);
+    const dimensions = `${Math.round(bounds.width * this.pixelRatio)}x${Math.round(bounds.height * this.pixelRatio)}`;
+    const clipKey = bounds.clipped ? `:${bounds.x.toFixed(2)}:${bounds.y.toFixed(2)}` : "";
+    const phaseKey = `${subpixelPhase(camera.x - bounds.x, this.pixelRatio)}:${subpixelPhase(camera.y - bounds.y, this.pixelRatio)}`;
+    return {
+      key: `${kind}:${renderBranchSignature(branch)}:${camera.zoom.toFixed(5)}:${this.pixelRatio}:${dimensions}:${phaseKey}:${options.shadows !== false}${clipKey}`,
+      nodeIds: branch.map((item) => item.id),
+    };
+  }
+
+  getCachedComposite(document, node, camera, options, kind, bounds) {
+    const descriptor = this.compositeDescriptor(document, node, camera, options, kind, bounds);
+    if (!descriptor) return null;
+    const entry = this.compositeCache.get(descriptor.key);
+    if (!entry) {
+      this.frameStats.compositeCacheMisses += 1;
+      return null;
+    }
+    entry.surface.__tsyaikoBounds = { ...getLayerBounds(entry.surface), x: bounds.x, y: bounds.y };
+    this.frameStats.compositeCacheHits += 1;
+    return entry.surface;
+  }
+
+  cacheComposite(document, node, camera, options, kind, bounds, surface) {
+    const descriptor = this.compositeDescriptor(document, node, camera, options, kind, bounds);
+    if (!descriptor) return;
+    this.compositeCache.set(descriptor.key, surface, {
+      rootId: node.id,
+      nodeIds: descriptor.nodeIds,
+      kind,
+    });
+  }
+
+  invalidateCompositeCache(nodeIds = null) {
+    this.sceneInvalidated = true;
+    if (!nodeIds) {
+      this.compositeCache.clear();
+      return;
+    }
+    const dirty = new Set(Array.isArray(nodeIds) ? nodeIds : [nodeIds]);
+    this.compositeCache.deleteWhere((entry) =>
+      entry.metadata.nodeIds?.some((id) => dirty.has(id)));
+  }
+
+  getPerformanceStats() {
+    return {
+      ...this.lastFrameStats,
+      history: summarizeFrameProfiles(this.profileHistory),
+    };
   }
 
   withContext(context, callback) {
@@ -418,6 +730,8 @@ export class CanvasRenderer {
     context.translate(center.x, center.y);
     context.rotate((node.rotation * Math.PI) / 180);
     context.globalAlpha = options.effectiveOpacity ?? node.opacity;
+    const layerBlur = effectiveNodeLayerBlur(node);
+    context.filter = layerBlur > 0 ? `blur(${Math.min(250, layerBlur * zoom)}px)` : "none";
 
     this.applyNodeShadow(node, zoom, options);
 
@@ -459,30 +773,50 @@ export class CanvasRenderer {
 
   applyNodeShadow(node, zoom, options = {}) {
     const context = this.context;
-    if (options.shadows === false || !node.shadow?.enabled || node.shadow.opacity <= 0) {
+    const shadow = effectiveNodeShadow(node);
+    if (options.shadows === false || !shadow || shadow.enabled === false || shadow.opacity <= 0) {
       context.shadowColor = "transparent";
       return;
     }
-    context.shadowColor = colorWithOpacity(node.shadow.color, node.shadow.opacity);
-    context.shadowBlur = Math.min(250, node.shadow.blur * zoom);
-    context.shadowOffsetX = Math.max(-10_000, Math.min(10_000, node.shadow.offsetX * zoom));
-    context.shadowOffsetY = Math.max(-10_000, Math.min(10_000, node.shadow.offsetY * zoom));
+    context.shadowColor = colorWithOpacity(shadow.color, shadow.opacity);
+    context.shadowBlur = Math.min(250, shadow.blur * zoom);
+    context.shadowOffsetX = Math.max(-10_000, Math.min(10_000, shadow.offsetX * zoom));
+    context.shadowOffsetY = Math.max(-10_000, Math.min(10_000, shadow.offsetY * zoom));
   }
 
   paintPath(node, width, height, zoom, options = {}) {
     const context = this.context;
     const shouldFill = options.fill !== false;
     if (shouldFill) {
-      context.fillStyle = createNodeFill(context, node, width, height);
-      context.fill(options.fillRule ?? "nonzero");
+      const fills = visiblePaints(node.fills, {
+        type: node.fillType,
+        color: node.fill,
+        gradient: node.gradient,
+      }, "fill");
+      for (const paint of fills) {
+        context.save();
+        context.globalAlpha *= paint.opacity ?? 1;
+        context.globalCompositeOperation = paintBlendMode(paint.blendMode);
+        context.fillStyle = createNodeFill(context, node, width, height, paint);
+        context.fill(options.fillRule ?? "nonzero");
+        context.restore();
+        context.shadowColor = "transparent";
+      }
       context.shadowColor = "transparent";
     }
     if (node.strokeWidth > 0) {
       context.lineWidth = Math.max(0.5, node.strokeWidth * zoom);
-      context.strokeStyle = node.stroke;
       context.lineJoin = "round";
       context.lineCap = "round";
-      context.stroke();
+      const strokes = visiblePaints(node.strokes, { type: "solid", color: node.stroke }, "stroke");
+      for (const paint of strokes) {
+        context.save();
+        context.globalAlpha *= paint.opacity ?? 1;
+        context.globalCompositeOperation = paintBlendMode(paint.blendMode);
+        context.strokeStyle = createNodeFill(context, node, width, height, paint);
+        context.stroke();
+        context.restore();
+      }
     }
     context.shadowColor = "transparent";
   }
@@ -492,10 +826,45 @@ export class CanvasRenderer {
     const fontSize = node.fontSize * zoom;
     if (fontSize < 2) return;
 
-    context.fillStyle = createNodeFill(context, node, width, height);
-    context.font = `${node.fontWeight} ${fontSize}px ${node.fontFamily}`;
     context.textBaseline = "top";
     context.textAlign = node.textAlign;
+
+    if (node.textRuns?.length) {
+      const lines = layoutRichText(node, width / zoom);
+      let y = -height / 2;
+      for (const line of lines) {
+        let x = node.textAlign === "center"
+          ? -line.width * zoom / 2
+          : node.textAlign === "right"
+            ? width / 2 - line.width * zoom
+            : -width / 2;
+        for (const fragment of line.fragments) {
+          const style = fragment.style;
+          context.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize * zoom}px ${style.fontFamily}`;
+          context.textAlign = "left";
+          context.fillStyle = style.fill;
+          if ("letterSpacing" in context) context.letterSpacing = `${style.letterSpacing * zoom}px`;
+          context.fillText(fragment.text, x, y);
+          if (style.textDecoration !== "none") {
+            const decorationY = style.textDecoration === "underline"
+              ? y + style.fontSize * zoom
+              : y + style.fontSize * zoom * 0.55;
+            context.beginPath();
+            context.moveTo(x, decorationY);
+            context.lineTo(x + fragment.width * zoom, decorationY);
+            context.lineWidth = Math.max(1, style.fontSize * zoom / 16);
+            context.strokeStyle = style.fill;
+            context.stroke();
+          }
+          x += fragment.width * zoom;
+        }
+        y += line.height * zoom;
+        if (y > height / 2) break;
+      }
+      return;
+    }
+
+    context.font = `${node.fontWeight} ${fontSize}px ${node.fontFamily}`;
 
     const left = -width / 2;
     const textX = node.textAlign === "center"
@@ -503,13 +872,26 @@ export class CanvasRenderer {
       : node.textAlign === "right"
         ? width / 2
         : left;
-    const lines = wrapTextLines(node.text, width / zoom, node.fontSize, node.fontWeight);
+    const lines = wrapTextLines(node.text, width / zoom, node.fontSize, node.fontWeight, node.fontFamily);
     const lineHeight = fontSize * node.lineHeight;
     let y = -height / 2;
-    for (const line of lines) {
-      if (y > height / 2) break;
-      context.fillText(line, textX, y);
-      y += lineHeight;
+    const fills = visiblePaints(node.fills, {
+      type: node.fillType,
+      color: node.fill,
+      gradient: node.gradient,
+    }, "fill");
+    for (const paint of fills) {
+      context.save();
+      context.globalAlpha *= paint.opacity ?? 1;
+      context.globalCompositeOperation = paintBlendMode(paint.blendMode);
+      context.fillStyle = createNodeFill(context, node, width, height, paint);
+      y = -height / 2;
+      for (const line of lines) {
+        if (y > height / 2) break;
+        context.fillText(line, textX, y);
+        y += lineHeight;
+      }
+      context.restore();
     }
   }
 
@@ -522,12 +904,24 @@ export class CanvasRenderer {
     context.save();
     context.beginPath();
     roundedRect(context, x, y, width, height, radius);
-    context.fillStyle = createNodeFill(context, node, width, height);
-    context.fill();
-    context.shadowColor = "transparent";
+    const fills = visiblePaints(node.fills, {
+      type: node.fillType,
+      color: node.fill,
+      gradient: node.gradient,
+    }, "fill");
+    for (const paint of fills) {
+      context.save();
+      context.globalAlpha *= paint.opacity ?? 1;
+      context.globalCompositeOperation = paintBlendMode(paint.blendMode);
+      context.fillStyle = createNodeFill(context, node, width, height, paint);
+      context.fill();
+      context.restore();
+      context.shadowColor = "transparent";
+    }
     context.clip();
 
-    const entry = node.imageData ? getImageEntry(node.imageData) : null;
+    const imageSource = this.resolveAsset?.(node) ?? node.imageData;
+    const entry = imageSource ? getImageEntry(imageSource) : null;
     if (entry?.status === "loaded") {
       const image = entry.image;
       const scale = node.imageFit === "contain"
@@ -542,6 +936,7 @@ export class CanvasRenderer {
         entry.renderers.add(this);
         entry.promise.finally(() => {
           entry.renderers.delete(this);
+          this.invalidateCompositeCache();
           this.onInvalidate?.();
         });
       }
@@ -549,11 +944,18 @@ export class CanvasRenderer {
     context.restore();
 
     if (node.strokeWidth > 0) {
-      context.beginPath();
-      roundedRect(context, x, y, width, height, radius);
-      context.lineWidth = Math.max(0.5, node.strokeWidth * zoom);
-      context.strokeStyle = node.stroke;
-      context.stroke();
+      const strokes = visiblePaints(node.strokes, { type: "solid", color: node.stroke }, "stroke");
+      for (const paint of strokes) {
+        context.save();
+        context.beginPath();
+        roundedRect(context, x, y, width, height, radius);
+        context.lineWidth = Math.max(0.5, node.strokeWidth * zoom);
+        context.globalAlpha *= paint.opacity ?? 1;
+        context.globalCompositeOperation = paintBlendMode(paint.blendMode);
+        context.strokeStyle = createNodeFill(context, node, width, height, paint);
+        context.stroke();
+        context.restore();
+      }
     }
   }
 
@@ -1058,32 +1460,34 @@ function getOpacityUntil(document, node, stopId = null) {
 }
 
 function buildVectorPath(context, node, zoom) {
-  const [first] = node.vectorPoints;
-  if (!first) return;
   const offsetX = (node.width * zoom) / 2;
   const offsetY = (node.height * zoom) / 2;
   const project = (point) => ({
     x: point.x * zoom - offsetX,
     y: point.y * zoom - offsetY,
   });
-  const start = project(first);
-  context.moveTo(start.x, start.y);
-  for (const segment of getVectorSegments(node)) {
-    const mapped = mapSegment(segment, project);
-    if (segment.curved) {
-      context.bezierCurveTo(
-        mapped.c1.x,
-        mapped.c1.y,
-        mapped.c2.x,
-        mapped.c2.y,
-        mapped.p3.x,
-        mapped.p3.y,
-      );
-    } else {
-      context.lineTo(mapped.p3.x, mapped.p3.y);
+  for (const contour of getVectorContours(node)) {
+    const [first] = contour.points;
+    if (!first) continue;
+    const start = project(first);
+    context.moveTo(start.x, start.y);
+    for (const segment of getVectorSegments(contour.points, contour.closed)) {
+      const mapped = mapSegment(segment, project);
+      if (segment.curved) {
+        context.bezierCurveTo(
+          mapped.c1.x,
+          mapped.c1.y,
+          mapped.c2.x,
+          mapped.c2.y,
+          mapped.p3.x,
+          mapped.p3.y,
+        );
+      } else {
+        context.lineTo(mapped.p3.x, mapped.p3.y);
+      }
     }
+    if (contour.closed) context.closePath();
   }
-  if (node.vectorClosed) context.closePath();
 }
 
 function traceVectorPathOnScreen(context, node, camera, renderer) {
@@ -1182,15 +1586,17 @@ export function pointInSceneNode(document, node, worldPoint, padding = 0) {
   }
   if (node.type === NODE_TYPES.VECTOR) {
     const local = worldToLocal(node, worldPoint);
-    const flattened = flattenVectorPath(node);
-    const inside = node.vectorClosed && (
-      node.vectorFillRule === "evenodd"
-        ? pointInPolygon(local, flattened)
-        : pointInPolygonNonZero(local, flattened)
-    );
+    const contours = getVectorContours(node).map((contour) => ({
+      ...contour,
+      flattened: flattenVectorPath(contour.points, contour.closed),
+    }));
+    const closedContours = contours.filter((contour) => contour.closed);
+    const inside = node.vectorFillRule === "evenodd"
+      ? closedContours.filter((contour) => pointInPolygon(local, contour.flattened)).length % 2 === 1
+      : closedContours.reduce((total, contour) => total + polygonWinding(local, contour.flattened), 0) !== 0;
     const pathPadding = Math.max(padding, node.strokeWidth / 2 + padding);
-    const nearPath = flattened.slice(1).some((end, flattenedIndex) =>
-      distanceToSegment(local, flattened[flattenedIndex], end) <= pathPadding);
+    const nearPath = contours.some(({ flattened }) => flattened.slice(1).some((end, flattenedIndex) =>
+      distanceToSegment(local, flattened[flattenedIndex], end) <= pathPadding));
     return inside || nearPath;
   }
   return true;
@@ -1210,6 +1616,10 @@ function pointInPolygon(point, polygon) {
 }
 
 function pointInPolygonNonZero(point, polygon) {
+  return polygonWinding(point, polygon) !== 0;
+}
+
+function polygonWinding(point, polygon) {
   let winding = 0;
   for (let index = 0; index < polygon.length; index += 1) {
     const start = polygon[index];
@@ -1219,7 +1629,7 @@ function pointInPolygonNonZero(point, polygon) {
     if (start.y <= point.y && end.y > point.y && side > 0) winding += 1;
     if (start.y > point.y && end.y <= point.y && side < 0) winding -= 1;
   }
-  return winding !== 0;
+  return winding;
 }
 
 function projectPointToSegment(point, start, end) {
@@ -1239,25 +1649,72 @@ function distanceToSegment(point, start, end) {
   return distance(point, projectPointToSegment(point, start, end));
 }
 
-function createNodeFill(context, node, width, height) {
-  if (node.fillType !== "linear-gradient" || !node.gradient?.stops?.length) return node.fill;
-  const radians = ((node.gradient.angle ?? 0) * Math.PI) / 180;
+function createNodeFill(context, node, width, height, paint = null) {
+  const source = paint ?? {
+    type: node.fillType,
+    color: node.fill,
+    gradient: node.gradient,
+  };
+  if (source.type === "solid" || !source.gradient?.stops?.length) return source.color ?? node.fill;
+  const gradientData = source.gradient;
+  const centerX = (gradientData.centerX - 0.5) * width;
+  const centerY = (gradientData.centerY - 0.5) * height;
+  let gradient;
+  if (source.type === "radial-gradient") {
+    gradient = context.createRadialGradient(
+      centerX, centerY, 0,
+      centerX, centerY, Math.max(0.5, Math.max(width, height) * gradientData.radius),
+    );
+  } else if (source.type === "angular-gradient" && typeof context.createConicGradient === "function") {
+    gradient = context.createConicGradient(
+      ((gradientData.angle ?? 0) * Math.PI) / 180,
+      centerX,
+      centerY,
+    );
+  } else {
+    const radians = ((gradientData.angle ?? 0) * Math.PI) / 180;
   const directionX = Math.cos(radians);
   const directionY = Math.sin(radians);
   const halfLength = Math.max(
     0.5,
     (Math.abs(width * directionX) + Math.abs(height * directionY)) / 2,
   );
-  const gradient = context.createLinearGradient(
-    -directionX * halfLength,
-    -directionY * halfLength,
-    directionX * halfLength,
-    directionY * halfLength,
-  );
-  for (const stop of node.gradient.stops) {
+    gradient = context.createLinearGradient(
+      centerX - directionX * halfLength,
+      centerY - directionY * halfLength,
+      centerX + directionX * halfLength,
+      centerY + directionY * halfLength,
+    );
+  }
+  for (const stop of gradientData.stops) {
     gradient.addColorStop(stop.position, stop.color);
   }
   return gradient;
+}
+
+function visiblePaints(stack, fallback, legacyKind = null) {
+  let paints = Array.isArray(stack) && stack.length ? stack : [fallback];
+  if (Array.isArray(stack) && stack.length && legacyKind === "fill") {
+    paints = [{
+      ...stack[0],
+      type: fallback.type,
+      color: fallback.color,
+      gradient: fallback.gradient,
+    }, ...stack.slice(1)];
+  } else if (Array.isArray(stack) && stack.length && legacyKind === "stroke") {
+    paints = [{ ...stack[0], color: fallback.color }, ...stack.slice(1)];
+  }
+  return paints.filter((paint) => paint && paint.visible !== false && (paint.opacity ?? 1) > 0);
+}
+
+function paintBlendMode(mode) {
+  return ({
+    multiply: "multiply",
+    screen: "screen",
+    overlay: "overlay",
+    darken: "darken",
+    lighten: "lighten",
+  })[mode] ?? "source-over";
 }
 
 function colorWithOpacity(color, opacity) {
@@ -1277,6 +1734,131 @@ function distance(a, b) {
 
 function modulo(value, divisor) {
   return ((value % divisor) + divisor) % divisor;
+}
+
+function getLayerBounds(canvas) {
+  return canvas?.__tsyaikoBounds ?? {
+    x: 0,
+    y: 0,
+    width: Math.max(1, canvas?.width ?? 1),
+    height: Math.max(1, canvas?.height ?? 1),
+    clipped: false,
+  };
+}
+
+function normalizeSurfaceBounds(bounds, pixelRatio = 1) {
+  const width = Math.max(1 / pixelRatio, Number.isFinite(bounds?.width) ? bounds.width : 1);
+  const height = Math.max(1 / pixelRatio, Number.isFinite(bounds?.height) ? bounds.height : 1);
+  return {
+    x: Number.isFinite(bounds?.x) ? bounds.x : 0,
+    y: Number.isFinite(bounds?.y) ? bounds.y : 0,
+    width,
+    height,
+    clipped: bounds?.clipped === true,
+  };
+}
+
+function expandBounds(bounds, padding) {
+  return {
+    x: bounds.x - padding,
+    y: bounds.y - padding,
+    width: bounds.width + padding * 2,
+    height: bounds.height + padding * 2,
+  };
+}
+
+function unionBounds(left, right) {
+  const x = Math.min(left.x, right.x);
+  const y = Math.min(left.y, right.y);
+  const maximumX = Math.max(left.x + left.width, right.x + right.width);
+  const maximumY = Math.max(left.y + left.height, right.y + right.height);
+  return { x, y, width: maximumX - x, height: maximumY - y };
+}
+
+function mergeDirtyBounds(bounds) {
+  const regions = [];
+  for (const candidate of bounds) {
+    let merged = { ...candidate };
+    let index = 0;
+    while (index < regions.length) {
+      const region = regions[index];
+      if (!boundsIntersect(expandBounds(merged, 4), region)) {
+        index += 1;
+        continue;
+      }
+      const x = Math.min(merged.x, region.x);
+      const y = Math.min(merged.y, region.y);
+      const maximumX = Math.max(merged.x + merged.width, region.x + region.width);
+      const maximumY = Math.max(merged.y + merged.height, region.y + region.height);
+      merged = { x, y, width: maximumX - x, height: maximumY - y };
+      regions.splice(index, 1);
+      index = 0;
+    }
+    regions.push(merged);
+  }
+  return regions;
+}
+
+function boundsIntersect(left, right) {
+  return left.x <= right.x + right.width &&
+    left.x + left.width >= right.x &&
+    left.y <= right.y + right.height &&
+    left.y + left.height >= right.y;
+}
+
+function intersectBounds(left, right) {
+  const x = Math.max(left.x, right.x);
+  const y = Math.max(left.y, right.y);
+  const maximumX = Math.min(left.x + left.width, right.x + right.width);
+  const maximumY = Math.min(left.y + left.height, right.y + right.height);
+  return {
+    x,
+    y,
+    width: Math.max(1, maximumX - x),
+    height: Math.max(1, maximumY - y),
+  };
+}
+
+function emptyFrameStats() {
+  return {
+    frameMs: 0,
+    nodesVisited: 0,
+    nodesDrawn: 0,
+    nodesCulled: 0,
+    compositeCacheHits: 0,
+    compositeCacheMisses: 0,
+    cacheEntries: 0,
+    cacheBytes: 0,
+    fullRedraw: true,
+    dirtyRegions: 0,
+    skipped: false,
+  };
+}
+
+function monotonicNow() {
+  return globalThis.performance?.now?.() ?? Date.now();
+}
+
+function subpixelPhase(value, pixelRatio) {
+  return modulo(value * pixelRatio, 1).toFixed(3);
+}
+
+function effectiveNodeLayerBlur(node) {
+  const effects = node.effects ?? [];
+  if (effects.some((effect) => effect.type === "layer-blur")) {
+    return effects.find((effect) =>
+      effect.type === "layer-blur" && effect.visible !== false && effect.radius > 0)?.radius ?? 0;
+  }
+  return node.layerBlur ?? 0;
+}
+
+function effectiveNodeShadow(node) {
+  const effects = node.effects ?? [];
+  if (effects.some((effect) => effect.type === "drop-shadow")) {
+    return effects.find((effect) =>
+      effect.type === "drop-shadow" && effect.visible !== false && effect.enabled !== false && effect.opacity > 0) ?? null;
+  }
+  return node.shadow?.enabled && node.shadow.opacity > 0 ? node.shadow : null;
 }
 
 function getImageEntry(source) {

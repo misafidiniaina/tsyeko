@@ -419,6 +419,12 @@ function setGeometryFromSnapshot(node, source, target) {
     const scaleX = target.width / Math.max(MIN_SIZE, source.width);
     const scaleY = target.height / Math.max(MIN_SIZE, source.height);
     node.vectorPoints = source.vectorPoints.map((point) => scaleVectorPoint(point, scaleX, scaleY));
+    node.vectorContours = (source.vectorContours ?? []).map((contour, index) => ({
+      ...contour,
+      points: index === 0
+        ? node.vectorPoints
+        : contour.points.map((point) => scaleVectorPoint(point, scaleX, scaleY)),
+    }));
   }
   return changed;
 }
@@ -543,6 +549,14 @@ function resizeNode(document, node, horizontal, targetMain, targetCross) {
       ...point,
       in: point.in ? { ...point.in } : null,
       out: point.out ? { ...point.out } : null,
+    })),
+    vectorContours: node.vectorContours?.map((contour) => ({
+      ...contour,
+      points: contour.points.map((point) => ({
+        ...point,
+        in: point.in ? { ...point.in } : null,
+        out: point.out ? { ...point.out } : null,
+      })),
     })),
   };
   return setGeometryFromSnapshot(node, source, { x: node.x, y: node.y, width, height });

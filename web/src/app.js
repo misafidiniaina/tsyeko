@@ -33,6 +33,7 @@ import {
   LAYOUT_SIZING,
   maskNodes,
   NODE_TYPES,
+  PAINT_TYPES,
   normalizeDocument,
   normalizeVectorBounds,
   PRIMARY_AXIS_ALIGNS,
@@ -77,6 +78,16 @@ import {
   syncDocumentComponents,
 } from "./components.js";
 import { DocumentHistory } from "./history.js";
+import {
+  collectAssetUsage,
+  repairDocumentAssets,
+  registerAsset,
+  removeUnusedAssets,
+  resolveAssetData,
+  resolvePageAssets,
+} from "./assets.js";
+import { documentFontFamilies, loadDocumentFonts } from "./fonts.js";
+import { flattenBoolean, outlineVectorStroke } from "./geometry.js";
 import { documentToSVG, downloadBlob, safeFilename } from "./export.js";
 import {
   HostedFileError,
@@ -103,6 +114,7 @@ import {
   translateVectorAnchor,
   VECTOR_HANDLE_MODES,
 } from "./vector.js";
+import { baseTextStyle, rebaseTextRuns } from "./text.js";
 
 const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 16;
@@ -119,6 +131,7 @@ const elements = {
   assetsSearch: document.querySelector("#assetsSearch"),
   componentsList: document.querySelector("#componentsList"),
   emptyComponents: document.querySelector("#emptyComponents"),
+  assetRecordsList: document.querySelector("#assetRecordsList"),
   createVariantSetButton: document.querySelector("#createVariantSetButton"),
   inspector: document.querySelector("#inspector"),
   zoomValue: document.querySelector("#zoomValue"),
@@ -136,10 +149,12 @@ const elements = {
   pagesPopover: document.querySelector("#pagesPopover"),
   pagesList: document.querySelector("#pagesList"),
   imageFileInput: document.querySelector("#imageFileInput"),
+  fontFileInput: document.querySelector("#fontFileInput"),
 };
 
 const renderer = new CanvasRenderer(elements.canvas);
 renderer.onInvalidate = () => requestRender();
+renderer.resolveAsset = (node) => resolveAssetData(designDocument, node);
 const hostedFileId = requestedHostedFileId();
 const hostedClientId = globalThis.crypto?.randomUUID?.() ?? `client_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 let hostedRevision = null;
@@ -162,16 +177,22 @@ if (hostedFileId) {
 }
 if (!restoredWorkspace) restoredWorkspace = await restoreWorkspace();
 let designDocument = restoredWorkspace?.document ?? createStarterDocument();
+const initialAssetRepair = await repairDocumentAssets(designDocument);
+await loadDocumentFonts(designDocument);
 syncDocumentComponents(designDocument);
 resolveAllPageLayouts(designDocument);
 let activePageId = getPage(designDocument, restoredWorkspace?.activePageId)?.id ?? designDocument.pages[0].id;
 let pageViews = restoredWorkspace?.pageViews ?? {};
 let camera = pageViews[activePageId] ?? restoredWorkspace?.camera ?? { x: 0, y: 0, zoom: 1 };
+if (initialAssetRepair.changed && !hostedFileId) {
+  void saveWorkspace({ document: designDocument, activePageId, pageViews, camera }).catch(() => undefined);
+}
 let history = new DocumentHistory(designDocument);
 let selectedIds = [];
 let activeTool = "select";
 let interaction = null;
 let editingTextId = null;
+let lastTextSelection = null;
 let penDraft = null;
 let vectorEdit = null;
 let suppressDoubleClickUntil = 0;
@@ -245,6 +266,11 @@ function bindToolbar() {
   document.querySelector("#playButton").addEventListener("click", openPreview);
   document.querySelector("#addPageButton").addEventListener("click", addPage);
   document.querySelector("#importImageButton").addEventListener("click", () => openImagePicker());
+  document.querySelector("#importFontButton").addEventListener("click", () => {
+    elements.fontFileInput.value = "";
+    elements.fontFileInput.click();
+  });
+  document.querySelector("#cleanAssetsButton").addEventListener("click", cleanUnusedAssets);
   document.querySelector("#createComponentButton").addEventListener("click", createComponentFromSelection);
   elements.createVariantSetButton.addEventListener("click", createVariantSetFromSelection);
 }
@@ -259,6 +285,9 @@ function bindCanvas() {
   elements.canvas.addEventListener("contextmenu", (event) => event.preventDefault());
 
   elements.textEditor.addEventListener("input", onTextEditInput);
+  for (const eventName of ["select", "keyup", "pointerup"]) {
+    elements.textEditor.addEventListener(eventName, captureTextSelection);
+  }
   elements.textEditor.addEventListener("blur", () => finishTextEditing(true));
   elements.textEditor.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
@@ -369,6 +398,94 @@ function bindPanels() {
 
 function bindInspector() {
   elements.inspector.addEventListener("input", (event) => {
+    const textRunColor = event.target.closest("[data-text-run-color]");
+    if (textRunColor && selectedIds.length === 1) {
+      const node = getNode(currentPage(), selectedIds[0]);
+      const value = normalizeInspectorColor(textRunColor.value);
+      if (node?.type !== NODE_TYPES.TEXT || !isRenderableColor(value)) return;
+      applySelectedTextStyle(node, { fill: value });
+      recordComponentOverride(designDocument, currentPage(), node, "textRuns");
+      liveDocumentChange();
+      return;
+    }
+
+    const fillPaintInput = event.target.closest("[data-fill-property]");
+    if (fillPaintInput && selectedIds.length === 1) {
+      const node = getNode(currentPage(), selectedIds[0]);
+      const index = Number.parseInt(fillPaintInput.dataset.fillIndex, 10);
+      const paint = node?.fills?.[index];
+      if (!paint) return;
+      const property = fillPaintInput.dataset.fillProperty;
+      let value = fillPaintInput.value;
+      if (property === "color") {
+        value = normalizeInspectorColor(value);
+        if (!isRenderableColor(value)) return;
+      } else if (property === "opacity") {
+        value = clamp(Number.parseFloat(value) / 100, 0, 1);
+        if (!Number.isFinite(value)) return;
+      } else if (property.startsWith("gradient.")) {
+        const gradientProperty = property.slice("gradient.".length);
+        value = Number.parseFloat(value);
+        if (!Number.isFinite(value)) return;
+        if (gradientProperty === "angle") value = ((value % 360) + 360) % 360;
+        if (["centerX", "centerY", "radius"].includes(gradientProperty)) value = clamp(value, 0, 4);
+        paint.gradient[gradientProperty] = value;
+        syncLegacyFill(node);
+        recordComponentOverride(designDocument, currentPage(), node, "fills");
+        liveDocumentChange();
+        return;
+      }
+      paint[property] = value;
+      syncLegacyFill(node);
+      recordComponentOverride(designDocument, currentPage(), node, "fills");
+      liveDocumentChange();
+      return;
+    }
+
+    const strokePaintInput = event.target.closest("[data-stroke-property]");
+    if (strokePaintInput && selectedIds.length === 1) {
+      const node = getNode(currentPage(), selectedIds[0]);
+      const index = Number.parseInt(strokePaintInput.dataset.strokeIndex, 10);
+      const paint = node?.strokes?.[index];
+      if (!paint) return;
+      const property = strokePaintInput.dataset.strokeProperty;
+      let value = strokePaintInput.value;
+      if (property === "color") {
+        value = normalizeInspectorColor(value);
+        if (!isRenderableColor(value)) return;
+      } else if (property === "opacity") {
+        value = clamp(Number.parseFloat(value) / 100, 0, 1);
+        if (!Number.isFinite(value)) return;
+      }
+      paint[property] = value;
+      syncLegacyStroke(node);
+      recordComponentOverride(designDocument, currentPage(), node, "strokes");
+      liveDocumentChange();
+      return;
+    }
+
+    const effectInput = event.target.closest("[data-effect-property]");
+    if (effectInput && selectedIds.length === 1) {
+      const node = getNode(currentPage(), selectedIds[0]);
+      if (!node) return;
+      let value = Number.parseFloat(effectInput.value);
+      if (!Number.isFinite(value)) return;
+      if (effectInput.dataset.effectProperty === "layerBlur") {
+        value = clamp(value, 0, 500);
+        node.layerBlur = value;
+        let effect = node.effects.find((item) => item.type === "layer-blur");
+        if (!effect) {
+          effect = { id: `effect_${Date.now()}`, type: "layer-blur", visible: true, radius: value };
+          node.effects.push(effect);
+        }
+        effect.radius = value;
+        effect.visible = value > 0;
+        recordComponentOverride(designDocument, currentPage(), node, "effects");
+        liveDocumentChange();
+      }
+      return;
+    }
+
     const pageInput = event.target.closest("[data-page-property]");
     if (pageInput) {
       const property = pageInput.dataset.pageProperty;
@@ -409,6 +526,7 @@ function bindInspector() {
       const value = normalizeInspectorColor(gradientStopInput.value);
       if (!node.gradient.stops[index] || !isRenderableColor(value)) return;
       node.gradient.stops[index].color = value;
+      syncLegacyGradient(node);
       recordComponentOverride(designDocument, currentPage(), node, "gradient");
       liveDocumentChange();
       return;
@@ -421,7 +539,10 @@ function bindInspector() {
       let value = Number.parseFloat(gradientInput.value);
       if (!Number.isFinite(value)) return;
       if (gradientInput.dataset.gradientProperty === "angle") value = ((value % 360) + 360) % 360;
+      if (["centerX", "centerY"].includes(gradientInput.dataset.gradientProperty)) value = clamp(value, 0, 1);
+      if (gradientInput.dataset.gradientProperty === "radius") value = clamp(value, 0.001, 4);
       node.gradient[gradientInput.dataset.gradientProperty] = value;
+      syncLegacyGradient(node);
       recordComponentOverride(designDocument, currentPage(), node, "gradient");
       liveDocumentChange();
       return;
@@ -445,6 +566,7 @@ function bindInspector() {
         if (["offsetX", "offsetY"].includes(property)) value = clamp(value, -10_000, 10_000);
       }
       node.shadow[property] = value;
+      syncLegacyEffects(node);
       recordComponentOverride(designDocument, currentPage(), node, "shadow");
       liveDocumentChange();
       return;
@@ -508,13 +630,25 @@ function bindInspector() {
     }
     if (node.type === NODE_TYPES.VECTOR && ["width", "height"].includes(property)) {
       const scale = value / previousValue;
-      node.vectorPoints = node.vectorPoints.map((point) => scaleVectorPoint(
-        point,
+      scaleVectorGeometry(node, cloneNode(node),
         property === "width" ? scale : 1,
-        property === "height" ? scale : 1,
-      ));
+        property === "height" ? scale : 1);
+    }
+    if (property === "text" && node.type === NODE_TYPES.TEXT) {
+      node.textRuns = rebaseTextRuns(node.textRuns, node.text, value);
+      recordComponentOverride(designDocument, currentPage(), node, "textRuns");
     }
     node[property] = value;
+    if (property === "fontFamily" && node.type === NODE_TYPES.TEXT) {
+      node.fontRef = designDocument.assets?.find((asset) =>
+        asset.kind === "font" && asset.fontFamily === value)?.id ?? null;
+      recordComponentOverride(designDocument, currentPage(), node, "fontRef");
+    }
+    if (property === "fill" && node.fills?.[0]) {
+      node.fills[0].color = value;
+      syncLegacyFill(node);
+    }
+    if (property === "stroke" && node.strokes?.[0]) node.strokes[0].color = value;
     if (frameResizeOriginal) {
       if (property === "width") node.layoutSizingHorizontal = LAYOUT_SIZING.FIXED;
       if (property === "height") node.layoutSizingVertical = LAYOUT_SIZING.FIXED;
@@ -564,7 +698,7 @@ function bindInspector() {
       swapSelectedComponent(swapSelect.value);
       return;
     }
-    if (event.target.closest("[data-property], [data-page-property], [data-gradient-stop], [data-gradient-property], [data-shadow-property], [data-layout-property]")) commitDocument();
+    if (event.target.closest("[data-property], [data-page-property], [data-gradient-stop], [data-gradient-property], [data-shadow-property], [data-layout-property], [data-fill-property], [data-stroke-property], [data-effect-property], [data-text-run-color]")) commitDocument();
   });
 
   elements.inspector.addEventListener("click", (event) => {
@@ -667,6 +801,42 @@ function bindInspector() {
       ungroupSelection();
       return;
     }
+    if (action === "flatten-boolean" && node.type === NODE_TYPES.BOOLEAN) {
+      if (node.componentId) {
+        showToast("Detach or copy this component layer before flattening it.");
+        return;
+      }
+      const replacement = flattenBoolean(currentPage(), node.id);
+      if (!replacement) {
+        showToast("This Boolean has no visible geometry to flatten.");
+        return;
+      }
+      selectedIds = [replacement.id];
+      vectorEdit = null;
+      sortNodesByHierarchy(currentPage());
+      syncGroupBounds(currentPage());
+      commitDocument("Flatten Boolean");
+      showToast("Boolean flattened into editable contours");
+      return;
+    }
+    if (action === "outline-vector-stroke" && node.type === NODE_TYPES.VECTOR) {
+      if (node.componentId) {
+        showToast("Detach or copy this component layer before outlining its stroke.");
+        return;
+      }
+      const replacement = outlineVectorStroke(currentPage(), node.id);
+      if (!replacement) {
+        showToast("Add a visible stroke before outlining it.");
+        return;
+      }
+      selectedIds = [replacement.id];
+      vectorEdit = null;
+      sortNodesByHierarchy(currentPage());
+      syncGroupBounds(currentPage());
+      commitDocument("Outline stroke");
+      showToast("Stroke converted to editable contours");
+      return;
+    }
     if (action === "boolean-operation" && node.type === NODE_TYPES.BOOLEAN) {
       const operation = button.dataset.value;
       if (Object.values(BOOLEAN_OPERATIONS).includes(operation)) {
@@ -676,8 +846,65 @@ function bindInspector() {
       }
     }
     if (action === "align") node.textAlign = button.dataset.value;
-    if (action === "fill-mode") node.fillType = button.dataset.value;
-    if (action === "toggle-shadow") node.shadow.enabled = !node.shadow.enabled;
+    if (["text-run-bold", "text-run-italic", "text-run-underline"].includes(action)) {
+      const style = action === "text-run-bold"
+        ? { fontWeight: 700 }
+        : action === "text-run-italic"
+          ? { fontStyle: "italic" }
+          : { textDecoration: "underline" };
+      applySelectedTextStyle(node, style);
+    }
+    if (action === "clear-text-runs") node.textRuns = [];
+    if (action === "fill-mode") {
+      node.fillType = button.dataset.value;
+      if (node.fills[0]) node.fills[0].type = node.fillType;
+    }
+    if (action === "add-fill") {
+      node.fills.push({
+        id: `paint_${Date.now()}`,
+        type: PAINT_TYPES.SOLID,
+        visible: true,
+        opacity: 1,
+        blendMode: "normal",
+        color: "#ffffff",
+        gradient: cloneNode(node.gradient),
+      });
+    }
+    if (action === "remove-fill") {
+      const index = Number.parseInt(button.dataset.fillIndex, 10);
+      if (node.fills.length > 1 && node.fills[index]) node.fills.splice(index, 1);
+      syncLegacyFill(node);
+    }
+    if (action === "toggle-fill") {
+      const paint = node.fills[Number.parseInt(button.dataset.fillIndex, 10)];
+      if (paint) paint.visible = !paint.visible;
+    }
+    if (action === "add-stroke") {
+      node.strokes.push({
+        id: `paint_${Date.now()}`,
+        type: PAINT_TYPES.SOLID,
+        visible: true,
+        opacity: 1,
+        blendMode: "normal",
+        color: node.stroke === "transparent" ? "#111111" : node.stroke,
+        gradient: cloneNode(node.gradient),
+      });
+      if (node.strokeWidth <= 0) node.strokeWidth = 1;
+      syncLegacyStroke(node);
+    }
+    if (action === "remove-stroke") {
+      const index = Number.parseInt(button.dataset.strokeIndex, 10);
+      if (node.strokes.length > 1 && node.strokes[index]) node.strokes.splice(index, 1);
+      syncLegacyStroke(node);
+    }
+    if (action === "toggle-stroke") {
+      const paint = node.strokes[Number.parseInt(button.dataset.strokeIndex, 10)];
+      if (paint) paint.visible = !paint.visible;
+    }
+    if (action === "toggle-shadow") {
+      node.shadow.enabled = !node.shadow.enabled;
+      syncLegacyEffects(node);
+    }
     if (action === "image-fit") node.imageFit = button.dataset.value;
     if (action === "layout-mode" && node.type === NODE_TYPES.FRAME) {
       const mode = button.dataset.value;
@@ -725,6 +952,34 @@ function bindInspector() {
       if (vectorEdit?.nodeId === node.id && Number.isInteger(vectorEdit.pointIndex)) {
         vectorEdit.pointIndex = node.vectorPoints.length - 1 - vectorEdit.pointIndex;
       }
+    }
+    if (action === "add-vector-contour") {
+      syncPrimaryVectorContour(node);
+      const insetX = node.width * 0.25;
+      const insetY = node.height * 0.25;
+      node.vectorContours.push({
+        id: `contour_${Date.now()}`,
+        closed: true,
+        points: [
+          { x: insetX, y: insetY, in: null, out: null, handleMode: VECTOR_HANDLE_MODES.CORNER },
+          { x: insetX, y: node.height - insetY, in: null, out: null, handleMode: VECTOR_HANDLE_MODES.CORNER },
+          { x: node.width - insetX, y: node.height - insetY, in: null, out: null, handleMode: VECTOR_HANDLE_MODES.CORNER },
+          { x: node.width - insetX, y: insetY, in: null, out: null, handleMode: VECTOR_HANDLE_MODES.CORNER },
+        ],
+      });
+      node.vectorFillRule = "evenodd";
+    }
+    if (action === "edit-vector-contour") {
+      activateVectorContour(node, Number.parseInt(button.dataset.contourIndex, 10));
+      recordComponentOverride(designDocument, currentPage(), node, "vectorContours");
+      commitDocument();
+      enterVectorEdit(node);
+      return;
+    }
+    if (action === "remove-vector-contour") {
+      syncPrimaryVectorContour(node);
+      const index = Number.parseInt(button.dataset.contourIndex, 10);
+      if (index > 0 && node.vectorContours[index]) node.vectorContours.splice(index, 1);
     }
     if (action === "vector-point-corner" && Number.isInteger(vectorEdit?.pointIndex)) {
       clearVectorHandles(node.vectorPoints[vectorEdit.pointIndex]);
@@ -798,6 +1053,16 @@ function bindMenus() {
     if (action === "undo") undo();
     if (action === "redo") redo();
     if (action === "fit") fitToContent();
+    if (action === "performance") {
+      const profile = renderer.getPerformanceStats();
+      const history = profile.history;
+      const cacheMegabytes = profile.cacheBytes / (1024 * 1024);
+      showToast(
+        `${profile.frameMs.toFixed(1)} ms now · ${history.averageFrameMs.toFixed(1)} avg · ${history.p95FrameMs.toFixed(1)} p95 · ` +
+        `${profile.nodesDrawn} drawn/${profile.nodesCulled} culled · ${profile.dirtyRegions} dirty · ` +
+        `${profile.compositeCacheHits}/${profile.compositeCacheHits + profile.compositeCacheMisses || 0} cache hits · ${cacheMegabytes.toFixed(1)} MB`,
+      );
+    }
     if (action === "shortcuts") {
       showToast("V select · P pen · Enter edit · ⌘G group · ⌘⌥K component · ⌘⌥U/S/I/X Boolean · ⌘⌥M mask · ⌘D duplicate");
     }
@@ -812,6 +1077,7 @@ function bindMenus() {
 
   elements.fileInput.addEventListener("change", importDocument);
   elements.imageFileInput.addEventListener("change", importImage);
+  elements.fontFileInput.addEventListener("change", importFont);
   elements.documentTitle.addEventListener("input", () => {
     designDocument.name = elements.documentTitle.value || "Untitled design";
     liveDocumentChange();
@@ -1687,8 +1953,7 @@ function updateResize(world, event) {
   if (node.type === NODE_TYPES.VECTOR) {
     const scaleX = width / original.width;
     const scaleY = height / original.height;
-    node.vectorPoints = original.vectorPoints.map((point) =>
-      scaleVectorPoint(point, scaleX, scaleY));
+    scaleVectorGeometry(node, original, scaleX, scaleY);
   }
 
   if (node.type === NODE_TYPES.FRAME) {
@@ -1712,8 +1977,7 @@ function updateResize(world, event) {
       child.width = Math.max(1, snapshot.width * scaleX);
       child.height = Math.max(1, snapshot.height * scaleY);
       if (child.type === NODE_TYPES.VECTOR) {
-        child.vectorPoints = snapshot.vectorPoints.map((point) =>
-          scaleVectorPoint(point, scaleX, scaleY));
+        scaleVectorGeometry(child, snapshot, scaleX, scaleY);
       }
       if (child.type === NODE_TYPES.TEXT) {
         child.fontSize = Math.max(1, snapshot.fontSize * Math.min(scaleX, scaleY));
@@ -1871,6 +2135,7 @@ function updateHoverCursor(screen) {
 function startTextEditing(node, selectAll = false) {
   if (!node || node.type !== NODE_TYPES.TEXT || isNodeEffectivelyLocked(currentPage(), node)) return;
   editingTextId = node.id;
+  lastTextSelection = { nodeId: node.id, start: node.text.length, end: node.text.length };
   const center = renderer.worldToScreen(
     { x: node.x + node.width / 2, y: node.y + node.height / 2 },
     camera,
@@ -1891,23 +2156,37 @@ function startTextEditing(node, selectAll = false) {
     editor.focus();
     if (selectAll) editor.select();
     else editor.setSelectionRange(editor.value.length, editor.value.length);
+    captureTextSelection();
   });
 }
 
 function onTextEditInput() {
   const node = getNode(currentPage(), editingTextId);
   if (!node) return;
-  node.text = elements.textEditor.value;
+  const nextText = elements.textEditor.value;
+  node.textRuns = rebaseTextRuns(node.textRuns, node.text, nextText);
+  node.text = nextText;
+  captureTextSelection();
   recordComponentOverride(designDocument, currentPage(), node, "text");
   liveDocumentChange();
 }
 
 function finishTextEditing(shouldCommit) {
   if (!editingTextId) return;
+  captureTextSelection();
   editingTextId = null;
   elements.textEditor.style.display = "none";
   if (shouldCommit) commitDocument();
   else requestRender();
+}
+
+function captureTextSelection() {
+  if (!editingTextId) return;
+  lastTextSelection = {
+    nodeId: editingTextId,
+    start: elements.textEditor.selectionStart ?? 0,
+    end: elements.textEditor.selectionEnd ?? 0,
+  };
 }
 
 function deleteSelection() {
@@ -2155,7 +2434,17 @@ function componentOverridePropertyForAction(action) {
     "toggle-visible": "visible",
     "boolean-operation": "booleanOperation",
     align: "textAlign",
-    "fill-mode": "fillType",
+    "text-run-bold": "textRuns",
+    "text-run-italic": "textRuns",
+    "text-run-underline": "textRuns",
+    "clear-text-runs": "textRuns",
+    "fill-mode": "fills",
+    "add-fill": "fills",
+    "remove-fill": "fills",
+    "toggle-fill": "fills",
+    "add-stroke": "strokes",
+    "remove-stroke": "strokes",
+    "toggle-stroke": "strokes",
     "toggle-shadow": "shadow",
     "image-fit": "imageFit",
     "layout-mode": "layoutMode",
@@ -2164,6 +2453,9 @@ function componentOverridePropertyForAction(action) {
     "vector-closed": "vectorClosed",
     "vector-fill-rule": "vectorFillRule",
     "reverse-vector": "vectorPoints",
+    "add-vector-contour": "vectorContours",
+    "remove-vector-contour": "vectorContours",
+    "edit-vector-contour": "vectorContours",
     "vector-point-corner": "vectorPoints",
     "vector-point-smooth": "vectorPoints",
   }[action] ?? null;
@@ -2184,8 +2476,7 @@ function scaleAutoBoundsContainer(node, property, value) {
     child.width = Math.max(1, snapshot.width * scaleX);
     child.height = Math.max(1, snapshot.height * scaleY);
     if (child.type === NODE_TYPES.VECTOR) {
-      child.vectorPoints = snapshot.vectorPoints.map((point) =>
-        scaleVectorPoint(point, scaleX, scaleY));
+      scaleVectorGeometry(child, snapshot, scaleX, scaleY);
     }
     if (child.type === NODE_TYPES.TEXT) {
       child.fontSize = Math.max(1, snapshot.fontSize * Math.min(scaleX, scaleY));
@@ -2365,10 +2656,10 @@ function synchronizeDocumentGeometry() {
   resolveAllPageLayouts(designDocument);
 }
 
-function commitDocument() {
+function commitDocument(label = "Edit document") {
   synchronizeDocumentGeometry();
   designDocument.updatedAt = new Date().toISOString();
-  history.commit(designDocument);
+  history.commit(designDocument, label);
   scheduleSave();
   refreshUI();
 }
@@ -2487,6 +2778,22 @@ function renderLayers() {
 function renderAssets() {
   if (!elements.componentsList || !elements.emptyComponents) return;
   const query = (elements.assetsSearch?.value ?? "").trim().toLowerCase();
+  const assetRecords = collectAssetUsage(designDocument).filter((asset) =>
+    asset.name.toLowerCase().includes(query) ||
+    asset.kind.includes(query) ||
+    asset.mimeType.includes(query) ||
+    asset.fontFamily?.toLowerCase().includes(query));
+  elements.assetRecordsList.innerHTML = assetRecords.length
+    ? assetRecords.map((asset) => `
+      <div class="asset-record" title="SHA-256 ${escapeAttribute(asset.hash)}">
+        <span class="asset-record-icon">${asset.kind === "font" ? "Aa" : "▧"}</span>
+        <span class="asset-record-copy">
+          <strong>${escapeHTML(asset.fontFamily || asset.name)}</strong>
+          <small>${escapeHTML(asset.kind)} · ${formatFileSize(asset.bytes)}</small>
+        </span>
+        <span class="asset-record-usage">${asset.references} use${asset.references === 1 ? "" : "s"}</span>
+      </div>`).join("")
+    : '<p class="assets-empty-result">No embedded files match that search.</p>';
   const allComponents = designDocument.components ?? [];
   const matchingSetIds = new Set((designDocument.componentSets ?? [])
     .filter((componentSet) => componentSet.name.toLowerCase().includes(query))
@@ -2809,11 +3116,7 @@ function renderInspector() {
     ${![NODE_TYPES.TEXT, NODE_TYPES.GROUP, NODE_TYPES.MASK].includes(node.type) ? `
       <section class="inspector-section">
         <p class="inspector-section-title">Stroke</p>
-        <div class="color-row">
-          <span class="color-swatch"><input type="color" data-property="stroke" value="${toHexColor(node.stroke)}" aria-label="Stroke color" /></span>
-          <div class="field"><span class="field-label">#</span><input data-property="stroke" value="${escapeAttribute(stripHash(node.stroke))}" aria-label="Stroke hex color" /></div>
-          <div class="field"><span class="field-label">W</span><input type="number" data-property="strokeWidth" data-value-type="number" min="0" step="1" value="${formatNumber(node.strokeWidth)}" aria-label="Stroke width" /></div>
-        </div>
+        ${strokeInspector(node)}
       </section>` : ""}
 
     ${![NODE_TYPES.GROUP, NODE_TYPES.MASK].includes(node.type) ? shadowInspector(node) : ""}
@@ -3068,6 +3371,7 @@ function booleanInspector(node) {
           <button class="icon-toggle ${node.booleanOperation === operation ? "active" : ""}" data-inspector-action="boolean-operation" data-value="${operation}">${capitalize(operation)}</button>`).join("")}
       </div>
       <div class="composite-summary"><span>${sourceCount} editable source${sourceCount === 1 ? "" : "s"}</span><span>Non-destructive</span></div>
+      <button class="button button-primary" data-inspector-action="flatten-boolean" style="width: 100%; margin-top: 8px">Flatten to vector</button>
       <button class="button button-quiet" data-inspector-action="ungroup" style="width: 100%; margin-top: 8px">Release Boolean sources</button>
     </section>`;
 }
@@ -3091,6 +3395,8 @@ function maskInspector(node) {
 }
 
 function textInspector(node) {
+  const embeddedFamilies = documentFontFamilies(designDocument)
+    .filter((family) => !["Inter, ui-sans-serif, sans-serif", "Georgia, serif", "ui-monospace, SFMono-Regular, monospace"].includes(family));
   return `
     <section class="inspector-section">
       <p class="inspector-section-title">Typography</p>
@@ -3100,6 +3406,7 @@ function textInspector(node) {
           ${fontOption("Inter, ui-sans-serif, sans-serif", "Inter / System", node.fontFamily)}
           ${fontOption("Georgia, serif", "Georgia", node.fontFamily)}
           ${fontOption("ui-monospace, SFMono-Regular, monospace", "Monospace", node.fontFamily)}
+          ${embeddedFamilies.map((family) => fontOption(family, family, node.fontFamily)).join("")}
         </select></label>
         ${numberField("S", "fontSize", node.fontSize)}
         <label class="field"><span class="field-label">W</span><select data-property="fontWeight" data-value-type="number" aria-label="Font weight">
@@ -3109,7 +3416,40 @@ function textInspector(node) {
       <div class="icon-toggle-row" style="margin-top: 6px">
         ${["left", "center", "right"].map((align) => `<button class="icon-toggle ${node.textAlign === align ? "active" : ""}" data-inspector-action="align" data-value="${align}">${capitalize(align)}</button>`).join("")}
       </div>
+      <div class="layout-control-block">
+        <span class="layout-control-label">Rich text selection · ${node.textRuns.length} run${node.textRuns.length === 1 ? "" : "s"}</span>
+        <div class="icon-toggle-row">
+          <button class="icon-toggle" data-inspector-action="text-run-bold" title="Bold selected text">Bold</button>
+          <button class="icon-toggle" data-inspector-action="text-run-italic" title="Italicize selected text">Italic</button>
+          <button class="icon-toggle" data-inspector-action="text-run-underline" title="Underline selected text">Underline</button>
+          <span class="color-swatch"><input type="color" data-text-run-color value="${toHexColor(node.fill)}" aria-label="Selected text color" /></span>
+        </div>
+        <button class="button button-quiet" data-inspector-action="clear-text-runs" style="width:100%; margin-top:6px" ${node.textRuns.length ? "" : "disabled"}>Clear rich text formatting</button>
+        <p class="inspector-hint">While editing text, select a range in the canvas editor and apply formatting here. Without a range, formatting applies to the full layer.</p>
+      </div>
     </section>`;
+}
+
+function applySelectedTextStyle(node, properties) {
+  if (node?.type !== NODE_TYPES.TEXT || !node.text.length) return;
+  const selection = lastTextSelection?.nodeId === node.id ? lastTextSelection : null;
+  const selectedStart = selection?.start ?? 0;
+  const selectedEnd = selection?.end ?? node.text.length;
+  const start = Math.max(0, Math.min(selectedStart, selectedEnd));
+  const end = Math.min(node.text.length, Math.max(selectedStart, selectedEnd));
+  const rangeStart = start === end ? 0 : start;
+  const rangeEnd = start === end ? node.text.length : end;
+  const current = (node.textRuns ?? []).find((run) => run.start <= rangeStart && run.end > rangeStart);
+  const style = { ...baseTextStyle(node), ...(current ?? {}), ...properties, start: rangeStart, end: rangeEnd };
+  const retained = [];
+  for (const run of node.textRuns ?? []) {
+    if (run.end <= rangeStart || run.start >= rangeEnd) retained.push(run);
+    else {
+      if (run.start < rangeStart) retained.push({ ...run, end: rangeStart });
+      if (run.end > rangeEnd) retained.push({ ...run, start: rangeEnd });
+    }
+  }
+  node.textRuns = [...retained, style].sort((left, right) => left.start - right.start);
 }
 
 function imageInspector(node) {
@@ -3140,6 +3480,17 @@ function vectorInspector(node) {
         <span data-vector-curve-count>${curvedSegments}</span>
         <span>curve${curvedSegments === 1 ? "" : "s"}</span>
       </div>
+      <div class="layout-control-block">
+        <span class="layout-control-label">Contours · ${node.vectorContours?.length ?? 1}</span>
+        ${(node.vectorContours ?? []).slice(1).map((contour, offset) => `<div class="layout-axis-row">
+          <span>Contour ${offset + 2} · ${contour.points.length} points</span>
+          <div class="icon-toggle-row">
+            <button class="icon-toggle" data-inspector-action="edit-vector-contour" data-contour-index="${offset + 1}">Edit</button>
+            <button class="icon-toggle" data-inspector-action="remove-vector-contour" data-contour-index="${offset + 1}">×</button>
+          </div>
+        </div>`).join("")}
+        <button class="button button-quiet" data-inspector-action="add-vector-contour" style="width:100%; margin-top:6px" ${(node.vectorContours?.length ?? 1) >= 128 ? "disabled" : ""}>Add inset contour</button>
+      </div>
       <div class="icon-toggle-row" style="margin-top: 6px">
         <button class="icon-toggle ${node.vectorClosed ? "" : "active"}" data-inspector-action="vector-closed" data-value="false">Open</button>
         <button class="icon-toggle ${node.vectorClosed ? "active" : ""}" data-inspector-action="vector-closed" data-value="true" ${node.vectorPoints.length < 3 ? "disabled" : ""}>Closed</button>
@@ -3151,6 +3502,7 @@ function vectorInspector(node) {
       <div class="field-grid one-column" style="margin-top: 8px">
         <button class="button ${editing ? "button-primary" : "button-quiet"}" data-inspector-action="edit-vector">${editing ? "Done editing points" : "Edit points"}</button>
         <button class="button button-quiet" data-inspector-action="reverse-vector">Reverse path direction</button>
+        <button class="button button-quiet" data-inspector-action="outline-vector-stroke" ${node.strokeWidth > 0 ? "" : "disabled"}>Outline stroke</button>
       </div>
       ${selectedPoint ? `
         <div class="vector-point-editor">
@@ -3167,6 +3519,27 @@ function vectorInspector(node) {
     </section>`;
 }
 
+function syncPrimaryVectorContour(node) {
+  if (node?.type !== NODE_TYPES.VECTOR) return;
+  node.vectorContours ??= [];
+  const primary = {
+    id: node.vectorContours[0]?.id ?? `contour_${Date.now()}`,
+    points: node.vectorPoints,
+    closed: node.vectorClosed,
+  };
+  if (node.vectorContours.length) node.vectorContours[0] = primary;
+  else node.vectorContours.push(primary);
+}
+
+function activateVectorContour(node, index) {
+  syncPrimaryVectorContour(node);
+  if (!Number.isInteger(index) || index <= 0 || !node.vectorContours[index]) return false;
+  [node.vectorContours[0], node.vectorContours[index]] = [node.vectorContours[index], node.vectorContours[0]];
+  node.vectorPoints = node.vectorContours[0].points;
+  node.vectorClosed = node.vectorContours[0].closed;
+  return true;
+}
+
 function applyNodeSizeLimits(node, original, frameSnapshots) {
   const width = clamp(node.width, node.minWidth, node.maxWidth);
   const height = clamp(node.height, node.minHeight, node.maxHeight);
@@ -3176,12 +3549,22 @@ function applyNodeSizeLimits(node, original, frameSnapshots) {
   if (node.type === NODE_TYPES.VECTOR) {
     const scaleX = width / Math.max(1, original.width);
     const scaleY = height / Math.max(1, original.height);
-    node.vectorPoints = original.vectorPoints.map((point) => scaleVectorPoint(point, scaleX, scaleY));
+    scaleVectorGeometry(node, original, scaleX, scaleY);
   }
   if (node.type === NODE_TYPES.FRAME && frameSnapshots) {
     resizeFrameChildren(currentPage(), original, node, frameSnapshots);
   }
   syncGroupBounds(currentPage());
+}
+
+function scaleVectorGeometry(node, source, scaleX, scaleY) {
+  node.vectorPoints = source.vectorPoints.map((point) => scaleVectorPoint(point, scaleX, scaleY));
+  node.vectorContours = (source.vectorContours ?? []).map((contour, index) => ({
+    ...contour,
+    points: index === 0
+      ? node.vectorPoints
+      : contour.points.map((point) => scaleVectorPoint(point, scaleX, scaleY)),
+  }));
 }
 
 function numberField(label, property, value, disabled = false) {
@@ -3197,14 +3580,16 @@ function colorField(property, color, opacity) {
 }
 
 function fillInspector(node) {
-  const isGradient = node.fillType === "linear-gradient";
+  const isGradient = node.fillType !== PAINT_TYPES.SOLID;
   const firstStop = node.gradient.stops[0];
   const lastStop = node.gradient.stops[node.gradient.stops.length - 1];
   const previewAngle = (node.gradient.angle + 90) % 360;
   return `
     <div class="icon-toggle-row paint-mode-row">
       <button class="icon-toggle ${isGradient ? "" : "active"}" data-inspector-action="fill-mode" data-value="solid">Solid</button>
-      <button class="icon-toggle ${isGradient ? "active" : ""}" data-inspector-action="fill-mode" data-value="linear-gradient">Linear</button>
+      <button class="icon-toggle ${node.fillType === PAINT_TYPES.LINEAR ? "active" : ""}" data-inspector-action="fill-mode" data-value="linear-gradient">Linear</button>
+      <button class="icon-toggle ${node.fillType === PAINT_TYPES.RADIAL ? "active" : ""}" data-inspector-action="fill-mode" data-value="radial-gradient">Radial</button>
+      <button class="icon-toggle ${node.fillType === PAINT_TYPES.ANGULAR ? "active" : ""}" data-inspector-action="fill-mode" data-value="angular-gradient">Angular</button>
     </div>
     ${isGradient ? `
       <div class="gradient-preview" style="background: linear-gradient(${formatNumber(previewAngle)}deg, ${escapeAttribute(firstStop.color)}, ${escapeAttribute(lastStop.color)})"></div>
@@ -3219,8 +3604,45 @@ function fillInspector(node) {
       <div class="field-grid paint-settings-grid">
         <label class="field"><span class="field-label">°</span><input type="number" data-gradient-property="angle" step="1" value="${formatNumber(node.gradient.angle)}" aria-label="Gradient angle" /></label>
         <label class="field"><span class="field-label">%</span><input type="number" data-property="opacity" data-value-type="number" data-scale="0.01" min="0" max="100" value="${Math.round(node.opacity * 100)}" aria-label="Opacity" /></label>
+        ${node.fillType !== PAINT_TYPES.LINEAR ? `
+          <label class="field"><span class="field-label">X</span><input type="number" data-gradient-property="centerX" min="0" max="1" step="0.05" value="${formatNumber(node.gradient.centerX)}" aria-label="Gradient center X" /></label>
+          <label class="field"><span class="field-label">Y</span><input type="number" data-gradient-property="centerY" min="0" max="1" step="0.05" value="${formatNumber(node.gradient.centerY)}" aria-label="Gradient center Y" /></label>
+          ${node.fillType === PAINT_TYPES.RADIAL ? `<label class="field"><span class="field-label">R</span><input type="number" data-gradient-property="radius" min="0.001" max="4" step="0.05" value="${formatNumber(node.gradient.radius)}" aria-label="Gradient radius" /></label>` : ""}
+        ` : ""}
       </div>` : colorField("fill", node.fill, node.opacity)}
+    <div class="fill-stack" style="margin-top: 8px">
+      ${node.fills.slice(1).map((paint, offset) => {
+        const index = offset + 1;
+        return `<div class="gradient-color-row" data-fill-layer="${index}">
+          <button class="icon-toggle ${paint.visible ? "active" : ""}" data-inspector-action="toggle-fill" data-fill-index="${index}" title="Toggle fill">${paint.visible ? "●" : "○"}</button>
+          <label class="field"><span class="field-label">${index + 1}</span><select data-fill-property="type" data-fill-index="${index}" aria-label="Fill ${index + 1} type">
+            ${Object.values(PAINT_TYPES).map((type) => `<option value="${type}" ${paint.type === type ? "selected" : ""}>${capitalize(type.replace("-gradient", ""))}</option>`).join("")}
+          </select></label>
+          <span class="color-swatch"><input type="color" data-fill-property="color" data-fill-index="${index}" value="${toHexColor(paint.color)}" aria-label="Fill ${index + 1} color" /></span>
+          <label class="field"><span class="field-label">%</span><input type="number" data-fill-property="opacity" data-fill-index="${index}" min="0" max="100" value="${Math.round(paint.opacity * 100)}" aria-label="Fill ${index + 1} opacity" /></label>
+          <button class="icon-toggle" data-inspector-action="remove-fill" data-fill-index="${index}" title="Remove fill">×</button>
+        </div>`;
+      }).join("")}
+      <button class="button button-quiet" data-inspector-action="add-fill" style="width: 100%; margin-top: 6px" ${node.fills.length >= 8 ? "disabled" : ""}>Add fill layer</button>
+    </div>
   `;
+}
+
+function strokeInspector(node) {
+  return `
+    <label class="field" style="margin-bottom: 6px"><span class="field-label">W</span><input type="number" data-property="strokeWidth" data-value-type="number" min="0" step="1" value="${formatNumber(node.strokeWidth)}" aria-label="Stroke width" /></label>
+    <div class="fill-stack">
+      ${node.strokes.map((paint, index) => `<div class="gradient-color-row" data-stroke-layer="${index}">
+        <button class="icon-toggle ${paint.visible ? "active" : ""}" data-inspector-action="toggle-stroke" data-stroke-index="${index}" title="Toggle stroke">${paint.visible ? "●" : "○"}</button>
+        <label class="field"><span class="field-label">${index + 1}</span><select data-stroke-property="type" data-stroke-index="${index}" aria-label="Stroke ${index + 1} type">
+          ${Object.values(PAINT_TYPES).map((type) => `<option value="${type}" ${paint.type === type ? "selected" : ""}>${capitalize(type.replace("-gradient", ""))}</option>`).join("")}
+        </select></label>
+        <span class="color-swatch"><input type="color" data-stroke-property="color" data-stroke-index="${index}" value="${toHexColor(paint.color)}" aria-label="Stroke ${index + 1} color" /></span>
+        <label class="field"><span class="field-label">%</span><input type="number" data-stroke-property="opacity" data-stroke-index="${index}" min="0" max="100" value="${Math.round(paint.opacity * 100)}" aria-label="Stroke ${index + 1} opacity" /></label>
+        <button class="icon-toggle" data-inspector-action="remove-stroke" data-stroke-index="${index}" title="Remove stroke" ${node.strokes.length === 1 ? "disabled" : ""}>×</button>
+      </div>`).join("")}
+      <button class="button button-quiet" data-inspector-action="add-stroke" style="width: 100%; margin-top: 6px" ${node.strokes.length >= 8 ? "disabled" : ""}>Add stroke layer</button>
+    </div>`;
 }
 
 function shadowInspector(node) {
@@ -3242,7 +3664,39 @@ function shadowInspector(node) {
           <label class="field"><span class="field-label">B</span><input type="number" data-shadow-property="blur" min="0" step="1" value="${formatNumber(shadow.blur)}" aria-label="Shadow blur" /></label>
           <label class="field"><span class="field-label">%</span><input type="number" data-shadow-property="opacity" data-scale="0.01" min="0" max="100" value="${Math.round(shadow.opacity * 100)}" aria-label="Shadow opacity" /></label>
         </div>` : ""}
+      <div class="layout-control-block">
+        <span class="layout-control-label">Layer blur</span>
+        <label class="field"><span class="field-label">B</span><input type="number" data-effect-property="layerBlur" min="0" max="500" step="1" value="${formatNumber(node.layerBlur ?? 0)}" aria-label="Layer blur radius" /></label>
+      </div>
     </section>`;
+}
+
+function syncLegacyFill(node) {
+  const paint = node.fills?.[0];
+  if (!paint) return;
+  node.fillType = paint.type;
+  node.fill = paint.color;
+  node.gradient = paint.gradient;
+}
+
+function syncLegacyGradient(node) {
+  if (!node.fills?.[0]) return;
+  node.fills[0].gradient = cloneNode(node.gradient);
+}
+
+function syncLegacyStroke(node) {
+  const paint = node.strokes?.[0];
+  if (paint) node.stroke = paint.color;
+}
+
+function syncLegacyEffects(node) {
+  let effect = node.effects?.find((item) => item.type === "drop-shadow");
+  if (!effect) {
+    effect = { id: `effect_${Date.now()}`, type: "drop-shadow", visible: true };
+    node.effects ??= [];
+    node.effects.push(effect);
+  }
+  Object.assign(effect, cloneNode(node.shadow), { type: "drop-shadow", visible: node.shadow.enabled });
 }
 
 function requestRender() {
@@ -3312,8 +3766,9 @@ async function exportDocument(format) {
   }
 
   if (format === "svg") {
+    const resolvedPage = resolvePageAssets(designDocument, page);
     downloadBlob(
-      documentToSVG(page),
+      documentToSVG(resolvedPage),
       safeFilename(`${designDocument.name}-${page.name}`, "svg"),
       "image/svg+xml",
     );
@@ -3321,8 +3776,9 @@ async function exportDocument(format) {
   }
 
   if (format === "png") {
-    await preloadDocumentImages(page);
-    const canvas = renderDocumentToCanvas(page, null, 2);
+    const resolvedPage = resolvePageAssets(designDocument, page);
+    await preloadDocumentImages(resolvedPage);
+    const canvas = renderDocumentToCanvas(resolvedPage, null, 2);
     canvas.toBlob((blob) => {
       if (!blob) {
         showToast("PNG export failed in this browser.");
@@ -3364,13 +3820,15 @@ async function importImage() {
     if (dimensions.width > 20_000 || dimensions.height > 20_000 || dimensions.width * dimensions.height > 80_000_000) {
       throw new Error("That image is too large to render safely.");
     }
+    const asset = await registerAsset(designDocument, imageData, { name: file.name });
 
     const page = getPage(designDocument, target.pageId) ?? currentPage();
     const replacement = target.nodeId ? getNode(page, target.nodeId) : null;
     if (replacement?.type === NODE_TYPES.IMAGE) {
-      replacement.imageData = imageData;
+      replacement.assetId = asset.id;
+      replacement.imageData = "";
       replacement.altText ||= file.name;
-      recordComponentOverride(designDocument, page, replacement, "imageData");
+      recordComponentOverride(designDocument, page, replacement, "assetId");
       recordComponentOverride(designDocument, page, replacement, "altText");
       commitDocument();
       showToast("Image replaced");
@@ -3390,7 +3848,7 @@ async function importImage() {
       name: file.name.replace(/\.[^.]+$/, "").slice(0, 120) || "Image",
       width,
       height,
-      imageData,
+      assetId: asset.id,
       imageFit: "cover",
       altText: file.name,
       cornerRadius: 8,
@@ -3405,6 +3863,55 @@ async function importImage() {
   }
 }
 
+async function importFont() {
+  const [file] = elements.fontFileInput.files;
+  elements.fontFileInput.value = "";
+  if (!file) return;
+  if (!/\.woff2?$/i.test(file.name)) {
+    showToast("Choose a WOFF or WOFF2 font file.");
+    return;
+  }
+  if (file.size > 15 * 1024 * 1024) {
+    showToast("Fonts must be 15 MB or smaller.");
+    return;
+  }
+  let addedAssetID = null;
+  try {
+    let data = await readFileAsDataURL(file);
+    const mimeType = file.name.toLowerCase().endsWith(".woff2") ? "font/woff2" : "font/woff";
+    data = data.replace(/^data:[^;,]*;base64,/i, `data:${mimeType};base64,`);
+    const fontFamily = file.name.replace(/\.woff2?$/i, "").replace(/[_-]+/g, " ").trim() || "Embedded font";
+    const previousAssetIDs = new Set((designDocument.assets ?? []).map((asset) => asset.id));
+    const asset = await registerAsset(designDocument, data, {
+      kind: "font",
+      name: file.name,
+      fontFamily,
+    });
+    if (!previousAssetIDs.has(asset.id)) addedAssetID = asset.id;
+    const [result] = await loadDocumentFonts({ assets: [asset] });
+    if (result?.status === "error") throw new Error("The browser could not decode that font.");
+    renderer.invalidateCompositeCache();
+    commitDocument("Import font");
+    showToast(`${asset.fontFamily} embedded and ready`);
+  } catch (error) {
+    if (addedAssetID) {
+      designDocument.assets = (designDocument.assets ?? []).filter((asset) => asset.id !== addedAssetID);
+    }
+    showToast(error instanceof Error ? error.message : "Could not import that font.");
+  }
+}
+
+function cleanUnusedAssets() {
+  const removed = removeUnusedAssets(designDocument);
+  if (!removed) {
+    showToast("No unused embedded assets found");
+    return;
+  }
+  renderer.invalidateCompositeCache();
+  commitDocument("Clean unused assets");
+  showToast(`${removed} unused asset${removed === 1 ? "" : "s"} removed`);
+}
+
 async function importDocument() {
   const [file] = elements.fileInput.files;
   elements.fileInput.value = "";
@@ -3413,6 +3920,9 @@ async function importDocument() {
     const content = await file.text();
     const imported = normalizeDocument(JSON.parse(content));
     designDocument = imported;
+    await repairDocumentAssets(designDocument);
+    await loadDocumentFonts(designDocument);
+    renderer.invalidateCompositeCache();
     syncDocumentComponents(designDocument);
     resolveAllPageLayouts(designDocument);
     penDraft = null;
@@ -3453,8 +3963,9 @@ async function openPreview() {
     return;
   }
   elements.previewStage.innerHTML = "";
-  await preloadDocumentImages(page);
-  const canvas = renderDocumentToCanvas(page, null, 1.5);
+  const resolvedPage = resolvePageAssets(designDocument, page);
+  await preloadDocumentImages(resolvedPage);
+  const canvas = renderDocumentToCanvas(resolvedPage, null, 1.5);
   elements.previewStage.append(canvas);
   elements.previewModal.hidden = false;
 }
@@ -3599,6 +4110,9 @@ async function applyHostedRevision(expectedRevision) {
     if (file.revision < expectedRevision || file.revision <= hostedRevision) return;
     const nextDocument = normalizeDocument(file.document);
     designDocument = nextDocument;
+    await repairDocumentAssets(designDocument);
+    await loadDocumentFonts(designDocument);
+    renderer.invalidateCompositeCache();
     syncDocumentComponents(designDocument);
     resolveAllPageLayouts(designDocument);
     activePageId = designDocument.pages[0].id;
@@ -3793,6 +4307,13 @@ function stripHash(value) {
 
 function formatNumber(value) {
   return Math.round(value * 10) / 10;
+}
+
+function formatFileSize(bytes) {
+  const value = Math.max(0, Number(bytes) || 0);
+  if (value < 1_024) return `${value} B`;
+  if (value < 1_048_576) return `${Math.round(value / 1_024)} KB`;
+  return `${(value / 1_048_576).toFixed(1)} MB`;
 }
 
 function capitalize(value) {

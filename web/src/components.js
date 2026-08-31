@@ -300,8 +300,8 @@ export function recordComponentOverride(document, page, target, property) {
   const source = getComponentSourceNode(document, root.componentId, node.componentSourceId);
   if (!source) return false;
 
-  const normalized = normalizeNode({ ...cloneValue(node), [property]: cloneValue(node[property]) });
-  const sourceNormalized = normalizeNode({ ...cloneValue(source), [property]: cloneValue(source[property]) });
+  const normalized = normalizeOverrideCandidate(node, property, node[property]);
+  const sourceNormalized = normalizeOverrideCandidate(source, property, source[property]);
   const overrides = cloneValue(root.componentOverrides ?? {});
   const sourceId = node.componentSourceId;
   const nextValue = normalized[property];
@@ -550,8 +550,9 @@ function applyOverrides(node, properties) {
   if (!properties || typeof properties !== "object") return;
   for (const [property, value] of Object.entries(properties)) {
     if (!isComponentOverrideProperty(property)) continue;
-    const normalized = normalizeNode({ ...cloneValue(node), [property]: cloneValue(value) });
+    const normalized = normalizeOverrideCandidate(node, property, value);
     node[property] = cloneValue(normalized[property]);
+    syncCoupledPaintProperties(node, normalized, property);
   }
 }
 
@@ -648,8 +649,64 @@ function normalizeOverrideForNode(node, property, value) {
   if (!node || !isComponentOverrideProperty(property)) return undefined;
   const normalizedSource = normalizeNode(cloneValue(node));
   if (!Object.prototype.hasOwnProperty.call(normalizedSource, property)) return undefined;
-  const normalized = normalizeNode({ ...cloneValue(node), [property]: cloneValue(value) });
+  const normalized = normalizeOverrideCandidate(node, property, value);
   return cloneValue(normalized[property]);
+}
+
+function normalizeOverrideCandidate(node, property, value) {
+  const candidate = { ...cloneValue(node), [property]: cloneValue(value) };
+  if (["fill", "fillType", "gradient"].includes(property)) {
+    candidate.fills = cloneValue(candidate.fills ?? []);
+    candidate.fills[0] ??= {};
+    if (property === "fill") candidate.fills[0].color = value;
+    if (property === "fillType") candidate.fills[0].type = value;
+    if (property === "gradient") candidate.fills[0].gradient = cloneValue(value);
+  }
+  if (property === "stroke") {
+    candidate.strokes = cloneValue(candidate.strokes ?? []);
+    candidate.strokes[0] ??= {};
+    candidate.strokes[0].color = value;
+  }
+  if (property === "shadow") {
+    candidate.effects = cloneValue(candidate.effects ?? []);
+    let effect = candidate.effects.find((item) => item.type === "drop-shadow");
+    if (!effect) {
+      effect = { id: `effect_${node.id}`, type: "drop-shadow" };
+      candidate.effects.push(effect);
+    }
+    Object.assign(effect, cloneValue(value), {
+      type: "drop-shadow",
+      visible: value?.enabled !== false,
+    });
+  }
+  if (property === "vectorContours" && Array.isArray(value) && value[0]) {
+    candidate.vectorPoints = cloneValue(value[0].points);
+    candidate.vectorClosed = value[0].closed !== false;
+  }
+  return normalizeNode(candidate);
+}
+
+function syncCoupledPaintProperties(node, normalized, property) {
+  if (["fill", "fillType", "gradient", "fills"].includes(property)) {
+    node.fill = normalized.fill;
+    node.fillType = normalized.fillType;
+    node.gradient = cloneValue(normalized.gradient);
+    node.fills = cloneValue(normalized.fills);
+  }
+  if (["stroke", "strokes"].includes(property)) {
+    node.stroke = normalized.stroke;
+    node.strokes = cloneValue(normalized.strokes);
+  }
+  if (["shadow", "effects"].includes(property)) {
+    node.shadow = cloneValue(normalized.shadow);
+    node.effects = cloneValue(normalized.effects);
+    node.layerBlur = normalized.layerBlur;
+  }
+  if (property === "vectorContours") {
+    node.vectorPoints = cloneValue(normalized.vectorPoints);
+    node.vectorClosed = normalized.vectorClosed;
+    node.vectorContours = cloneValue(normalized.vectorContours);
+  }
 }
 
 function countOverrideProperties(overrides) {

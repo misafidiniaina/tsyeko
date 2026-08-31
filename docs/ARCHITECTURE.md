@@ -35,10 +35,11 @@ Browser
 ├── Versioned hierarchical document model
 ├── Deterministic Auto Layout and frame-constraint engine
 ├── Local component source/instance synchronizer
-├── Snapshot history
-├── Hierarchy-aware Canvas 2D renderer
+├── Reversible command-delta history
+├── Dirty-region Canvas 2D renderer
 │   ├── Porter–Duff Boolean composition
-│   └── nested mask/effect surfaces
+│   ├── nested mask/effect surfaces
+│   └── bounds-local LRU composite cache
 └── SVG/PNG/JSON exporters
           │
           ▼
@@ -90,14 +91,28 @@ Avoid introducing every distributed component on day one. PostgreSQL, Redis, obj
 
 ## 5. Document model
 
-The current v10 file format is a versioned, multi-page JSON document with flat storage, explicit parent relationships, responsive-layout metadata, paint definitions, effects, cubic Bézier vector paths, ordered Boolean/mask containers, and local component/variant records. Versions 1–9 migrate automatically. Imports repair dangling parents, reject non-container parents, break cycles, sanitize layout/anchor/control/paint/effect/composite/component values, dissolve undersized variant sets, make duplicate variant combinations deterministic, and restore parent-before-child ordering:
+The current v11 file format is a versioned, multi-page JSON document with flat node storage, explicit parent relationships, responsive-layout metadata, ordered paint/effect stacks, rich-text ranges, compound cubic Bézier contours, ordered Boolean/mask containers, local component/variant records, and content-addressed image/font assets. Versions 1–10 migrate automatically. Imports repair dangling parents, reject non-container parents, break cycles, sanitize layout/anchor/control/paint/effect/text/composite/component values, verify embedded asset hashes, deduplicate content, enforce quotas, dissolve undersized variant sets, make duplicate variant combinations deterministic, and restore parent-before-child ordering:
 
 ```json
 {
-  "version": 10,
+  "version": 11,
   "id": "document_…",
   "name": "Untitled design",
   "background": "#101114",
+  "assets": [
+    {
+      "id": "asset_8f…",
+      "hash": "8f…",
+      "kind": "font",
+      "mimeType": "font/woff2",
+      "name": "Studio.woff2",
+      "bytes": 48216,
+      "fontFamily": "Studio",
+      "fontWeight": 400,
+      "fontStyle": "normal",
+      "data": "data:font/woff2;base64,…"
+    }
+  ],
   "componentSets": [
     {
       "id": "component-set_…",
@@ -277,15 +292,14 @@ The composite owns the result paint, stroke, opacity, and effect. Source paint r
 
 Canvas rendering creates alpha surfaces for each source and combines them with `source-over`, `destination-out`, `destination-in`, or `xor`. Result strokes are expanded from the combined alpha boundary, then the fill and effect are projected once. SVG export retains structure with `<mask>` definitions and uses `<feMorphology operator="dilate">` for the expanded stroke. Hit testing evaluates the same Boolean algebra, so transparent Subtract/Exclude holes do not select the composite.
 
-Production evolution:
+Production evolution after v11:
 
 - Move from world-space child geometry to consistently decomposed local transforms or matrices
 - Add explicit sibling ordering when collaboration requires ordering independent of array position
-- Extend vectors with editable compound contours, destructive flattening, and precision offset/outline geometry
-- Add multiple paint stacks, radial/angular gradients, and blur effects
-- Add rich-text ranges and font references
+- Replace sampled Boolean flattening and polygonal stroke offsets with an exact, battle-tested curve geometry kernel
+- Make font shaping and metrics identical across browser, desktop, and hosted export runtimes
 - Add typed component properties, nested composition, richer variant authoring, and library publication
-- Extend Auto Layout with wrapping, min/max dimensions, baseline alignment, and intrinsic text measurement
+- Extend Auto Layout to rotated containers and richer grid-like placement
 - Add prototype edges separately from visual nodes
 - Add explicit schema migrations for every document version
 
@@ -348,7 +362,7 @@ Initial performance budgets:
 - Selection hit testing below 8 ms p95
 - Memory below 500 MB for a representative large document
 
-The current Canvas compositor intentionally uses viewport-sized temporary surfaces for correctness and simple nesting. Before large-document work, replace repeated allocation with pooled, bounds-local surfaces and dirty-region caches. Promote the same scene-composition contract to GPU render targets only after profiling shows that Canvas misses the stated budgets.
+The v11 Canvas compositor culls offscreen nodes, renders composite branches into bounded local surfaces, reuses them through a 64 MB/48-entry LRU cache, and redraws merged dirty regions when camera and transient state are unchanged. Camera changes and high-dirty-area frames deliberately fall back to a full redraw. A rolling profiler exposes frame time, p95, cache hits/misses, culled nodes, and dirty-region counts in the editor. A production large-scene engine still needs a spatial index, pooled surfaces/workers, better text atlases, and eventually GPU render targets if representative profiles miss the budgets.
 
 ## 8. Text architecture
 
@@ -362,11 +376,11 @@ Text fidelity is one of the highest-risk areas. The browser, server exporter, an
 - Rich-text runs
 - Baseline placement
 
-Use a shared shaping engine such as HarfBuzz and a controlled font pipeline when exact fidelity becomes necessary. Fonts must be licensed for storage, editing, and server-side export.
+The v11 browser client embeds WOFF/WOFF2 files as content-addressed assets, loads them through `FontFace`, invalidates cached metrics after load, and uses one Canvas `measureText` pipeline for rich-text wrapping, intrinsic sizing, Canvas rendering, and layout. Browser-native shaping handles the current local editor accurately. A shared shaping engine such as HarfBuzz is still required when exact cross-browser, desktop, and hosted-export fidelity becomes necessary. Fonts must be licensed for storage, editing, and server-side export.
 
 ## 9. Commands, history, and collaboration
 
-The MVP keeps bounded full-document snapshots because that implementation is reliable and easy to inspect. Production editing should use semantic transactions:
+The v11 client stores bounded reversible commands made from property `set`/`delete` operations and structural array splices. A pointer gesture is committed as one labeled undo entry; unchanged timestamps are excluded, and redo branches are discarded after a new edit. Commands are local document deltas today. Collaboration should promote this boundary to semantic, identity-aware transactions:
 
 ```json
 {
@@ -455,7 +469,7 @@ Every mutation is authorized server-side. Client UI permissions are convenience,
 
 ## 12. Auto layout and constraints
 
-The v10 client implements layout as a deterministic function of document properties. A frame with horizontal or vertical Auto Layout flows its visible direct children in sibling order; hidden and absolute children are excluded. The implemented contract includes:
+The v11 client implements layout as a deterministic function of document properties. A frame with horizontal or vertical Auto Layout flows its visible direct children in sibling order; hidden and absolute children are excluded. The implemented contract includes:
 
 - Independent top, right, bottom, and left padding
 - Optional horizontal row wrapping and vertical column wrapping
@@ -474,7 +488,7 @@ Resolution runs deepest frames first and repeats to a bounded fixed point. A hug
 
 Frame constraints are calculated from immutable node snapshots captured at the start of each resize gesture. This prevents cumulative drift and permits nested frames to evaluate their own children after receiving a new box. Resolved geometry is committed to history and persistence, so Canvas, hit testing, PNG, and SVG use the same boxes.
 
-The current engine is axis-aligned. Text widths and baselines use deterministic approximations until controlled font metrics are available. Rotated Auto Layout frames and incremental dirty-subtree invalidation remain future work. A hosted export worker must eventually run this same algorithm and controlled font metrics.
+The current layout engine is axis-aligned. Text widths and baselines use the shared browser metric pipeline, including loaded document fonts and rich-text runs; a deterministic approximation remains only for non-browser tests or unavailable Canvas contexts. Rotated Auto Layout frames remain future work. The renderer performs dirty-region invalidation, while layout still resolves affected documents through a bounded fixed point. A hosted export worker must eventually run this same algorithm with cross-runtime controlled shaping.
 
 ## 13. Components and design systems
 
@@ -579,7 +593,7 @@ Every document schema change needs forward-migration tests and fixtures from old
 ### Milestone 0 — implemented foundation
 
 - Canvas editor and basic nodes
-- Multi-page documents, page operations, and v1–v9 schema migration into v10
+- Multi-page documents, page operations, and v1–v10 schema migration into v11
 - Hierarchical frames and groups with recursive editing and cycle-safe imports
 - Nested layers, frame clipping, and inherited visibility, locking, and opacity
 - Linear-gradient fills and explicit drop-shadow effects with Canvas/SVG parity
@@ -589,7 +603,7 @@ Every document schema change needs forward-migration tests and fixtures from old
 - Composite creation, operation switching, source-order labels, release workflows, keyboard commands, persistence, and browser pixel tests
 - Horizontal/vertical Auto Layout, Shift+A wrapping, padding, gaps, alignment, fixed/hug/fill sizing, absolute children, and Layers feedback
 - Responsive frame constraints with nested evaluation, resize snapshots, undo/redo, persistence, and Canvas/SVG geometry parity
-- Local components with source records, linked instances, visible/property-level overrides, semantic swapping, local variant matrices, reset, detach, Assets insertion/navigation, and v10 persistence
+- Local components with source records, linked instances, visible/property-level overrides, semantic swapping, local variant matrices, reset, detach, Assets insertion/navigation, and v11 persistence
 - Per-page canvas appearance and view state
 - Embedded raster image layers with cover/contain fitting
 - IndexedDB persistence and compact localStorage recovery copies
@@ -599,17 +613,17 @@ Every document schema change needs forward-migration tests and fixtures from old
 - PNG, SVG, and JSON export
 - Embedded development server
 
-### Milestone 1 — structured editor
+### Milestone 1 — implemented structured editor (2026-08-31)
 
-- Controlled font shaping and exact font metrics
-- Editable compound contours, destructive Boolean flattening, precision stroke outlining, and geometry-kernel fuzz tests
-- Bounds-local composite caches, dirty-region rendering, and large-scene profiling
-- Multiple paint stacks, radial/angular gradients, and blur effects
-- Better text shaping and rich-text ranges
-- Command-based history
-- Dedicated content-addressed asset records and storage quotas
+- Browser-controlled WOFF/WOFF2 loading, native shaping, shared Canvas metrics, and deterministic fallback metrics
+- Editable compound contours, destructive Boolean flattening, rotation-safe miter-limited stroke outlining, and deterministic geometry fuzz tests
+- Bounds-local LRU composite caches, viewport culling, dirty-region rendering, and rolling large-scene diagnostics
+- Ordered fill/stroke stacks, radial/angular gradients, drop shadows, and layer blur with Canvas/SVG export support
+- Rich-text ranges for font, weight, style, decoration, spacing, size, and color
+- Bounded labeled command-delta history with reversible structural splices
+- SHA-256 content-addressed image/font records, deduplication, integrity repair, usage cleanup, 15 MB per-asset limits, and a 100 MB document quota
 
-Exit criterion: a designer can complete and export a small production UI without leaving the editor.
+Exit criterion met for the local browser editor: a designer can complete and export a small production UI without leaving the editor. Exact cross-runtime font shaping and curve-offset geometry remain explicit production hardening work rather than hidden parity claims.
 
 ### Milestone 2 — hosted collaboration
 

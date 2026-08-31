@@ -965,8 +965,8 @@ try {
       request.addEventListener("error", () => reject(request.error), { once: true });
     })
   `);
-  if (storedDocumentVersion !== 10) {
-    throw new Error(`Expected persisted document v10, received ${storedDocumentVersion}.`);
+  if (storedDocumentVersion !== 11) {
+    throw new Error(`Expected persisted document v11, received ${storedDocumentVersion}.`);
   }
   await evaluate(`
     [...document.querySelectorAll(".layer-row")]
