@@ -44,6 +44,7 @@ GOCACHE=$PWD/.cache/go-build go run .
 - Ordered effects with data-driven drop shadows and layer blur
 - Browser-native text shaping and metrics, embedded document fonts, and editable rich-text color/weight/style ranges
 - Selection, marquee selection, multi-selection, movement, resize, and rotation
+- Multi-selection edge/center alignment and equal-gap distribution with temporary on-canvas measurements
 - Shift-constrained drawing and transforms
 - Alt-centered shape drawing and resizing
 - Smart edge and center snapping while moving layers
@@ -132,7 +133,7 @@ npm run check
 npm run test:browser
 ```
 
-The unit suite covers document migration and sanitization, content-addressed assets and embedded fonts, command history, render caches and profiling, rich text, compound/outlined/fuzzed geometry, component synchronization, local variants, nested Auto Layout, frame constraints, SVG parity, Boolean/mask geometry, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies the layout inspector, responsive resizing, undo/redo, v11 persistence, local component/variant workflows, all four Boolean modes and mask intersection with Canvas and rasterized-SVG pixel samples, vector editing, paint stacks, images, grouping, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
+The unit suite covers document migration and sanitization, content-addressed assets and embedded fonts, command history, alignment/distribution geometry, render caches and profiling, rich text, compound/outlined/fuzzed geometry, component synchronization, local variants, nested Auto Layout, frame constraints, SVG parity, Boolean/mask geometry, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies multi-selection arrangement, the layout inspector, responsive resizing, undo/redo, v11 persistence, local component/variant workflows, all four Boolean modes and mask intersection with Canvas and rasterized-SVG pixel samples, vector editing, paint stacks, images, grouping, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
 
 ## Hosted snapshot workflow
 
@@ -154,6 +155,7 @@ This API is currently a development collaboration foundation. It has document va
 │   ├── styles.css           Product UI and responsive layout
 │   └── src/
 │       ├── app.js           Editor controller and interactions
+│       ├── alignment.js     Multi-selection alignment, distribution, and guide geometry
 │       ├── model.js         Document schema and geometry
 │       ├── components.js    Local component and linked-instance synchronization
 │       ├── layout.js        Auto Layout and frame constraints
@@ -169,6 +171,7 @@ This API is currently a development collaboration foundation. It has document va
 │       ├── export.js        SVG/JSON/download support
 │       ├── persistence.js   IndexedDB storage and migration fallback
 │       ├── layout.test.js   Responsive layout unit tests
+│       ├── alignment.test.js Arrangement geometry unit tests
 │       ├── components.test.js Component and instance unit tests
 │       ├── model.test.js    Document and export unit tests
 │       └── vector.test.js   Bézier geometry unit tests

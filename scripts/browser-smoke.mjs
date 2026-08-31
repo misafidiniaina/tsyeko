@@ -565,6 +565,42 @@ try {
       return true;
     })()
   `);
+  await waitFor(
+    `document.querySelectorAll('[data-multi-action="align"]').length === 6 &&
+     !document.querySelector('[data-multi-action="align"][data-alignment="top"]')?.disabled &&
+     !document.querySelector('[data-multi-action="distribute"][data-axis="horizontal"]')?.disabled`,
+    "multi-selection arrangement controls",
+  );
+  await evaluate(`document.querySelector('[data-multi-action="align"][data-alignment="top"]').click(); true`);
+  await waitFor(`document.querySelector("#saveState").textContent === "Saved locally"`, "top alignment autosave");
+  await evaluate(`document.querySelector('[data-multi-action="distribute"][data-axis="horizontal"]').click(); true`);
+  await waitFor(`document.querySelector("#saveState").textContent === "Saved locally"`, "spacing distribution autosave");
+  const arrangedLayers = await evaluate(`
+    (() => {
+      const result = {};
+      for (const name of ["smoke-image", "Vector path", "Rectangle"]) {
+        [...document.querySelectorAll(".layer-row")]
+          .find((row) => row.querySelector(".layer-name")?.textContent === name)
+          .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        const value = (property) => Number(document.querySelector('[data-property="' + property + '"]')?.value);
+        result[name] = { x: value("x"), y: value("y"), width: value("width") };
+      }
+      const selectLayer = (name, shiftKey) => [...document.querySelectorAll(".layer-row")]
+        .find((row) => row.querySelector(".layer-name")?.textContent === name)
+        .dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey }));
+      selectLayer("smoke-image", false);
+      selectLayer("Vector path", true);
+      selectLayer("Rectangle", true);
+      return result;
+    })()
+  `);
+  const arrangedValues = Object.values(arrangedLayers).sort((left, right) => left.x - right.x);
+  const arrangedGaps = arrangedValues.slice(1).map((layer, index) =>
+    layer.x - arrangedValues[index].x - arrangedValues[index].width);
+  if (Math.max(...arrangedValues.map((layer) => layer.y)) - Math.min(...arrangedValues.map((layer) => layer.y)) > 0.05 ||
+      Math.abs(arrangedGaps[0] - arrangedGaps[1]) > 0.05) {
+    throw new Error(`Alignment/distribution validation failed: ${JSON.stringify(arrangedLayers)}`);
+  }
   await evaluate(`
     window.dispatchEvent(new KeyboardEvent("keydown", {
       key: "g",

@@ -1202,12 +1202,28 @@ export class CanvasRenderer {
   drawGuides(guides, camera) {
     const context = this.context;
     context.save();
-    context.strokeStyle = "#ec4899";
-    context.lineWidth = 1;
-    context.setLineDash([4, 3]);
     for (const guide of guides) {
+      if (guide.type === "spacing") {
+        this.drawSpacingGuide(guide, camera);
+        continue;
+      }
+      context.strokeStyle = "#ec4899";
+      context.lineWidth = 1;
+      context.setLineDash([4, 3]);
       context.beginPath();
-      if (guide.axis === "x") {
+      if (guide.type === "alignment" && Number.isFinite(guide.start) && Number.isFinite(guide.end)) {
+        if (guide.axis === "x") {
+          const start = this.worldToScreen({ x: guide.value, y: guide.start }, camera);
+          const end = this.worldToScreen({ x: guide.value, y: guide.end }, camera);
+          context.moveTo(start.x, start.y - 8);
+          context.lineTo(end.x, end.y + 8);
+        } else {
+          const start = this.worldToScreen({ x: guide.start, y: guide.value }, camera);
+          const end = this.worldToScreen({ x: guide.end, y: guide.value }, camera);
+          context.moveTo(start.x - 8, start.y);
+          context.lineTo(end.x + 8, end.y);
+        }
+      } else if (guide.axis === "x") {
         const x = this.worldToScreen({ x: guide.value, y: 0 }, camera).x;
         context.moveTo(x, 0);
         context.lineTo(x, this.height);
@@ -1218,6 +1234,56 @@ export class CanvasRenderer {
       }
       context.stroke();
     }
+    context.restore();
+  }
+
+  drawSpacingGuide(guide, camera) {
+    const context = this.context;
+    const horizontal = guide.axis === "x";
+    const start = horizontal
+      ? this.worldToScreen({ x: guide.start, y: guide.cross }, camera)
+      : this.worldToScreen({ x: guide.cross, y: guide.start }, camera);
+    const end = horizontal
+      ? this.worldToScreen({ x: guide.end, y: guide.cross }, camera)
+      : this.worldToScreen({ x: guide.cross, y: guide.end }, camera);
+
+    context.save();
+    context.strokeStyle = "#ec4899";
+    context.lineWidth = 1;
+    context.setLineDash([]);
+    context.beginPath();
+    context.moveTo(start.x, start.y);
+    context.lineTo(end.x, end.y);
+    if (horizontal) {
+      context.moveTo(start.x, start.y - 4);
+      context.lineTo(start.x, start.y + 4);
+      context.moveTo(end.x, end.y - 4);
+      context.lineTo(end.x, end.y + 4);
+    } else {
+      context.moveTo(start.x - 4, start.y);
+      context.lineTo(start.x + 4, start.y);
+      context.moveTo(end.x - 4, end.y);
+      context.lineTo(end.x + 4, end.y);
+    }
+    context.stroke();
+
+    const label = formatGuideMeasurement(guide.value);
+    const midpoint = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
+    context.font = "600 10px Inter, ui-sans-serif, sans-serif";
+    const labelWidth = context.measureText(label).width + 10;
+    const labelHeight = 16;
+    const preferredX = horizontal ? midpoint.x - labelWidth / 2 : midpoint.x + 7;
+    const preferredY = horizontal ? midpoint.y - labelHeight - 6 : midpoint.y - labelHeight / 2;
+    const x = Math.min(Math.max(2, preferredX), Math.max(2, this.width - labelWidth - 2));
+    const y = Math.min(Math.max(2, preferredY), Math.max(2, this.height - labelHeight - 2));
+    context.fillStyle = "rgba(236, 72, 153, 0.96)";
+    context.beginPath();
+    context.roundRect(x, y, labelWidth, labelHeight, 4);
+    context.fill();
+    context.fillStyle = "white";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillText(label, x + labelWidth / 2, y + labelHeight / 2);
     context.restore();
   }
 
@@ -1837,6 +1903,11 @@ function emptyFrameStats() {
 
 function monotonicNow() {
   return globalThis.performance?.now?.() ?? Date.now();
+}
+
+function formatGuideMeasurement(value) {
+  const rounded = Math.abs(value) < 0.05 ? 0 : Math.round(value * 10) / 10;
+  return String(rounded).replace("-", "−");
 }
 
 function subpixelPhase(value, pixelRatio) {

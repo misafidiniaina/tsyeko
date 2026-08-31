@@ -625,7 +625,18 @@ Every document schema change needs forward-migration tests and fixtures from old
 
 Exit criterion met for the local browser editor: a designer can complete and export a small production UI without leaving the editor. Exact cross-runtime font shaping and curve-offset geometry remain explicit production hardening work rather than hidden parity claims.
 
-### Milestone 2 — hosted collaboration
+### Milestone 1.5 — professional editing tools and usability (active)
+
+- Rotation-aware multi-selection edge/center alignment, equal-gap distribution, hierarchy-safe branch movement, and temporary canvas measurements (implemented)
+- Unified multi-selection bounding-box resize and rotation
+- Persistent rulers, custom guides, grids, and richer distance inspection
+- Faster smart-spacing and duplicate-in-place workflows during direct manipulation
+- More shape/path authoring tools and precision transform controls
+- Keyboard focus, accessibility, and dense-workflow polish across Canvas, Layers, and Inspector
+
+Exit criterion: core layout and vector work feels fast and predictable enough for sustained daily design use, not only feature demonstrations.
+
+### Milestone 2 — hosted collaboration (deferred while editor tools are the active priority)
 
 - Durable file snapshots, optimistic revisions, live file-room events, online counts, clean-client updates, conflict detection, and local fallback (implemented foundation)
 - Accounts, organizations, projects, and sharing

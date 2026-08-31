@@ -53,6 +53,14 @@ import {
   resolvePageLayout,
 } from "./layout.js";
 import {
+  ALIGNMENTS,
+  calculateAlignmentDeltas,
+  calculateDistributionDeltas,
+  createAlignmentGuide,
+  createSpacingGuides,
+  DISTRIBUTION_AXES,
+} from "./alignment.js";
+import {
   createComponent,
   createComponentInstance,
   createComponentSet,
@@ -198,6 +206,9 @@ let vectorEdit = null;
 let suppressDoubleClickUntil = 0;
 let clipboardNodes = [];
 let guides = [];
+let transformFeedbackGuides = [];
+let transformFeedbackPageId = null;
+let transformFeedbackTimer = null;
 let spacePressed = false;
 let saveTimer = null;
 let saveVersion = 0;
@@ -1264,6 +1275,7 @@ function bindKeyboard() {
 
 function onPointerDown(event) {
   if (event.button !== 0 && event.button !== 1) return;
+  clearTransformFeedback();
   closePopovers();
   if (editingTextId) finishTextEditing(true);
   elements.canvas.focus();
@@ -2288,6 +2300,113 @@ function nudgeSelection(key, amount) {
   commitDocument();
 }
 
+function alignSelectedLayers(alignment) {
+  const selection = arrangementSelection(2);
+  if (!selection.valid) {
+    showToast(selection.reason);
+    return;
+  }
+  const deltas = calculateAlignmentDeltas(selection.items, alignment);
+  const changed = translateArrangementRoots(selection.page, deltas);
+  if (changed) {
+    syncGroupBounds(selection.page);
+    commitDocument(`Align ${alignment.replaceAll("-", " ")}`);
+  }
+  const items = arrangementItems(selection.page, selection.rootIds);
+  const guide = createAlignmentGuide(items, alignment);
+  showTransformFeedback(guide ? [guide] : []);
+}
+
+function distributeSelectedLayers(axis) {
+  const selection = arrangementSelection(3);
+  if (!selection.valid) {
+    showToast(selection.reason);
+    return;
+  }
+  const deltas = calculateDistributionDeltas(selection.items, axis);
+  const changed = translateArrangementRoots(selection.page, deltas);
+  if (changed) {
+    syncGroupBounds(selection.page);
+    commitDocument(`Distribute ${axis} spacing`);
+  }
+  const items = arrangementItems(selection.page, selection.rootIds);
+  showTransformFeedback(createSpacingGuides(items, axis));
+}
+
+function arrangementSelection(minimumCount = 2) {
+  const page = currentPage();
+  const rootIds = getTopLevelNodeIds(page, selectedIds);
+  const nodes = rootIds.map((id) => getNode(page, id)).filter(Boolean);
+  if (nodes.length < minimumCount) {
+    return {
+      valid: false,
+      reason: `Select at least ${minimumCount} independent layers.`,
+      page,
+      rootIds,
+      items: [],
+    };
+  }
+  if (nodes.some((node) => isNodeEffectivelyLocked(page, node))) {
+    return { valid: false, reason: "Unlock every selected layer before arranging it.", page, rootIds, items: [] };
+  }
+  if (nodes.some((node) => !canMoveComponentNode(node))) {
+    return { valid: false, reason: "Select the instance root, or detach the instance before arranging its layers.", page, rootIds, items: [] };
+  }
+  if (nodes.some((node) => isAutoLayoutChild(page, node))) {
+    return { valid: false, reason: "Set Auto Layout children to Absolute before arranging them manually.", page, rootIds, items: [] };
+  }
+  return {
+    valid: true,
+    reason: "",
+    page,
+    rootIds,
+    items: nodes.map((node) => ({ id: node.id, bounds: getNodeAABB(node) })),
+  };
+}
+
+function arrangementItems(page, rootIds) {
+  return rootIds
+    .map((id) => getNode(page, id))
+    .filter(Boolean)
+    .map((node) => ({ id: node.id, bounds: getNodeAABB(node) }));
+}
+
+function translateArrangementRoots(page, deltas) {
+  let changed = false;
+  for (const delta of deltas) {
+    if (Math.abs(delta.dx) < 0.0001 && Math.abs(delta.dy) < 0.0001) continue;
+    for (const node of getNodesWithDescendants(page, [delta.id])) {
+      node.x += delta.dx;
+      node.y += delta.dy;
+    }
+    changed = true;
+  }
+  return changed;
+}
+
+function showTransformFeedback(nextGuides) {
+  clearTransformFeedback(false);
+  transformFeedbackGuides = nextGuides;
+  transformFeedbackPageId = activePageId;
+  requestRender();
+  if (!nextGuides.length) return;
+  transformFeedbackTimer = window.setTimeout(() => {
+    transformFeedbackGuides = [];
+    transformFeedbackPageId = null;
+    transformFeedbackTimer = null;
+    requestRender();
+  }, 1_600);
+}
+
+function clearTransformFeedback(render = true) {
+  if (transformFeedbackTimer !== null) window.clearTimeout(transformFeedbackTimer);
+  const hadFeedback = transformFeedbackGuides.length > 0;
+  transformFeedbackGuides = [];
+  transformFeedbackPageId = null;
+  transformFeedbackTimer = null;
+  if (render && hadFeedback) requestRender();
+}
+
 function groupSelection() {
   if (!selectedIds.length) return;
   if (!canChangeComponentStructure("Group")) return;
@@ -2657,6 +2776,7 @@ function synchronizeDocumentGeometry() {
 }
 
 function commitDocument(label = "Edit document") {
+  clearTransformFeedback(false);
   synchronizeDocumentGeometry();
   designDocument.updatedAt = new Date().toISOString();
   history.commit(designDocument, label);
@@ -2665,6 +2785,7 @@ function commitDocument(label = "Edit document") {
 }
 
 function liveDocumentChange() {
+  clearTransformFeedback(false);
   synchronizeDocumentGeometry();
   designDocument.updatedAt = new Date().toISOString();
   elements.saveState.textContent = "Saving…";
@@ -2673,6 +2794,7 @@ function liveDocumentChange() {
 }
 
 function undo() {
+  clearTransformFeedback(false);
   finishTextEditing(false);
   penDraft = null;
   vectorEdit = null;
@@ -2690,6 +2812,7 @@ function undo() {
 }
 
 function redo() {
+  clearTransformFeedback(false);
   finishTextEditing(false);
   penDraft = null;
   vectorEdit = null;
@@ -3006,6 +3129,13 @@ function renderInspector() {
 
   if (selectedIds.length > 1) {
     const selectedRoots = getTopLevelNodeIds(currentPage(), selectedIds);
+    const alignmentState = arrangementSelection(2);
+    const distributionState = arrangementSelection(3);
+    const alignmentDisabled = alignmentState.valid ? "" : "disabled";
+    const distributionDisabled = distributionState.valid ? "" : "disabled";
+    const arrangementHint = alignmentState.valid
+      ? "Alignment uses rotation-aware bounds. Equal spacing needs at least three layers."
+      : alignmentState.reason;
     const variantCandidates = selectedMainComponentIds();
     const canCreateVariants = variantCandidates.length >= 2 &&
       variantCandidates.length === selectedRoots.length &&
@@ -3028,6 +3158,31 @@ function renderInspector() {
         <p class="inspector-hint">Names like “Button / State=Hover, Size=Large” create matching variant controls automatically.</p>
       </div>` : ""}
       <div class="inspector-section">
+        <p class="inspector-section-title">Align and distribute</p>
+        <div class="alignment-control-grid">
+          ${[
+            [ALIGNMENTS.LEFT, "Align left"],
+            [ALIGNMENTS.HORIZONTAL_CENTER, "Align horizontal centers"],
+            [ALIGNMENTS.RIGHT, "Align right"],
+            [ALIGNMENTS.TOP, "Align top"],
+            [ALIGNMENTS.VERTICAL_CENTER, "Align vertical centers"],
+            [ALIGNMENTS.BOTTOM, "Align bottom"],
+          ].map(([alignment, label]) => `
+            <button class="icon-toggle" data-multi-action="align" data-alignment="${alignment}" title="${label}" aria-label="${label}" ${alignmentDisabled}>
+              ${arrangementIcon(alignment)}
+            </button>`).join("")}
+        </div>
+        <div class="distribution-control-grid">
+          <button class="icon-toggle" data-multi-action="distribute" data-axis="${DISTRIBUTION_AXES.HORIZONTAL}" title="Distribute horizontal spacing" ${distributionDisabled}>
+            ${arrangementIcon("distribute-horizontal")}<span>Horizontal</span>
+          </button>
+          <button class="icon-toggle" data-multi-action="distribute" data-axis="${DISTRIBUTION_AXES.VERTICAL}" title="Distribute vertical spacing" ${distributionDisabled}>
+            ${arrangementIcon("distribute-vertical")}<span>Vertical</span>
+          </button>
+        </div>
+        <p class="inspector-hint">${escapeHTML(arrangementHint)}</p>
+      </div>
+      <div class="inspector-section">
         <p class="inspector-section-title">Auto Layout</p>
         <div class="icon-toggle-row">
           <button class="icon-toggle" data-multi-action="auto-layout" data-mode="horizontal">Horizontal</button>
@@ -3046,6 +3201,12 @@ function renderInspector() {
     elements.inspector.querySelector("[data-multi-action='group']")?.addEventListener("click", groupSelection);
     elements.inspector.querySelector("[data-multi-action='duplicate']")?.addEventListener("click", duplicateSelection);
     elements.inspector.querySelector("[data-multi-action='create-variants']")?.addEventListener("click", createVariantSetFromSelection);
+    elements.inspector.querySelectorAll("[data-multi-action='align']").forEach((button) => {
+      button.addEventListener("click", () => alignSelectedLayers(button.dataset.alignment));
+    });
+    elements.inspector.querySelectorAll("[data-multi-action='distribute']").forEach((button) => {
+      button.addEventListener("click", () => distributeSelectedLayers(button.dataset.axis));
+    });
     elements.inspector.querySelectorAll("[data-multi-action='auto-layout']").forEach((button) => {
       button.addEventListener("click", () => autoLayoutSelection(button.dataset.mode));
     });
@@ -3707,8 +3868,11 @@ function requestRender() {
     const marquee = interaction?.type === "marquee"
       ? normalizedRect(interaction.start, interaction.current)
       : null;
+    const visibleFeedbackGuides = transformFeedbackPageId === activePageId
+      ? transformFeedbackGuides
+      : [];
     renderer.render(currentPage(), selectedIds, camera, {
-      guides,
+      guides: [...guides, ...visibleFeedbackGuides],
       marquee,
       editingId: editingTextId,
       penDraft,
@@ -4351,6 +4515,20 @@ function nodeIcon(type) {
     multiple: '<svg viewBox="0 0 20 20"><rect x="3" y="3" width="9" height="9" /><rect x="8" y="8" width="9" height="9" /></svg>',
   };
   return icons[type] ?? icons.rectangle;
+}
+
+function arrangementIcon(action) {
+  const paths = {
+    [ALIGNMENTS.LEFT]: '<path d="M4 3v14M7 6h9M7 10h6M7 14h8" />',
+    [ALIGNMENTS.HORIZONTAL_CENTER]: '<path d="M10 3v14M4 6h12M6 10h8M5 14h10" />',
+    [ALIGNMENTS.RIGHT]: '<path d="M16 3v14M4 6h9M7 10h6M5 14h8" />',
+    [ALIGNMENTS.TOP]: '<path d="M3 4h14M6 7v9M10 7v6M14 7v8" />',
+    [ALIGNMENTS.VERTICAL_CENTER]: '<path d="M3 10h14M6 4v12M10 6v8M14 5v10" />',
+    [ALIGNMENTS.BOTTOM]: '<path d="M3 16h14M6 4v9M10 7v6M14 5v8" />',
+    "distribute-horizontal": '<path d="M3 4v12M10 6v8M17 4v12M5 10h3M12 10h3" />',
+    "distribute-vertical": '<path d="M4 3h12M6 10h8M4 17h12M10 5v3M10 12v3" />',
+  };
+  return `<svg class="arrangement-icon" viewBox="0 0 20 20" aria-hidden="true">${paths[action] ?? ""}</svg>`;
 }
 
 function componentIcon() {
