@@ -3,8 +3,9 @@ import {
   VECTOR_HANDLE_MODES,
 } from "./vector.js";
 import { DEFAULT_GRID_SIZE, normalizeGuides } from "./canvas-aids.js";
+import { ARROWHEADS, lineVisualPadding } from "./shapes.js";
 
-export const DOCUMENT_VERSION = 12;
+export const DOCUMENT_VERSION = 13;
 const MAX_HIERARCHY_DEPTH = 256;
 
 export const COMPONENT_ROLES = Object.freeze({
@@ -47,6 +48,15 @@ export const COMPONENT_OVERRIDE_PROPERTIES = Object.freeze([
   "vectorContours",
   "vectorClosed",
   "vectorFillRule",
+  "lineStartX",
+  "lineStartY",
+  "lineEndX",
+  "lineEndY",
+  "arrowStart",
+  "arrowEnd",
+  "polygonSides",
+  "starPoints",
+  "starInnerRatio",
   "booleanOperation",
   "layoutMode",
   "layoutWrap",
@@ -152,6 +162,9 @@ export const NODE_TYPES = Object.freeze({
   MASK: "mask",
   RECTANGLE: "rectangle",
   ELLIPSE: "ellipse",
+  LINE: "line",
+  POLYGON: "polygon",
+  STAR: "star",
   VECTOR: "vector",
   TEXT: "text",
   IMAGE: "image",
@@ -226,6 +239,45 @@ const DEFAULTS = Object.freeze({
     stroke: "#000000",
     strokeWidth: 0,
     cornerRadius: 0,
+    shadow: DEFAULT_SHADOW,
+  },
+  line: {
+    name: "Line",
+    width: 160,
+    height: 1,
+    fill: "transparent",
+    stroke: "#8b5cf6",
+    strokeWidth: 2,
+    cornerRadius: 0,
+    lineStartX: 0,
+    lineStartY: 0.5,
+    lineEndX: 1,
+    lineEndY: 0.5,
+    arrowStart: ARROWHEADS.NONE,
+    arrowEnd: ARROWHEADS.NONE,
+    shadow: DEFAULT_SHADOW,
+  },
+  polygon: {
+    name: "Polygon",
+    width: 120,
+    height: 120,
+    fill: "#8b5cf6",
+    stroke: "#000000",
+    strokeWidth: 0,
+    cornerRadius: 0,
+    polygonSides: 3,
+    shadow: DEFAULT_SHADOW,
+  },
+  star: {
+    name: "Star",
+    width: 120,
+    height: 120,
+    fill: "#8b5cf6",
+    stroke: "#000000",
+    strokeWidth: 0,
+    cornerRadius: 0,
+    starPoints: 5,
+    starInnerRatio: 0.4,
     shadow: DEFAULT_SHADOW,
   },
   vector: {
@@ -636,6 +688,28 @@ export function normalizeNode(input) {
     node.altText = cleanString(input.altText, "", 500);
   }
 
+  if (node.type === NODE_TYPES.LINE) {
+    node.lineStartX = finiteNumber(input.lineStartX, defaults.lineStartX, 0, 1);
+    node.lineStartY = finiteNumber(input.lineStartY, defaults.lineStartY, 0, 1);
+    node.lineEndX = finiteNumber(input.lineEndX, defaults.lineEndX, 0, 1);
+    node.lineEndY = finiteNumber(input.lineEndY, defaults.lineEndY, 0, 1);
+    node.arrowStart = Object.values(ARROWHEADS).includes(input.arrowStart)
+      ? input.arrowStart
+      : defaults.arrowStart;
+    node.arrowEnd = Object.values(ARROWHEADS).includes(input.arrowEnd)
+      ? input.arrowEnd
+      : defaults.arrowEnd;
+  }
+
+  if (node.type === NODE_TYPES.POLYGON) {
+    node.polygonSides = Math.round(finiteNumber(input.polygonSides, defaults.polygonSides, 3, 60));
+  }
+
+  if (node.type === NODE_TYPES.STAR) {
+    node.starPoints = Math.round(finiteNumber(input.starPoints, defaults.starPoints, 3, 60));
+    node.starInnerRatio = finiteNumber(input.starInnerRatio, defaults.starInnerRatio, 0.08, 0.95);
+  }
+
   if (node.type === NODE_TYPES.VECTOR) {
     const primaryContour = Array.isArray(input.vectorContours) ? input.vectorContours[0] : null;
     const primaryPoints = Array.isArray(input.vectorPoints) ? input.vectorPoints : primaryContour?.points;
@@ -998,7 +1072,11 @@ export function getNodeVisualBounds(node) {
         (paint.type !== PAINT_TYPES.SOLID || paint.color !== "transparent")) || node.stroke !== "transparent"
     : node.stroke !== "transparent";
   const strokeExtent = node.strokeWidth > 0 && hasVisibleStroke
-    ? node.type === NODE_TYPES.BOOLEAN ? node.strokeWidth : node.strokeWidth / 2
+    ? node.type === NODE_TYPES.BOOLEAN
+      ? node.strokeWidth
+      : node.type === NODE_TYPES.LINE
+        ? lineVisualPadding(node)
+        : node.strokeWidth / 2
     : 0;
   const hasLayerBlurEffect = node.effects?.some((effect) => effect.type === EFFECT_TYPES.LAYER_BLUR);
   const layerBlur = hasLayerBlurEffect

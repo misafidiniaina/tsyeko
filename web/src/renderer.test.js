@@ -110,6 +110,43 @@ test("hit testing can look through the measured selection to its parent", () => 
   assert.equal(hit?.id, frame.id);
 });
 
+test("parametric endpoint handles follow line direction and rotation", () => {
+  const line = createNode(NODE_TYPES.LINE, 20, 30, {
+    width: 100,
+    height: 60,
+    lineStartX: 1,
+    lineStartY: 0,
+    lineEndX: 0,
+    lineEndY: 1,
+    rotation: 90,
+  });
+  const renderer = {
+    worldToScreen(point) {
+      return point;
+    },
+  };
+  const camera = { x: 0, y: 0, zoom: 1 };
+
+  assert.equal(
+    CanvasRenderer.prototype.getParametricHandleAt.call(
+      renderer,
+      { x: 100, y: 110 },
+      line,
+      camera,
+    )?.kind,
+    "line-start",
+  );
+  assert.equal(
+    CanvasRenderer.prototype.getParametricHandleAt.call(
+      renderer,
+      { x: 40, y: 10 },
+      line,
+      camera,
+    )?.kind,
+    "line-end",
+  );
+});
+
 function createSelectionContext(strokeRects) {
   return {
     globalAlpha: 0.5,

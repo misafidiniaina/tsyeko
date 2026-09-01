@@ -856,6 +856,76 @@ svg {
   height: 18px;
 }
 
+.shape-tool-control {
+  position: relative;
+  width: 43px;
+  height: 34px;
+  display: flex;
+  align-items: stretch;
+  border-radius: 6px;
+}
+
+.shape-tool-main {
+  width: 31px;
+  border-radius: 6px 2px 2px 6px;
+}
+
+.shape-menu-trigger {
+  width: 12px;
+  min-width: 12px;
+  padding: 0;
+  border: 0;
+  border-radius: 2px 6px 6px 2px;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  color: #979797;
+  cursor: pointer;
+}
+
+.shape-menu-trigger:hover,
+.shape-menu-trigger[aria-expanded="true"] {
+  background: var(--panel-hover);
+  color: white;
+}
+
+.shape-tool-main.active + .shape-menu-trigger {
+  background: var(--accent);
+  color: white;
+}
+
+.shape-menu-trigger svg {
+  width: 10px;
+  height: 10px;
+}
+
+.floating-toolbar .shape-tool-menu {
+  position: absolute;
+  left: -6px;
+  top: 42px;
+  width: 188px;
+}
+
+.shape-tool-menu button {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+}
+
+.shape-tool-menu button svg {
+  width: 17px;
+  height: 17px;
+}
+
+.shape-tool-menu button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.shape-tool-menu button.active {
+  background: var(--accent-soft);
+  color: #eadfff;
+}
+
 .tool-key {
   display: none;
 }

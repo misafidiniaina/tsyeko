@@ -107,14 +107,34 @@
               <svg viewBox="0 0 24 24"><path d="M5 3v18M19 3v18M3 5h18M3 19h18" /></svg>
               <span class="tool-key">F</span>
             </button>
-            <button class="tool-button" data-tool="rectangle" title="Rectangle (R)" aria-label="Rectangle tool">
-              <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="1" /></svg>
-              <span class="tool-key">R</span>
-            </button>
-            <button class="tool-button" data-tool="ellipse" title="Ellipse (O)" aria-label="Ellipse tool">
-              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /></svg>
-              <span class="tool-key">O</span>
-            </button>
+            <div class="shape-tool-control" id="shapeToolControl">
+              <button class="tool-button shape-tool-main" id="shapeToolButton" data-tool="rectangle" title="Rectangle (R)" aria-label="Rectangle tool">
+                <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="1" /></svg>
+              </button>
+              <button class="shape-menu-trigger" id="shapeMenuButton" title="Shape tools" aria-label="Open shape tools" aria-haspopup="menu" aria-expanded="false">
+                <svg viewBox="0 0 12 12"><path d="m3.5 4.5 2.5 3 2.5-3" /></svg>
+              </button>
+              <div class="shape-tool-menu popover" id="shapeToolMenu" role="menu" hidden>
+                <button data-shape-tool="rectangle" role="menuitem">
+                  <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="1" /></svg><span>Rectangle</span><kbd>R</kbd>
+                </button>
+                <button data-shape-tool="ellipse" role="menuitem">
+                  <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /></svg><span>Ellipse</span><kbd>O</kbd>
+                </button>
+                <button data-shape-tool="line" role="menuitem">
+                  <svg viewBox="0 0 24 24"><path d="M4 18 20 6" /></svg><span>Line</span><kbd>L</kbd>
+                </button>
+                <button data-shape-tool="arrow" role="menuitem">
+                  <svg viewBox="0 0 24 24"><path d="M4 18 20 6M13 6h7v7" /></svg><span>Arrow</span><kbd>⇧L</kbd>
+                </button>
+                <button data-shape-tool="polygon" role="menuitem">
+                  <svg viewBox="0 0 24 24"><path d="m12 3 9 17H3L12 3Z" /></svg><span>Polygon</span><kbd></kbd>
+                </button>
+                <button data-shape-tool="star" role="menuitem">
+                  <svg viewBox="0 0 24 24"><path d="m12 3 2.8 5.8 6.2.9-4.5 4.5 1.1 6.3-5.6-3-5.6 3 1.1-6.3L3 9.7l6.2-.9L12 3Z" /></svg><span>Star</span><kbd></kbd>
+                </button>
+              </div>
+            </div>
             <button class="tool-button" data-tool="pen" title="Pen (P)" aria-label="Pen tool">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 18 5-5m0 0 3-8 7 7-8 3-2-2Zm4.5-6.5 2 2" /><circle cx="4" cy="18" r="1.5" /><circle cx="12" cy="5" r="1.5" /><circle cx="19" cy="12" r="1.5" /></svg>
               <span class="tool-key">P</span>

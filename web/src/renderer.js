@@ -30,6 +30,16 @@ import {
 } from "./render-cache.js";
 import { combineTransformBounds } from "./transform.js";
 import { GUIDE_AXES, rulerStep } from "./canvas-aids.js";
+import {
+  getLineArrowheads,
+  getLineEndpoints,
+  getParametricHandles,
+  getParametricShapePoints,
+  isParametricShape,
+  lineVisualPadding,
+  pointInParametricShape,
+  traceRoundedPolygon,
+} from "./shapes.js";
 
 const HANDLE_SIZE = 8;
 const HANDLE_HIT_RADIUS = 8;
@@ -412,7 +422,30 @@ export class CanvasRenderer {
     context.strokeStyle = "#ffffff";
     context.shadowColor = "transparent";
 
-    if (node.type === NODE_TYPES.VECTOR) {
+    if (node.type === NODE_TYPES.LINE) {
+      context.lineWidth = Math.max(1, node.strokeWidth * zoom);
+      context.lineCap = "round";
+      context.lineJoin = "round";
+      context.beginPath();
+      traceLinePath(context, node, zoom);
+      context.stroke();
+      for (const head of Object.values(getLineArrowheads(node))) {
+        if (!head) continue;
+        context.beginPath();
+        traceArrowheadPath(context, head, node, zoom);
+        if (head.closed) context.fill();
+        else context.stroke();
+      }
+    } else if ([NODE_TYPES.POLYGON, NODE_TYPES.STAR].includes(node.type)) {
+      context.beginPath();
+      traceParametricNodePath(context, node, zoom);
+      context.fill();
+      if (node.strokeWidth > 0) {
+        context.lineWidth = Math.max(1, node.strokeWidth * zoom);
+        context.lineJoin = "round";
+        context.stroke();
+      }
+    } else if (node.type === NODE_TYPES.VECTOR) {
       context.beginPath();
       buildVectorPath(context, node, zoom);
       if (node.vectorClosed) context.fill(node.vectorFillRule);
@@ -935,7 +968,13 @@ export class CanvasRenderer {
 
     this.applyNodeShadow(node, zoom, options);
 
-    if (node.type === NODE_TYPES.VECTOR) {
+    if (node.type === NODE_TYPES.LINE) {
+      this.paintLine(node, width, height, zoom);
+    } else if ([NODE_TYPES.POLYGON, NODE_TYPES.STAR].includes(node.type)) {
+      context.beginPath();
+      traceParametricNodePath(context, node, zoom);
+      this.paintPath(node, width, height, zoom);
+    } else if (node.type === NODE_TYPES.VECTOR) {
       context.beginPath();
       buildVectorPath(context, node, zoom);
       this.paintPath(node, width, height, zoom, {
@@ -1019,6 +1058,38 @@ export class CanvasRenderer {
       }
     }
     context.shadowColor = "transparent";
+  }
+
+  paintLine(node, width, height, zoom) {
+    const context = this.context;
+    if (node.strokeWidth <= 0) {
+      context.shadowColor = "transparent";
+      return;
+    }
+    const heads = Object.values(getLineArrowheads(node)).filter(Boolean);
+    const strokes = visiblePaints(node.strokes, { type: "solid", color: node.stroke }, "stroke");
+    context.lineWidth = Math.max(0.5, node.strokeWidth * zoom);
+    context.lineJoin = "round";
+    context.lineCap = "round";
+    for (const paint of strokes) {
+      context.save();
+      context.globalAlpha *= paint.opacity ?? 1;
+      context.globalCompositeOperation = paintBlendMode(paint.blendMode);
+      const color = createNodeFill(context, node, width, height, paint);
+      context.strokeStyle = color;
+      context.fillStyle = color;
+      context.beginPath();
+      traceLinePath(context, node, zoom);
+      context.stroke();
+      for (const head of heads) {
+        context.beginPath();
+        traceArrowheadPath(context, head, node, zoom);
+        if (head.closed) context.fill();
+        else context.stroke();
+      }
+      context.restore();
+      context.shadowColor = "transparent";
+    }
   }
 
   drawText(node, width, height, zoom) {
@@ -1392,6 +1463,22 @@ export class CanvasRenderer {
       context.arc(0, -height / 2 - ROTATION_HANDLE_OFFSET, 4, 0, Math.PI * 2);
       context.fill();
       context.stroke();
+
+      if (isParametricShape(node)) {
+        for (const handle of getParametricHandles(node, {
+          minimumDisplayDistance: 12 / camera.zoom,
+        })) {
+          const x = -width / 2 + handle.point.x * camera.zoom;
+          const y = -height / 2 + handle.point.y * camera.zoom;
+          context.fillStyle = "#ffffff";
+          context.strokeStyle = "#7c3aed";
+          context.lineWidth = 1.5;
+          context.beginPath();
+          context.arc(x, y, 4.5, 0, Math.PI * 2);
+          context.fill();
+          context.stroke();
+        }
+      }
     }
     context.restore();
 
@@ -1563,7 +1650,7 @@ export class CanvasRenderer {
         node.type === NODE_TYPES.GROUP ||
         !isNodeEffectivelyVisible(document, node) ||
         getAncestors(document, node).some(isCompositeNode) ||
-        !pointInNode(node, worldPoint, padding)) continue;
+        !pointInNode(node, worldPoint, coarseHitPadding(node, padding))) continue;
       const clipped = getAncestors(document, node)
         .filter((ancestor) => ancestor.type === NODE_TYPES.FRAME)
         .some((frame) => !pointInNode(frame, worldPoint));
@@ -1641,6 +1728,25 @@ export class CanvasRenderer {
       if (distance(localScreenPoint, point) <= HANDLE_HIT_RADIUS) return handle;
     }
     return null;
+  }
+
+  getParametricHandleAt(screenPoint, node, camera, radius = 9) {
+    if (!isParametricShape(node) || node.locked) return null;
+    const localScreenPoint = screenToNodeScreen(node, screenPoint, camera, this);
+    let best = null;
+    for (const handle of getParametricHandles(node, {
+      minimumDisplayDistance: 12 / camera.zoom,
+    })) {
+      const point = {
+        x: handle.point.x * camera.zoom,
+        y: handle.point.y * camera.zoom,
+      };
+      const handleDistance = distance(localScreenPoint, point);
+      if (handleDistance <= radius && (!best || handleDistance < best.distance)) {
+        best = { ...handle, distance: handleDistance };
+      }
+    }
+    return best;
   }
 
   getSelectionHandleAt(screenPoint, nodes, camera) {
@@ -1749,6 +1855,41 @@ function screenToNodeScreen(node, screenPoint, camera, renderer) {
   return {
     x: node.width * camera.zoom / 2 + offsetX * cosine - offsetY * sine,
     y: node.height * camera.zoom / 2 + offsetX * sine + offsetY * cosine,
+  };
+}
+
+function traceLinePath(context, node, zoom) {
+  const { start, end } = getLineEndpoints(node);
+  const first = centeredShapePoint(start, node, zoom);
+  const last = centeredShapePoint(end, node, zoom);
+  context.moveTo(first.x, first.y);
+  context.lineTo(last.x, last.y);
+}
+
+function traceParametricNodePath(context, node, zoom) {
+  const points = getParametricShapePoints(node).map((point) =>
+    centeredShapePoint(point, node, zoom));
+  traceRoundedPolygon(context, points, node.cornerRadius * zoom);
+}
+
+function traceArrowheadPath(context, head, node, zoom) {
+  if (head.center) {
+    const center = centeredShapePoint(head.center, node, zoom);
+    context.arc(center.x, center.y, head.radius * zoom, 0, Math.PI * 2);
+    context.closePath();
+    return;
+  }
+  const points = head.points.map((point) => centeredShapePoint(point, node, zoom));
+  if (!points.length) return;
+  context.moveTo(points[0].x, points[0].y);
+  for (const point of points.slice(1)) context.lineTo(point.x, point.y);
+  if (head.closed) context.closePath();
+}
+
+function centeredShapePoint(point, node, zoom) {
+  return {
+    x: (point.x - node.width / 2) * zoom,
+    y: (point.y - node.height / 2) * zoom,
   };
 }
 
@@ -1913,7 +2054,7 @@ export function pointInSceneNode(document, node, worldPoint, padding = 0) {
         pointInSceneNode(document, child, worldPoint, padding));
   }
 
-  if (!pointInNode(node, worldPoint, padding)) return false;
+  if (!pointInNode(node, worldPoint, coarseHitPadding(node, padding))) return false;
   if (node.type === NODE_TYPES.ELLIPSE) {
     const local = worldToLocal(node, worldPoint);
     const x = (local.x - node.width / 2) / (node.width / 2 + padding);
@@ -1935,7 +2076,20 @@ export function pointInSceneNode(document, node, worldPoint, padding = 0) {
       distanceToSegment(local, flattened[flattenedIndex], end) <= pathPadding));
     return inside || nearPath;
   }
+  if (isParametricShape(node)) {
+    return pointInParametricShape(node, worldToLocal(node, worldPoint), padding);
+  }
   return true;
+}
+
+function coarseHitPadding(node, padding) {
+  if (node?.type === NODE_TYPES.LINE) {
+    return Math.max(padding, lineVisualPadding(node) + padding);
+  }
+  if ([NODE_TYPES.POLYGON, NODE_TYPES.STAR].includes(node?.type)) {
+    return Math.max(padding, (node.strokeWidth ?? 0) / 2 + padding);
+  }
+  return padding;
 }
 
 function pointInPolygon(point, polygon) {

@@ -32,6 +32,7 @@ import {
 import { DocumentHistory } from "./history.js";
 import { documentToSVG } from "./export.js";
 import { pointInSceneNode } from "./renderer.js";
+import { ARROWHEADS } from "./shapes.js";
 
 test("migrates v1 documents and clamps untrusted geometry", () => {
   const document = normalizeDocument({
@@ -49,7 +50,7 @@ test("migrates v1 documents and clamps untrusted geometry", () => {
   });
 
   assert.equal(document.name, "Imported");
-  assert.equal(document.version, 12);
+  assert.equal(document.version, 13);
   assert.equal(document.pages.length, 1);
   assert.equal(document.pages[0].nodes[0].x, 12);
   assert.equal(document.pages[0].nodes[0].width, 1);
@@ -97,7 +98,7 @@ test("migrates and duplicates persistent page canvas aids", () => {
   });
   const page = getFirstPage(document);
 
-  assert.equal(document.version, 12);
+  assert.equal(document.version, 13);
   assert.equal(page.rulersVisible, false);
   assert.equal(page.guidesVisible, true);
   assert.equal(page.gridVisible, false);
@@ -301,7 +302,7 @@ test("migrates and sanitizes v7 Boolean and mask containers", () => {
   });
   const page = getFirstPage(document);
 
-  assert.equal(document.version, 12);
+  assert.equal(document.version, 13);
   assert.equal(page.nodes.find((node) => node.id === "boolean").booleanOperation, "union");
   assert.equal(page.nodes.find((node) => node.id === "shape").parentId, "boolean");
   assert.equal(page.nodes.find((node) => node.id === "content").parentId, "mask");
@@ -406,7 +407,7 @@ test("normalizes gradient paints and bounded shadow effects", () => {
   assert.deepEqual(getNodeVisualBounds(node), { x: -5, y: 8, width: 140, height: 90 });
 });
 
-test("migrates v10 documents into v12 paint, effect, contour, rich-text, asset, and canvas-aid records", () => {
+test("migrates v10 documents into v13 paint, effect, contour, rich-text, asset, and canvas-aid records", () => {
   const hash = "a".repeat(64);
   const document = normalizeDocument({
     version: 10,
@@ -457,7 +458,7 @@ test("migrates v10 documents into v12 paint, effect, contour, rich-text, asset, 
   });
   const [painted, copy, compound] = getFirstPage(document).nodes;
 
-  assert.equal(document.version, 12);
+  assert.equal(document.version, 13);
   assert.equal(document.assets[0].kind, "font");
   assert.equal(document.assets[0].fontFamily, "Studio");
   assert.equal(painted.fills.length, 2);
@@ -520,7 +521,7 @@ test("migrates implicit frame shadows into explicit v6 effects", () => {
   });
   const frame = getFirstPage(document).nodes[0];
 
-  assert.equal(document.version, 12);
+  assert.equal(document.version, 13);
   assert.equal(frame.fillType, "solid");
   assert.equal(frame.shadow.enabled, true);
   assert.equal(frame.shadow.blur, 16);
@@ -659,7 +660,7 @@ test("normalizes vector paths and rejects invalid point data", () => {
   });
   const vector = getFirstPage(document).nodes[0];
 
-  assert.equal(document.version, 12);
+  assert.equal(document.version, 13);
   assert.equal(vector.type, NODE_TYPES.VECTOR);
   assert.equal(vector.vectorPoints.length, 2);
   assert.equal(vector.vectorClosed, false);
@@ -750,7 +751,7 @@ test("migrates v5 corner anchors and sanitizes Bézier handles", () => {
   const first = vector.vectorPoints[0];
   const second = vector.vectorPoints[1];
 
-  assert.equal(document.version, 12);
+  assert.equal(document.version, 13);
   assert.equal(first.handleMode, "mirrored");
   assert.ok(first.in && first.out);
   assert.equal(first.in.x - first.x, -(first.out.x - first.x));
@@ -839,4 +840,88 @@ test("v11 imports migrate compound vectors whose primary geometry lives in conto
   assert.equal(vector.vectorPoints.length, 2);
   assert.equal(vector.vectorClosed, false);
   assert.equal(getVectorContours(vector)[0].id, "primary");
+});
+
+test("v12 imports normalize parametric shape records into v13", () => {
+  const document = normalizeDocument({
+    version: 12,
+    pages: [{
+      id: "page",
+      name: "Parametric shapes",
+      nodes: [
+        {
+          id: "line",
+          type: "line",
+          lineStartX: -4,
+          lineStartY: 0.25,
+          lineEndX: 4,
+          lineEndY: 0.75,
+          arrowStart: ARROWHEADS.CIRCLE,
+          arrowEnd: "unsafe",
+        },
+        { id: "polygon", type: "polygon", polygonSides: 999, cornerRadius: -20 },
+        { id: "star", type: "star", starPoints: 2, starInnerRatio: 8 },
+      ],
+    }],
+  });
+  const [line, polygon, star] = getFirstPage(document).nodes;
+
+  assert.equal(document.version, 13);
+  assert.deepEqual(
+    [line.lineStartX, line.lineStartY, line.lineEndX, line.lineEndY],
+    [0, 0.25, 1, 0.75],
+  );
+  assert.equal(line.arrowStart, ARROWHEADS.CIRCLE);
+  assert.equal(line.arrowEnd, ARROWHEADS.NONE);
+  assert.equal(polygon.polygonSides, 60);
+  assert.equal(polygon.cornerRadius, 0);
+  assert.equal(star.starPoints, 3);
+  assert.equal(star.starInnerRatio, 0.95);
+});
+
+test("parametric shapes preserve picking, history, visual bounds, and SVG output", () => {
+  const document = createEmptyDocument("Shapes");
+  const page = getFirstPage(document);
+  const line = createNode(NODE_TYPES.LINE, 20, 30, {
+    width: 120,
+    height: 60,
+    lineStartX: 0,
+    lineStartY: 1,
+    lineEndX: 1,
+    lineEndY: 0,
+    arrowStart: ARROWHEADS.CIRCLE,
+    arrowEnd: ARROWHEADS.TRIANGLE,
+    strokeWidth: 4,
+  });
+  const polygon = createNode(NODE_TYPES.POLYGON, 180, 20, {
+    width: 100,
+    height: 100,
+    polygonSides: 6,
+    cornerRadius: 8,
+  });
+  const star = createNode(NODE_TYPES.STAR, 320, 20, {
+    width: 100,
+    height: 100,
+    starPoints: 7,
+    starInnerRatio: 0.48,
+  });
+  page.nodes.push(line, polygon, star);
+
+  assert.equal(pointInSceneNode(page, line, { x: 80, y: 60 }), true);
+  assert.equal(pointInSceneNode(page, line, { x: 80, y: 100 }), false);
+  assert.equal(pointInSceneNode(page, polygon, { x: 230, y: 70 }), true);
+  assert.equal(pointInSceneNode(page, star, { x: 370, y: 70 }), true);
+  assert.ok(getNodeVisualBounds(line).width > line.width);
+
+  const history = new DocumentHistory(document);
+  star.starInnerRatio = 0.7;
+  assert.equal(history.commit(document, "Adjust star"), true);
+  assert.equal(getFirstPage(history.undo()).nodes.at(-1).starInnerRatio, 0.48);
+  assert.equal(getFirstPage(history.redo()).nodes.at(-1).starInnerRatio, 0.7);
+
+  const svg = documentToSVG(page);
+  assert.match(svg, /<circle[^>]+fill="#8b5cf6"/);
+  assert.match(svg, /<path d="M 20 90 L 140 30"/);
+  assert.match(svg, /Q [^Z]+ Z/);
+  assert.doesNotMatch(svg, /<rect[^>]+x="180"/);
 });

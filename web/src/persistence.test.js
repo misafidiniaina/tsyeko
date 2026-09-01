@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { loadWorkspace, saveWorkspace } from "./persistence.js";
 
-test("loads a v11 recovery copy and promotes it to the v12 key on save", async (context) => {
+test("loads a v12 recovery copy and promotes it to the v13 key on save", async (context) => {
   const entries = new Map();
   const localStorage = {
     getItem(key) {
@@ -16,16 +16,16 @@ test("loads a v11 recovery copy and promotes it to the v12 key on save", async (
       entries.delete(key);
     },
   };
-  const workspace = { document: { version: 11, name: "Recovered file" } };
-  localStorage.setItem("tsyaiko.workspace.v11", JSON.stringify(workspace));
+  const workspace = { document: { version: 12, name: "Recovered file" } };
+  localStorage.setItem("tsyaiko.workspace.v12", JSON.stringify(workspace));
 
   replaceGlobal(context, "indexedDB", undefined);
   replaceGlobal(context, "localStorage", localStorage);
 
   assert.deepEqual(await loadWorkspace(), workspace);
   assert.deepEqual(await saveWorkspace(workspace), { backend: "localStorage" });
-  assert.deepEqual(JSON.parse(localStorage.getItem("tsyaiko.workspace.v12")), workspace);
-  assert.equal(localStorage.getItem("tsyaiko.workspace.v11"), null);
+  assert.deepEqual(JSON.parse(localStorage.getItem("tsyaiko.workspace.v13")), workspace);
+  assert.equal(localStorage.getItem("tsyaiko.workspace.v12"), null);
 });
 
 function replaceGlobal(context, name, value) {

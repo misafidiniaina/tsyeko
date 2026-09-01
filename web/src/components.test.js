@@ -83,7 +83,7 @@ function addSecondaryButtonComponent(document, page, options = {}) {
   return { button, label, component: created.component };
 }
 
-test("migrates v8 documents to v12 with safe component metadata", () => {
+test("migrates v8 documents to v13 with safe component metadata", () => {
   const document = normalizeDocument({
     version: 8,
     name: "Imported components",
@@ -130,7 +130,7 @@ test("migrates v8 documents to v12 with safe component metadata", () => {
 
   const library = document.pages[0];
   const screen = document.pages[1];
-  assert.equal(document.version, 12);
+  assert.equal(document.version, 13);
   assert.equal(document.components.length, 1);
   assert.equal(getNode(library, "main").componentRole, COMPONENT_ROLES.MAIN);
   assert.equal(getNode(library, "label").componentRole, COMPONENT_ROLES.SOURCE);
@@ -184,7 +184,7 @@ test("migrates v9 variant records and repairs unsafe component-set membership", 
     ],
   });
 
-  assert.equal(document.version, 12);
+  assert.equal(document.version, 13);
   assert.deepEqual(document.componentSets.map(({ id, propertyNames }) => ({ id, propertyNames })), [
     { id: "buttons", propertyNames: ["State", "Size"] },
   ]);

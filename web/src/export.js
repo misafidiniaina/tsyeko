@@ -10,6 +10,12 @@ import {
 import { layoutRichText, wrapTextLines } from "./text.js";
 import { createResolvedLayoutSnapshot } from "./layout.js";
 import { getVectorSegments } from "./vector.js";
+import {
+  arrowheadPathData,
+  getLineArrowheads,
+  linePathData,
+  parametricShapePathData,
+} from "./shapes.js";
 
 export function documentToSVG(sourceDocument, ids = null) {
   const document = createResolvedLayoutSnapshot(sourceDocument);
@@ -31,6 +37,7 @@ export function documentToSVG(sourceDocument, ids = null) {
       ...visibleFills(node).map((paint, index) =>
         paint.type !== "solid" &&
           ![NODE_TYPES.GROUP, NODE_TYPES.MASK].includes(node.type) &&
+          node.type !== NODE_TYPES.LINE &&
           (node.type !== NODE_TYPES.VECTOR || node.vectorClosed)
           ? gradientToSVG(node, paint, index, "fill")
           : ""),
@@ -197,6 +204,33 @@ function maskGeometryToSVG(document, node, color) {
       shadow,
     }, 1);
   }
+  if (node.type === NODE_TYPES.LINE) {
+    return nodeToSVG({
+      ...node,
+      fill: "transparent",
+      fillType: "solid",
+      fills: [],
+      stroke: color,
+      strokes: [maskPaint],
+      strokeWidth: Math.max(1, node.strokeWidth),
+      effects: [],
+      layerBlur: 0,
+      shadow,
+    }, 1);
+  }
+  if ([NODE_TYPES.POLYGON, NODE_TYPES.STAR].includes(node.type)) {
+    return nodeToSVG({
+      ...node,
+      fill: color,
+      fillType: "solid",
+      fills: [maskPaint],
+      stroke: color,
+      strokes: [maskPaint],
+      effects: [],
+      layerBlur: 0,
+      shadow,
+    }, 1);
+  }
   if (node.type === NODE_TYPES.VECTOR) {
     return nodeToSVG({
       ...node,
@@ -275,6 +309,27 @@ function nodeToSVG(node, opacity = node.opacity) {
   ].filter(Boolean).join(" ");
   const fill = paintToSVG(node, fills[0], 0);
 
+  if (node.type === NODE_TYPES.LINE) {
+    if (node.strokeWidth <= 0) return `<g ${common}></g>`;
+    const path = linePathData(node, node.x, node.y);
+    const heads = Object.values(getLineArrowheads(node)).filter(Boolean);
+    const layers = strokes.map((layer, index) => {
+      const color = escapeXML(paintToSVG(node, layer, index, "stroke"));
+      const style = `stroke="${color}" stroke-opacity="${round(layer.opacity)}" stroke-width="${round(node.strokeWidth)}" stroke-linecap="round" stroke-linejoin="round" style="mix-blend-mode:${layer.blendMode}"`;
+      const shaft = `<path d="${path}" fill="none" ${style} />`;
+      const arrowheads = heads.map((head) => arrowheadToSVG(head, node, color, layer, style)).join("");
+      return `${shaft}${arrowheads}`;
+    }).join("");
+    return `<g ${common}>${layers}</g>`;
+  }
+
+  if ([NODE_TYPES.POLYGON, NODE_TYPES.STAR].includes(node.type)) {
+    const path = parametricShapePathData(node, node.x, node.y);
+    const layers = fills.map((layer, index) => `<path d="${path}" fill="${escapeXML(paintToSVG(node, layer, index))}" fill-opacity="${round(layer.opacity)}" style="mix-blend-mode:${layer.blendMode}" />`).join("");
+    const stroke = node.strokeWidth > 0 ? strokes.map((layer, index) => `<path d="${path}" fill="none" stroke="${escapeXML(paintToSVG(node, layer, index, "stroke"))}" stroke-opacity="${round(layer.opacity)}" stroke-width="${round(node.strokeWidth)}" stroke-linejoin="round" style="mix-blend-mode:${layer.blendMode}" />`).join("") : "";
+    return `<g ${common}>${layers}${stroke}</g>`;
+  }
+
   if (node.type === NODE_TYPES.ELLIPSE) {
     const layers = fills.map((layer, index) => `<ellipse cx="${round(node.x + node.width / 2)}" cy="${round(node.y + node.height / 2)}" rx="${round(node.width / 2)}" ry="${round(node.height / 2)}" fill="${escapeXML(paintToSVG(node, layer, index))}" fill-opacity="${round(layer.opacity)}" style="mix-blend-mode:${layer.blendMode}" />`).join("");
     const stroke = node.strokeWidth > 0 ? strokes.map((layer, index) => `<ellipse cx="${round(node.x + node.width / 2)}" cy="${round(node.y + node.height / 2)}" rx="${round(node.width / 2)}" ry="${round(node.height / 2)}" fill="none" stroke="${escapeXML(paintToSVG(node, layer, index, "stroke"))}" stroke-opacity="${round(layer.opacity)}" stroke-width="${round(node.strokeWidth)}" style="mix-blend-mode:${layer.blendMode}" />`).join("") : "";
@@ -344,6 +399,17 @@ function nodeToSVG(node, opacity = node.opacity) {
   const layers = fills.map((layer, index) => `<rect x="${round(node.x)}" y="${round(node.y)}" width="${round(node.width)}" height="${round(node.height)}" rx="${round(radius)}" fill="${escapeXML(paintToSVG(node, layer, index))}" fill-opacity="${round(layer.opacity)}" style="mix-blend-mode:${layer.blendMode}" />`).join("");
   const stroke = node.strokeWidth > 0 ? strokes.map((layer, index) => `<rect x="${round(node.x)}" y="${round(node.y)}" width="${round(node.width)}" height="${round(node.height)}" rx="${round(radius)}" fill="none" stroke="${escapeXML(paintToSVG(node, layer, index, "stroke"))}" stroke-opacity="${round(layer.opacity)}" stroke-width="${round(node.strokeWidth)}" style="mix-blend-mode:${layer.blendMode}" />`).join("") : "";
   return `<g ${common}>${layers}${stroke}</g>`;
+}
+
+function arrowheadToSVG(head, node, color, paint, strokeAttributes) {
+  if (head.center) {
+    return `<circle cx="${round(node.x + head.center.x)}" cy="${round(node.y + head.center.y)}" r="${round(head.radius)}" fill="${color}" fill-opacity="${round(paint.opacity)}" style="mix-blend-mode:${paint.blendMode}" />`;
+  }
+  const path = arrowheadPathData(head, node.x, node.y);
+  if (!path) return "";
+  return head.closed
+    ? `<path d="${path}" fill="${color}" fill-opacity="${round(paint.opacity)}" style="mix-blend-mode:${paint.blendMode}" />`
+    : `<path d="${path}" fill="none" ${strokeAttributes} />`;
 }
 
 function frameClipToSVG(frame) {

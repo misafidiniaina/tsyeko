@@ -49,6 +49,7 @@ GOCACHE=$PWD/.cache/go-build go run .
 - Numeric multi-selection X/Y/W/H Inspector controls with optional aspect-ratio locking and one-click ±90° rotation
 - Shift-constrained drawing and transforms
 - Alt-centered shape drawing and resizing
+- Shape flyout with nondestructive Line/Arrow, Polygon, and Star tools, directional arrowheads, Inspector parameters, and direct canvas handles
 - Smart edge/center and repeated-gap snapping with live equal-spacing labels while moving layers
 - Thresholded `Alt/Option+Shift` drag duplication for single or multi-selections, cancel-safe one-step history, and repeated `Ctrl/Cmd+D` offsets
 - Rotation-aware live sibling-gap measurements plus Alt/Option distance inspection against hovered layers and parent frames
@@ -64,7 +65,7 @@ GOCACHE=$PWD/.cache/go-build go run .
 - JSON import/export, SVG export, and high-resolution PNG export
 - Prototype preview surface
 - Responsive editor shell
-- Sanitized, cycle-safe v12 document imports with automatic v1–v11 migration
+- Sanitized, cycle-safe v13 document imports with automatic v1–v12 migration
 - Embedded Go server with a health endpoint and security headers
 
 ## Useful shortcuts
@@ -76,6 +77,7 @@ GOCACHE=$PWD/.cache/go-build go run .
 | Frame | `F` |
 | Rectangle | `R` |
 | Ellipse | `O` |
+| Line / arrow | `L` / `Shift+L` |
 | Pen | `P` |
 | Text | `T` |
 | Temporary pan | `Space` + drag |
@@ -144,7 +146,7 @@ npm run check
 npm run test:browser
 ```
 
-The unit suite covers document migration and sanitization, canvas-aid and distance-measurement geometry, content-addressed assets and embedded fonts, command history, alignment/distribution, smart spacing, and transform geometry, render caches and profiling, rich text, compound/outlined/fuzzed geometry, component synchronization, local variants, nested Auto Layout, frame constraints, SVG parity, Boolean/mask geometry, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies multi-selection arrangement, transform handles, cancel-safe drag duplication, repeat offsets, live equal-spacing snaps, Alt distance inspection, exact geometry fields, ratio-locked scaling and quick rotation, rulers, draggable guides, custom grid snapping, the layout inspector, responsive resizing, undo/redo, v12 persistence, local component/variant workflows, all four Boolean modes and mask intersection with Canvas and rasterized-SVG pixel samples, vector editing, paint stacks, images, grouping, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
+The unit suite covers document migration and sanitization, parametric shape geometry, canvas-aid and distance-measurement geometry, content-addressed assets and embedded fonts, command history, alignment/distribution, smart spacing, and transform geometry, render caches and profiling, rich text, compound/outlined/fuzzed geometry, component synchronization, local variants, nested Auto Layout, frame constraints, SVG parity, Boolean/mask geometry, the HTTP health endpoint, and embedded static delivery. The browser smoke test starts an isolated server and Chromium profile, then verifies shape drawing and direct controls, multi-selection arrangement, transform handles, cancel-safe drag duplication, repeat offsets, live equal-spacing snaps, Alt distance inspection, exact geometry fields, ratio-locked scaling and quick rotation, rulers, draggable guides, custom grid snapping, the layout inspector, responsive resizing, undo/redo, v13 persistence, local component/variant workflows, all four Boolean modes and mask intersection with Canvas and rasterized-SVG pixel samples, vector editing, paint stacks, images, grouping, autosave, and reload persistence. Set `CHROMIUM_BIN` if Chromium is not in a standard location.
 
 ## Hosted snapshot workflow
 

@@ -145,12 +145,20 @@ import {
   VECTOR_HANDLE_MODES,
 } from "./vector.js";
 import { baseTextStyle, rebaseTextRuns } from "./text.js";
+import {
+  ARROWHEADS,
+  cornerRadiusFromDrag,
+  getLineEndpoints,
+  maxParametricCornerRadius,
+  starInnerRatioFromPoint,
+} from "./shapes.js";
 
 const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 16;
 const SNAP_DISTANCE_PX = 6;
 const DRAG_START_DISTANCE_PX = 3;
 const LIVE_MEASUREMENT_DISTANCE_PX = 96;
+const SHAPE_TOOLS = Object.freeze(["rectangle", "ellipse", "line", "arrow", "polygon", "star"]);
 
 const elements = {
   canvas: document.querySelector("#designCanvas"),
@@ -171,6 +179,9 @@ const elements = {
   mainMenu: document.querySelector("#mainMenu"),
   exportButton: document.querySelector("#exportButton"),
   exportMenu: document.querySelector("#exportMenu"),
+  shapeToolButton: document.querySelector("#shapeToolButton"),
+  shapeMenuButton: document.querySelector("#shapeMenuButton"),
+  shapeToolMenu: document.querySelector("#shapeToolMenu"),
   fileInput: document.querySelector("#fileInput"),
   previewModal: document.querySelector("#previewModal"),
   previewStage: document.querySelector("#previewStage"),
@@ -251,6 +262,7 @@ initialize();
 
 function initialize() {
   elements.documentTitle.value = designDocument.name;
+  updateShapeToolButton("rectangle");
   bindToolbar();
   bindCanvas();
   bindPanels();
@@ -290,6 +302,20 @@ function bindToolbar() {
       if (button.dataset.tool === "image") openImagePicker();
       else setTool(button.dataset.tool);
     });
+  });
+
+  elements.shapeMenuButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const opening = elements.shapeToolMenu.hidden;
+    closePopovers();
+    elements.shapeToolMenu.hidden = !opening;
+    elements.shapeMenuButton.setAttribute("aria-expanded", String(opening));
+  });
+  elements.shapeToolMenu.addEventListener("click", (event) => {
+    const option = event.target.closest("[data-shape-tool]");
+    if (!option) return;
+    setTool(option.dataset.shapeTool);
+    closePopovers();
   });
 
   document.querySelector("#zoomInButton").addEventListener("click", () => {
@@ -419,6 +445,8 @@ function bindPanels() {
     elements.pageSwitcher.setAttribute("aria-expanded", String(!elements.pagesPopover.hidden));
     elements.mainMenu.hidden = true;
     elements.exportMenu.hidden = true;
+    elements.shapeToolMenu.hidden = true;
+    elements.shapeMenuButton.setAttribute("aria-expanded", "false");
     if (!elements.pagesPopover.hidden) renderPages();
   });
 
@@ -659,6 +687,11 @@ function bindInspector() {
     if (property === "rotation") value = normalizeDegrees(value);
     if (property === "opacity") value = clamp(value, 0, 1);
     if (property === "strokeWidth" || property === "cornerRadius") value = Math.max(0, value);
+    if (property === "cornerRadius" && [NODE_TYPES.POLYGON, NODE_TYPES.STAR].includes(node.type)) {
+      value = Math.min(value, maxParametricCornerRadius(node));
+    }
+    if (["polygonSides", "starPoints"].includes(property)) value = clamp(Math.round(value), 3, 60);
+    if (property === "starInnerRatio") value = clamp(value, 0.08, 0.95);
     if (property === "fontSize") value = Math.max(1, value);
     const previousValue = node[property];
     const frameResizeOriginal = node.type === NODE_TYPES.FRAME && ["width", "height"].includes(property)
@@ -1074,6 +1107,8 @@ function bindMenus() {
     elements.exportMenu.hidden = true;
     elements.pagesPopover.hidden = true;
     elements.pageSwitcher.setAttribute("aria-expanded", "false");
+    elements.shapeToolMenu.hidden = true;
+    elements.shapeMenuButton.setAttribute("aria-expanded", "false");
   });
   elements.exportButton.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -1081,9 +1116,11 @@ function bindMenus() {
     elements.mainMenu.hidden = true;
     elements.pagesPopover.hidden = true;
     elements.pageSwitcher.setAttribute("aria-expanded", "false");
+    elements.shapeToolMenu.hidden = true;
+    elements.shapeMenuButton.setAttribute("aria-expanded", "false");
   });
   document.addEventListener("pointerdown", (event) => {
-    if (!event.target.closest(".popover") && !event.target.closest("#mainMenuButton") && !event.target.closest("#exportButton") && !event.target.closest("#pageSwitcher")) {
+    if (!event.target.closest(".popover") && !event.target.closest("#mainMenuButton") && !event.target.closest("#exportButton") && !event.target.closest("#pageSwitcher") && !event.target.closest("#shapeMenuButton")) {
       closePopovers();
     }
   });
@@ -1110,7 +1147,7 @@ function bindMenus() {
       );
     }
     if (action === "shortcuts") {
-      showToast("V select · P pen · Enter edit · ⇧R rulers · ⌘G group · ⌘⌥K component · ⌘⌥U/S/I/X Boolean · ⌘⌥M mask · ⌥⇧ drag duplicate · ⌘D repeat");
+      showToast("V select · R/O rectangle/ellipse · L line · ⇧L arrow · P pen · Enter edit · ⇧R rulers · ⌘G group · ⌘⌥K component · ⌘⌥U/S/I/X Boolean · ⌘⌥M mask · ⌥⇧ drag duplicate · ⌘D repeat");
     }
   });
 
@@ -1298,7 +1335,16 @@ function bindKeyboard() {
     }
 
     if (!command && !event.altKey) {
-      const tools = { v: "select", h: "hand", f: "frame", r: "rectangle", o: "ellipse", p: "pen", t: "text" };
+      const tools = {
+        v: "select",
+        h: "hand",
+        f: "frame",
+        r: "rectangle",
+        o: "ellipse",
+        l: event.shiftKey ? "arrow" : "line",
+        p: "pen",
+        t: "text",
+      };
       if (tools[key]) {
         event.preventDefault();
         setTool(tools[key]);
@@ -1396,8 +1442,16 @@ function onPointerDown(event) {
     return;
   }
 
-  if (["frame", "rectangle", "ellipse"].includes(activeTool)) {
-    const node = createNode(activeTool, world.x, world.y, { width: 1, height: 1 });
+  if (["frame", ...SHAPE_TOOLS].includes(activeTool)) {
+    const nodeType = activeTool === "arrow" ? NODE_TYPES.LINE : activeTool;
+    const overrides = {
+      width: 1,
+      height: 1,
+      ...(activeTool === "arrow"
+        ? { name: "Arrow", arrowEnd: ARROWHEADS.TRIANGLE }
+        : {}),
+    };
+    const node = createNode(nodeType, world.x, world.y, overrides);
     currentPage().nodes.push(node);
     selectedIds = [node.id];
     interaction = {
@@ -1503,6 +1557,28 @@ function onPointerDown(event) {
   }
 
   const selectedNode = selectedIds.length === 1 ? getNode(currentPage(), selectedIds[0]) : null;
+  const parametricHandle = selectedNode
+    ? renderer.getParametricHandleAt(screen, selectedNode, camera)
+    : null;
+  if (parametricHandle && selectedNode && !isNodeEffectivelyLocked(currentPage(), selectedNode)) {
+    const endpointHandle = ["line-start", "line-end"].includes(parametricHandle.kind);
+    if (endpointHandle && (isComponentInstanceMember(selectedNode) || isAutoLayoutChild(currentPage(), selectedNode))) {
+      showToast("Detach or remove this line from Auto Layout before editing its endpoints directly.");
+      return;
+    }
+    interaction = {
+      type: "parametric-handle",
+      pointerId: event.pointerId,
+      nodeId: selectedNode.id,
+      handleKind: parametricHandle.kind,
+      original: cloneNode(selectedNode),
+      startScreen: screen,
+      startWorld: world,
+    };
+    capturePointer(event);
+    updateCanvasCursor(parametricHandle.cursor ?? "move");
+    return;
+  }
   const handle = selectedNode ? renderer.getHandleAt(screen, selectedNode, camera) : null;
 
   if (handle && selectedNode && !isNodeEffectivelyLocked(currentPage(), selectedNode)) {
@@ -1627,6 +1703,7 @@ function onPointerMove(event) {
   if (interaction.type === "multi-rotate") updateMultiRotation(world, event);
   if (interaction.type === "vector-point") updateVectorPoint(world, event);
   if (interaction.type === "vector-handle") updateVectorHandle(world, event);
+  if (interaction.type === "parametric-handle") updateParametricHandle(world, screen, event);
   if (interaction.type === "pen-anchor") updatePenAnchorHandles(world, event);
   if (interaction.type === "marquee") updateMarquee(screen);
   updateInteractionDistanceMeasurements(screen, event.altKey && !interaction.duplicateGesture);
@@ -1658,6 +1735,11 @@ function onPointerUp(event) {
     syncGroupBounds(currentPage());
     commitDocument();
     setTool("select");
+  } else if (completedType === "parametric-handle") {
+    const node = getNode(currentPage(), interaction.nodeId);
+    if (node) recordParametricHandleOverride(node, interaction.handleKind);
+    syncGroupBounds(currentPage());
+    commitDocument("Adjust shape");
   } else if (["move", "resize", "rotate", "multi-resize", "multi-rotate"].includes(completedType)) {
     const inactiveDuplicate = completedType === "move" &&
       interaction.duplicateGesture && !interaction.duplicateActive;
@@ -1724,6 +1806,9 @@ function cancelActiveInteraction(pointerId = interaction?.pointerId) {
       if (node) Object.assign(node, original);
     }
   } else if (["vector-point", "vector-handle"].includes(state.type)) {
+    const node = getNode(currentPage(), state.nodeId);
+    if (node) Object.assign(node, state.original);
+  } else if (state.type === "parametric-handle") {
     const node = getNode(currentPage(), state.nodeId);
     if (node) Object.assign(node, state.original);
   } else if (state.type === "marquee") {
@@ -1996,6 +2081,17 @@ function nudgeVectorPoint(key, amount) {
 function updateDrawing(world, event) {
   const node = getNode(currentPage(), interaction.nodeId);
   if (!node) return;
+  if (node.type === NODE_TYPES.LINE) {
+    const target = constrainPenPoint(interaction.startWorld, world, event.shiftKey);
+    const start = event.altKey
+      ? {
+          x: interaction.startWorld.x * 2 - target.x,
+          y: interaction.startWorld.y * 2 - target.y,
+        }
+      : interaction.startWorld;
+    setLineWorldEndpoints(node, start, target);
+    return;
+  }
   let deltaX = world.x - interaction.startWorld.x;
   let deltaY = world.y - interaction.startWorld.y;
 
@@ -2015,6 +2111,79 @@ function updateDrawing(world, event) {
     node.y = Math.min(interaction.startWorld.y, interaction.startWorld.y + deltaY);
     node.width = Math.max(1, Math.abs(deltaX));
     node.height = Math.max(1, Math.abs(deltaY));
+  }
+}
+
+function updateParametricHandle(world, screen, event) {
+  const node = getNode(currentPage(), interaction.nodeId);
+  const original = interaction.original;
+  if (!node || !original) return;
+  const kind = interaction.handleKind;
+
+  if (["line-start", "line-end"].includes(kind) && node.type === NODE_TYPES.LINE) {
+    const endpoints = getLineEndpoints(original);
+    const originalStart = localToWorld(original, endpoints.start);
+    const originalEnd = localToWorld(original, endpoints.end);
+    const fixed = kind === "line-start" ? originalEnd : originalStart;
+    const target = constrainPenPoint(fixed, world, event.shiftKey);
+    setLineWorldEndpoints(
+      node,
+      kind === "line-start" ? target : fixed,
+      kind === "line-end" ? target : fixed,
+    );
+    return;
+  }
+
+  if (kind === "polygon-sides" && node.type === NODE_TYPES.POLYGON) {
+    const delta = Math.round((screen.x - interaction.startScreen.x) / 12);
+    node.polygonSides = clamp(original.polygonSides + delta, 3, 60);
+    return;
+  }
+
+  if (kind === "star-points" && node.type === NODE_TYPES.STAR) {
+    const delta = Math.round((screen.x - interaction.startScreen.x) / 12);
+    node.starPoints = clamp(original.starPoints + delta, 3, 60);
+    return;
+  }
+
+  const local = worldToLocal(original, world);
+  if (kind === "star-inner-ratio" && node.type === NODE_TYPES.STAR) {
+    node.starInnerRatio = starInnerRatioFromPoint(original, local);
+  }
+  if (kind === "corner-radius" && [NODE_TYPES.POLYGON, NODE_TYPES.STAR].includes(node.type)) {
+    node.cornerRadius = cornerRadiusFromDrag(
+      original,
+      worldToLocal(original, interaction.startWorld),
+      local,
+    );
+  }
+}
+
+function setLineWorldEndpoints(node, start, end) {
+  const deltaX = Math.abs(end.x - start.x);
+  const deltaY = Math.abs(end.y - start.y);
+  node.x = deltaX < 0.0001 ? start.x - 0.5 : Math.min(start.x, end.x);
+  node.y = deltaY < 0.0001 ? start.y - 0.5 : Math.min(start.y, end.y);
+  node.width = Math.max(1, deltaX);
+  node.height = Math.max(1, deltaY);
+  node.rotation = 0;
+  node.lineStartX = deltaX < 0.0001 ? 0.5 : (start.x - node.x) / node.width;
+  node.lineStartY = deltaY < 0.0001 ? 0.5 : (start.y - node.y) / node.height;
+  node.lineEndX = deltaX < 0.0001 ? 0.5 : (end.x - node.x) / node.width;
+  node.lineEndY = deltaY < 0.0001 ? 0.5 : (end.y - node.y) / node.height;
+}
+
+function recordParametricHandleOverride(node, kind) {
+  const properties = {
+    "line-start": ["x", "y", "width", "height", "rotation", "lineStartX", "lineStartY", "lineEndX", "lineEndY"],
+    "line-end": ["x", "y", "width", "height", "rotation", "lineStartX", "lineStartY", "lineEndX", "lineEndY"],
+    "polygon-sides": ["polygonSides"],
+    "star-points": ["starPoints"],
+    "star-inner-ratio": ["starInnerRatio"],
+    "corner-radius": ["cornerRadius"],
+  }[kind] ?? [];
+  for (const property of properties) {
+    recordComponentOverride(designDocument, currentPage(), node, property);
   }
 }
 
@@ -2782,11 +2951,35 @@ function setTool(tool) {
   if (activeTool === "pen" && tool !== "pen" && penDraft) finishPenPath(false, false);
   if (tool !== "select" && vectorEdit) vectorEdit = null;
   clearDistanceMeasurements();
+  if (SHAPE_TOOLS.includes(tool)) updateShapeToolButton(tool);
   activeTool = tool;
   document.querySelectorAll("[data-tool]").forEach((button) => {
     button.classList.toggle("active", button.dataset.tool === activeTool);
   });
   updateCanvasCursor();
+}
+
+function updateShapeToolButton(tool) {
+  const metadata = {
+    rectangle: { label: "Rectangle", shortcut: "R" },
+    ellipse: { label: "Ellipse", shortcut: "O" },
+    line: { label: "Line", shortcut: "L" },
+    arrow: { label: "Arrow", shortcut: "Shift+L" },
+    polygon: { label: "Polygon", shortcut: "" },
+    star: { label: "Star", shortcut: "" },
+  }[tool];
+  if (!metadata) return;
+  elements.shapeToolButton.dataset.tool = tool;
+  elements.shapeToolButton.innerHTML = shapeToolIcon(tool);
+  elements.shapeToolButton.title = metadata.shortcut
+    ? `${metadata.label} (${metadata.shortcut})`
+    : metadata.label;
+  elements.shapeToolButton.setAttribute("aria-label", `${metadata.label} tool`);
+  elements.shapeToolMenu.querySelectorAll("[data-shape-tool]").forEach((option) => {
+    option.classList.toggle("active", option.dataset.shapeTool === tool);
+    if (option.dataset.shapeTool === tool) option.setAttribute("aria-current", "true");
+    else option.removeAttribute("aria-current");
+  });
 }
 
 function updateCanvasCursor(forced = null) {
@@ -2800,7 +2993,7 @@ function updateCanvasCursor(forced = null) {
   }
   if (interaction?.type === "pan") elements.canvas.dataset.cursor = "grabbing";
   else if (spacePressed || activeTool === "hand") elements.canvas.dataset.cursor = "grab";
-  else if (["frame", "rectangle", "ellipse", "pen"].includes(activeTool)) elements.canvas.dataset.cursor = "crosshair";
+  else if (["frame", ...SHAPE_TOOLS, "pen"].includes(activeTool)) elements.canvas.dataset.cursor = "crosshair";
   else if (activeTool === "text") elements.canvas.dataset.cursor = "text";
   else elements.canvas.dataset.cursor = "default";
   elements.canvas.style.cursor = "";
@@ -2852,6 +3045,14 @@ function updateHoverCursor(screen) {
     const pointIndex = renderer.getVectorPointAt(screen, selected, camera);
     elements.canvas.style.cursor = "";
     elements.canvas.dataset.cursor = handleKind || pointIndex !== null ? "move" : "default";
+    return;
+  }
+  const parametricHandle = selected
+    ? renderer.getParametricHandleAt(screen, selected, camera)
+    : null;
+  if (parametricHandle && !isNodeEffectivelyLocked(currentPage(), selected)) {
+    elements.canvas.dataset.cursor = "";
+    elements.canvas.style.cursor = parametricHandle.cursor ?? "move";
     return;
   }
   const handle = selected ? renderer.getHandleAt(screen, selected, camera) : null;
@@ -4161,7 +4362,7 @@ function renderInspector() {
         ${numberField("W", "width", node.width, managedWidth || isLinkedInstance)}
         ${numberField("H", "height", node.height, managedHeight || isLinkedInstance)}
         ${numberField("↻", "rotation", node.rotation, isAutoLayoutFrame(node) || isLinkedInstance)}
-        ${numberField("R", "cornerRadius", node.cornerRadius, [NODE_TYPES.ELLIPSE, NODE_TYPES.TEXT, NODE_TYPES.VECTOR, NODE_TYPES.BOOLEAN, NODE_TYPES.MASK].includes(node.type))}
+        ${numberField("R", "cornerRadius", node.cornerRadius, [NODE_TYPES.ELLIPSE, NODE_TYPES.LINE, NODE_TYPES.TEXT, NODE_TYPES.VECTOR, NODE_TYPES.BOOLEAN, NODE_TYPES.MASK].includes(node.type))}
       </div>
       ${!isAutoBoundsContainer(node) ? `<div class="layout-control-block">
         <span class="layout-control-label">Size limits</span>
@@ -4177,6 +4378,7 @@ function renderInspector() {
     ${node.type === NODE_TYPES.FRAME ? autoLayoutInspector(node) : ""}
     ${layoutRelationshipInspector(node)}
 
+    ${parametricShapeInspector(node)}
     ${node.type === NODE_TYPES.TEXT ? textInspector(node) : ""}
     ${node.type === NODE_TYPES.IMAGE ? imageInspector(node) : ""}
     ${node.type === NODE_TYPES.VECTOR ? vectorInspector(node) : ""}
@@ -4187,7 +4389,7 @@ function renderInspector() {
         <p class="inspector-section-title">Group</p>
         <label class="field"><span class="field-label">%</span><input type="number" data-property="opacity" data-value-type="number" data-scale="0.01" min="0" max="100" value="${Math.round(node.opacity * 100)}" aria-label="Group opacity" /></label>
         <button class="button button-quiet" data-inspector-action="ungroup" style="width: 100%; margin-top: 8px">Ungroup layers</button>
-      </section>` : node.type === NODE_TYPES.MASK ? maskInspector(node) : node.type === NODE_TYPES.VECTOR && !node.vectorClosed ? "" : `<section class="inspector-section">
+      </section>` : node.type === NODE_TYPES.MASK ? maskInspector(node) : node.type === NODE_TYPES.LINE || node.type === NODE_TYPES.VECTOR && !node.vectorClosed ? "" : `<section class="inspector-section">
       <p class="inspector-section-title">Fill</p>
       ${fillInspector(node)}
     </section>`}
@@ -4283,6 +4485,15 @@ function componentPropertyLabel(property) {
     layoutGap: "Layout gap",
     layoutMode: "Layout mode",
     lineHeight: "Line height",
+    lineStartX: "Line start X",
+    lineStartY: "Line start Y",
+    lineEndX: "Line end X",
+    lineEndY: "Line end Y",
+    arrowStart: "Start arrowhead",
+    arrowEnd: "End arrowhead",
+    polygonSides: "Polygon sides",
+    starPoints: "Star points",
+    starInnerRatio: "Star inner ratio",
     primaryAxisAlign: "Primary alignment",
     counterAxisAlign: "Counter alignment",
     strokeWidth: "Stroke width",
@@ -4471,6 +4682,46 @@ function maskInspector(node) {
       <button class="button button-quiet" data-inspector-action="ungroup" style="width: 100%; margin-top: 8px">Release mask layers</button>
       <p class="inspector-hint">The bottom child is always the mask source. Reorder children in Layers to choose a different source.</p>
     </section>`;
+}
+
+function parametricShapeInspector(node) {
+  if (node.type === NODE_TYPES.LINE) {
+    const options = Object.values(ARROWHEADS).map((value) =>
+      `<option value="${value}">${capitalize(value)}</option>`).join("");
+    return `
+      <section class="inspector-section">
+        <p class="inspector-section-title">Line</p>
+        <div class="field-grid">
+          <label class="field"><span class="field-label">Start</span><select data-property="arrowStart" aria-label="Start arrowhead">${options.replace(`value="${node.arrowStart}"`, `value="${node.arrowStart}" selected`)}</select></label>
+          <label class="field"><span class="field-label">End</span><select data-property="arrowEnd" aria-label="End arrowhead">${options.replace(`value="${node.arrowEnd}"`, `value="${node.arrowEnd}" selected`)}</select></label>
+        </div>
+        <p class="inspector-hint">Drag either round endpoint to reshape the line. Hold Shift to snap to 45° increments.</p>
+      </section>`;
+  }
+
+  if (node.type === NODE_TYPES.POLYGON) {
+    return `
+      <section class="inspector-section">
+        <p class="inspector-section-title">Polygon</p>
+        <div class="field-grid">
+          <label class="field"><span class="field-label">Sides</span><input type="number" min="3" max="60" step="1" data-property="polygonSides" data-value-type="number" value="${node.polygonSides}" /></label>
+        </div>
+        <p class="inspector-hint">Use R in Position for corner radius. Drag the side-count handle horizontally or the handle near the top corner to adjust the shape directly.</p>
+      </section>`;
+  }
+
+  if (node.type === NODE_TYPES.STAR) {
+    return `
+      <section class="inspector-section">
+        <p class="inspector-section-title">Star</p>
+        <div class="field-grid">
+          <label class="field"><span class="field-label">Points</span><input type="number" min="3" max="60" step="1" data-property="starPoints" data-value-type="number" value="${node.starPoints}" /></label>
+          <label class="field"><span class="field-label">Inner</span><input type="number" min="8" max="95" step="1" data-property="starInnerRatio" data-value-type="number" data-scale="0.01" value="${Math.round(node.starInnerRatio * 100)}" /></label>
+        </div>
+        <p class="inspector-hint">Use R in Position for corner radius. The canvas handles adjust inner ratio, point count, and corner rounding directly.</p>
+      </section>`;
+  }
+  return "";
 }
 
 function textInspector(node) {
@@ -5310,6 +5561,8 @@ function closePopovers() {
   elements.exportMenu.hidden = true;
   elements.pagesPopover.hidden = true;
   elements.pageSwitcher.setAttribute("aria-expanded", "false");
+  elements.shapeToolMenu.hidden = true;
+  elements.shapeMenuButton.setAttribute("aria-expanded", "false");
 }
 
 function capturePointer(event) {
@@ -5476,12 +5729,27 @@ function nodeIcon(type) {
     mask: '<svg viewBox="0 0 20 20"><rect x="3" y="4" width="10" height="10" rx="2" /><path d="M7 8h10v8H7z" /></svg>',
     rectangle: '<svg viewBox="0 0 20 20"><rect x="3.5" y="4" width="13" height="12" rx="1" /></svg>',
     ellipse: '<svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5" /></svg>',
+    line: '<svg viewBox="0 0 20 20"><path d="M3.5 15.5 16.5 4.5" /></svg>',
+    polygon: '<svg viewBox="0 0 20 20"><path d="m10 3 7 13H3L10 3Z" /></svg>',
+    star: '<svg viewBox="0 0 20 20"><path d="m10 2.8 2.1 4.4 4.9.7-3.5 3.5.8 4.9-4.3-2.4-4.3 2.4.8-4.9L3 7.9l4.9-.7L10 2.8Z" /></svg>',
     vector: '<svg viewBox="0 0 20 20"><path d="m3.5 15.5 4-11 9 5-5 7-8-1Z" /><circle cx="7.5" cy="4.5" r="1" /><circle cx="16.5" cy="9.5" r="1" /><circle cx="11.5" cy="16.5" r="1" /></svg>',
     text: '<svg viewBox="0 0 20 20"><path d="M4 4h12M10 4v12M7 16h6" /></svg>',
     image: '<svg viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="12" rx="1.5" /><circle cx="13.5" cy="7.5" r="1" /><path d="m5 14 3.5-3.5 2 2 1.5-1.5 3 3" /></svg>',
     multiple: '<svg viewBox="0 0 20 20"><rect x="3" y="3" width="9" height="9" /><rect x="8" y="8" width="9" height="9" /></svg>',
   };
   return icons[type] ?? icons.rectangle;
+}
+
+function shapeToolIcon(tool) {
+  const icons = {
+    rectangle: '<svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="1" /></svg>',
+    ellipse: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /></svg>',
+    line: '<svg viewBox="0 0 24 24"><path d="M4 18 20 6" /></svg>',
+    arrow: '<svg viewBox="0 0 24 24"><path d="M4 18 20 6M13 6h7v7" /></svg>',
+    polygon: '<svg viewBox="0 0 24 24"><path d="m12 3 9 17H3L12 3Z" /></svg>',
+    star: '<svg viewBox="0 0 24 24"><path d="m12 3 2.8 5.8 6.2.9-4.5 4.5 1.1 6.3-5.6-3-5.6 3 1.1-6.3L3 9.7l6.2-.9L12 3Z" /></svg>',
+  };
+  return icons[tool] ?? icons.rectangle;
 }
 
 function arrangementIcon(action) {

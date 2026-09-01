@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const serverPort = Number.parseInt(process.env.TSYAIKO_TEST_PORT || "8091", 10);
 const debugPort = Number.parseInt(process.env.TSYAIKO_CDP_PORT || "9225", 10);
+const shapeScreenshotPath = process.env.TSYAIKO_SHAPE_SCREENSHOT ||
+  process.argv.find((argument) => argument.startsWith("--shape-screenshot="))?.split("=").slice(1).join("=");
 const profileDirectory = mkdtempSync(path.join(tmpdir(), "tsyaiko-browser-"));
 const chromiumBinary = findChromium();
 let server;
@@ -61,6 +63,7 @@ try {
         createNode,
         createPage,
         createVectorNodeFromWorldPoints,
+        getDocumentBounds,
         LAYOUT_MODES,
         maskNodes,
         NODE_TYPES
@@ -217,6 +220,37 @@ try {
       const responsiveParsed = new DOMParser().parseFromString(responsiveSVG, "image/svg+xml");
       const responsiveCanvas = renderDocumentToCanvas(responsivePage, null, 1);
       const responsivePixel = [...responsiveCanvas.getContext("2d").getImageData(30, 20, 1, 1).data];
+
+      const shapePage = createPage("Parametric export");
+      const polygon = createNode(NODE_TYPES.POLYGON, 0, 0, {
+        width: 100, height: 100, polygonSides: 6, cornerRadius: 8,
+        fill: "#ff0000", strokeWidth: 0
+      });
+      const star = createNode(NODE_TYPES.STAR, 120, 0, {
+        width: 100, height: 100, starPoints: 7, starInnerRatio: 0.46,
+        fill: "#00ff00", strokeWidth: 0
+      });
+      const arrow = createNode(NODE_TYPES.LINE, 250, 50, {
+        width: 100, height: 1, stroke: "#0000ff", strokeWidth: 6,
+        arrowStart: "circle", arrowEnd: "triangle"
+      });
+      shapePage.nodes.push(polygon, star, arrow);
+      const shapeBounds = getDocumentBounds(shapePage);
+      const shapeCanvas = renderDocumentToCanvas(shapePage, null, 1);
+      const shapeContext = shapeCanvas.getContext("2d");
+      const shapePixel = (x, y) => [...shapeContext.getImageData(
+        Math.max(0, Math.min(shapeCanvas.width - 1, Math.round(x - shapeBounds.x))),
+        Math.max(0, Math.min(shapeCanvas.height - 1, Math.round(y - shapeBounds.y))),
+        1, 1
+      ).data];
+      const shapeSVG = documentToSVG(shapePage);
+      const shapeParsed = new DOMParser().parseFromString(shapeSVG, "image/svg+xml");
+      const svgShapePolygon = await sampleSVG(shapePage, { center: { x: 50, y: 50 } }, 0);
+      const svgShapeStar = await sampleSVG(shapePage, { center: { x: 170, y: 50 } }, 1);
+      const svgShapeArrow = await sampleSVG(shapePage, { center: { x: 300, y: 50.5 } }, 2);
+      const polygonPixel = shapePixel(50, 50);
+      const starPixel = shapePixel(170, 50);
+      const arrowPixel = shapePixel(300, 50.5);
       return {
         valid: !parsed.querySelector("parsererror"),
         gradient: Boolean(parsed.querySelector("linearGradient")),
@@ -239,6 +273,17 @@ try {
           sourceUntouched: responsiveChild.x === 99 && responsiveChild.y === 99,
           svgResolved: Boolean(responsiveParsed.querySelector('rect[x="10"][y="10"][width="40"][height="20"][fill="#ff0000"]')),
           canvasResolved: responsivePixel[0] > 200 && responsivePixel[1] < 80 && responsivePixel[2] < 80
+        },
+        parametricExport: {
+          svgValid: !shapeParsed.querySelector("parsererror"),
+          svgPaths: shapeParsed.querySelectorAll("path").length >= 4,
+          svgCircleArrowhead: Boolean(shapeParsed.querySelector("circle")),
+          canvasPolygon: polygonPixel[0] > 200 && polygonPixel[1] < 80,
+          canvasStar: starPixel[1] > 200 && starPixel[0] < 80,
+          canvasArrow: arrowPixel[2] > 200 && arrowPixel[0] < 80,
+          svgPolygon: svgShapePolygon.center,
+          svgStar: svgShapeStar.center,
+          svgArrow: svgShapeArrow.center
         }
       };
     })()
@@ -249,6 +294,9 @@ try {
   }
   if (!Object.values(svgPaintExport.responsiveExport).every(Boolean)) {
     throw new Error(`Responsive export validation failed: ${JSON.stringify(svgPaintExport.responsiveExport)}`);
+  }
+  if (!Object.values(svgPaintExport.parametricExport).every(Boolean)) {
+    throw new Error(`Parametric shape export validation failed: ${JSON.stringify(svgPaintExport.parametricExport)}`);
   }
   const canvasBoolean = svgPaintExport.canvasBoolean;
   const canvasModesValid =
@@ -1089,8 +1137,8 @@ try {
       request.addEventListener("error", () => reject(request.error), { once: true });
     })
   `);
-  if (storedDocumentVersion !== 12) {
-    throw new Error(`Expected persisted document v12, received ${storedDocumentVersion}.`);
+  if (storedDocumentVersion !== 13) {
+    throw new Error(`Expected persisted document v13, received ${storedDocumentVersion}.`);
   }
   await evaluate(`
     [...document.querySelectorAll(".layer-row")]
@@ -2014,6 +2062,192 @@ try {
     cancellation: true,
     smartSpacing: smartSpacingX,
   };
+
+  await evaluate(`
+    window.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "L", code: "KeyL", shiftKey: true, bubbles: true
+    }));
+    true
+  `);
+  await waitFor(
+    `document.querySelector("#shapeToolButton")?.dataset.tool === "arrow" &&
+     document.querySelector("#designCanvas")?.dataset.cursor === "crosshair"`,
+    "Shift+L arrow shortcut",
+  );
+  const arrowDrawStart = {
+    x: canvas.left + canvas.width * 0.24,
+    y: canvas.top + canvas.height * 0.25,
+  };
+  await dragPointer(command, arrowDrawStart, {
+    x: arrowDrawStart.x + 90,
+    y: arrowDrawStart.y + 35,
+  }, 9);
+  await waitFor(
+    `document.querySelectorAll(".layer-row").length === 4 &&
+     document.querySelector(".selection-summary input")?.value === "Arrow" &&
+     document.querySelector('[data-property="arrowEnd"]')?.value === "triangle"`,
+    "centered constrained arrow drawing",
+  );
+  const arrowGeometry = await evaluate(`({
+    width: Number(document.querySelector('[data-property="width"]')?.value),
+    height: Number(document.querySelector('[data-property="height"]')?.value),
+    end: document.querySelector('[data-property="arrowEnd"]')?.value,
+    zoom: Number.parseInt(document.querySelector("#zoomValue")?.textContent, 10) / 100
+  })`);
+  const expectedCenteredArrowWidth = Math.hypot(90, 35) * 2 / arrowGeometry.zoom;
+  if (Math.abs(arrowGeometry.width - expectedCenteredArrowWidth) > 0.2 ||
+      arrowGeometry.height > 1.1 || arrowGeometry.end !== "triangle") {
+    throw new Error(`Arrow modifier validation failed: ${JSON.stringify(arrowGeometry)}`);
+  }
+  await evaluate(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true, bubbles: true })); true`);
+  await waitFor(`document.querySelectorAll(".layer-row").length === 3`, "arrow creation undo");
+  await evaluate(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true, shiftKey: true, bubbles: true })); true`);
+  await waitFor(
+    `document.querySelectorAll(".layer-row").length === 4 &&
+     [...document.querySelectorAll(".layer-name")].some((item) => item.textContent === "Arrow")`,
+    "arrow creation redo",
+  );
+  await evaluate(`
+    [...document.querySelectorAll(".layer-row")]
+      .find((row) => row.querySelector(".layer-name")?.textContent === "Arrow")
+      .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", code: "Delete", bubbles: true }));
+    true
+  `);
+  await waitFor(`document.querySelectorAll(".layer-row").length === 3`, "arrow cleanup");
+
+  await evaluate(`document.querySelector("#shapeMenuButton").click(); true`);
+  await waitFor(`document.querySelector("#shapeToolMenu")?.hidden === false`, "shape flyout opening");
+  await evaluate(`document.querySelector("#shapeMenuButton").click(); true`);
+  await waitFor(`document.querySelector("#shapeToolMenu")?.hidden === true`, "shape flyout toggling closed");
+  await evaluate(`document.querySelector("#shapeMenuButton").click(); true`);
+  await waitFor(`document.querySelector("#shapeToolMenu")?.hidden === false`, "shape flyout reopening");
+  await evaluate(`document.querySelector('[data-shape-tool="polygon"]').click(); true`);
+  await waitFor(
+    `document.querySelector("#shapeToolButton")?.dataset.tool === "polygon" &&
+     document.querySelector("#shapeToolMenu")?.hidden === true`,
+    "polygon flyout selection",
+  );
+  const polygonDrawStart = {
+    x: canvas.left + canvas.width * 0.38,
+    y: canvas.top + canvas.height * 0.25,
+  };
+  await dragPointer(command, polygonDrawStart, {
+    x: polygonDrawStart.x + 92,
+    y: polygonDrawStart.y + 54,
+  }, 8);
+  await waitFor(
+    `document.querySelectorAll(".layer-row").length === 4 &&
+     document.querySelector(".selection-summary input")?.value === "Polygon" &&
+     document.querySelector('[data-property="polygonSides"]')?.value === "3"`,
+    "polygon drawing",
+  );
+  await evaluate(`
+    (() => {
+      const sides = document.querySelector('[data-property="polygonSides"]');
+      const radius = document.querySelector('[data-property="cornerRadius"]:not([disabled])');
+      sides.value = "8";
+      sides.dispatchEvent(new Event("input", { bubbles: true }));
+      radius.value = "6";
+      radius.dispatchEvent(new Event("input", { bubbles: true }));
+      radius.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    })()
+  `);
+  await waitFor(
+    `document.querySelector('[data-property="polygonSides"]')?.value === "8" &&
+     Number(document.querySelector('[data-property="cornerRadius"]:not([disabled])')?.value) === 6`,
+    "polygon Inspector parameters",
+  );
+  await evaluate(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", code: "Delete", bubbles: true })); true`);
+  await waitFor(`document.querySelectorAll(".layer-row").length === 3`, "polygon cleanup");
+
+  await evaluate(`
+    document.querySelector("#shapeMenuButton").click();
+    document.querySelector('[data-shape-tool="star"]').click();
+    true
+  `);
+  const starDrawStart = {
+    x: canvas.left + canvas.width * 0.54,
+    y: canvas.top + canvas.height * 0.25,
+  };
+  await dragPointer(command, starDrawStart, {
+    x: starDrawStart.x + 90,
+    y: starDrawStart.y + 56,
+  }, 8);
+  await waitFor(
+    `document.querySelectorAll(".layer-row").length === 4 &&
+     document.querySelector(".selection-summary input")?.value === "Star" &&
+     document.querySelector('[data-property="starPoints"]')?.value === "5" &&
+     document.querySelector('[data-property="starInnerRatio"]')?.value === "40"`,
+    "star drawing",
+  );
+  await evaluate(`document.querySelector("#zoomValue").click(); true`);
+  await delay(150);
+  const starHandleState = await evaluate(`
+    (() => {
+      const box = document.querySelector("#designCanvas").getBoundingClientRect();
+      const zoom = Number.parseInt(document.querySelector("#zoomValue").textContent, 10) / 100;
+      const width = Number(document.querySelector('[data-property="width"]')?.value);
+      const height = Number(document.querySelector('[data-property="height"]')?.value);
+      return {
+        centerX: box.left + box.width / 2,
+        centerY: box.top + box.height / 2,
+        zoom,
+        width,
+        height
+      };
+    })()
+  `);
+  const starCountHandle = {
+    x: starHandleState.centerX + starHandleState.width * 0.26 * starHandleState.zoom,
+    y: starHandleState.centerY,
+  };
+  await dragPointer(command, starCountHandle, {
+    x: starCountHandle.x + 24,
+    y: starCountHandle.y,
+  });
+  await waitFor(
+    `document.querySelector('[data-property="starPoints"]')?.value === "7"`,
+    "direct star point-count handle",
+  );
+  const starAngle = -Math.PI / 2 + Math.PI / 7;
+  const starInnerStart = {
+    x: starHandleState.centerX + Math.cos(starAngle) * starHandleState.width / 2 * 0.4 * starHandleState.zoom,
+    y: starHandleState.centerY + Math.sin(starAngle) * starHandleState.height / 2 * 0.4 * starHandleState.zoom,
+  };
+  const starInnerEnd = {
+    x: starHandleState.centerX + Math.cos(starAngle) * starHandleState.width / 2 * 0.7 * starHandleState.zoom,
+    y: starHandleState.centerY + Math.sin(starAngle) * starHandleState.height / 2 * 0.7 * starHandleState.zoom,
+  };
+  await dragPointer(command, starInnerStart, starInnerEnd);
+  await waitFor(
+    `Math.abs(Number(document.querySelector('[data-property="starInnerRatio"]')?.value) - 70) <= 1`,
+    "direct star inner-ratio handle",
+  );
+  await evaluate(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true, bubbles: true })); true`);
+  await waitFor(
+    `document.querySelector('[data-property="starInnerRatio"]')?.value === "40"`,
+    "star handle undo",
+  );
+  await evaluate(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true, shiftKey: true, bubbles: true })); true`);
+  await waitFor(
+    `Math.abs(Number(document.querySelector('[data-property="starInnerRatio"]')?.value) - 70) <= 1`,
+    "star handle redo",
+  );
+  result.parametricShapes = {
+    arrowModifiers: arrowGeometry,
+    polygonSides: 8,
+    starPoints: 7,
+    starInnerRatio: Number(await evaluate(`document.querySelector('[data-property="starInnerRatio"]')?.value`)),
+    exportParity: svgPaintExport.parametricExport,
+  };
+  if (shapeScreenshotPath) {
+    const screenshot = await command("Page.captureScreenshot", { format: "png" });
+    writeFileSync(shapeScreenshotPath, Buffer.from(screenshot.data, "base64"));
+  }
+  await evaluate(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", code: "Delete", bubbles: true })); true`);
+  await waitFor(`document.querySelectorAll(".layer-row").length === 3`, "star cleanup");
 
   const hostedCreateResponse = await fetch(`http://127.0.0.1:${serverPort}/v1/files`, {
     method: "POST",

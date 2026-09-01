@@ -91,11 +91,11 @@ Avoid introducing every distributed component on day one. PostgreSQL, Redis, obj
 
 ## 5. Document model
 
-The current v12 file format is a versioned, multi-page JSON document with flat node storage, explicit parent relationships, responsive-layout metadata, ordered paint/effect stacks, rich-text ranges, compound cubic Bézier contours, ordered Boolean/mask containers, local component/variant records, content-addressed image/font assets, and page-scoped rulers, guides, and grid settings. Versions 1–11 migrate automatically. Imports repair dangling parents, reject non-container parents, break cycles, sanitize layout/anchor/control/paint/effect/text/composite/component/canvas-aid values, verify embedded asset hashes, deduplicate content, enforce quotas, dissolve undersized variant sets, make duplicate variant combinations deterministic, and restore parent-before-child ordering:
+The current v13 file format is a versioned, multi-page JSON document with flat node storage, explicit parent relationships, responsive-layout metadata, ordered paint/effect stacks, rich-text ranges, parametric Line/Arrow, Polygon, and Star records, compound cubic Bézier contours, ordered Boolean/mask containers, local component/variant records, content-addressed image/font assets, and page-scoped rulers, guides, and grid settings. Versions 1–12 migrate automatically. Imports repair dangling parents, reject non-container parents, break cycles, sanitize layout/anchor/control/shape/paint/effect/text/composite/component/canvas-aid values, verify embedded asset hashes, deduplicate content, enforce quotas, dissolve undersized variant sets, make duplicate variant combinations deterministic, and restore parent-before-child ordering:
 
 ```json
 {
-  "version": 12,
+  "version": 13,
   "id": "document_…",
   "name": "Untitled design",
   "background": "#101114",
@@ -301,7 +301,7 @@ The composite owns the result paint, stroke, opacity, and effect. Source paint r
 
 Canvas rendering creates alpha surfaces for each source and combines them with `source-over`, `destination-out`, `destination-in`, or `xor`. Result strokes are expanded from the combined alpha boundary, then the fill and effect are projected once. SVG export retains structure with `<mask>` definitions and uses `<feMorphology operator="dilate">` for the expanded stroke. Hit testing evaluates the same Boolean algebra, so transparent Subtract/Exclude holes do not select the composite.
 
-Production evolution after v12:
+Production evolution after v13:
 
 - Move from world-space child geometry to consistently decomposed local transforms or matrices
 - Add explicit sibling ordering when collaboration requires ordering independent of array position
@@ -371,7 +371,7 @@ Initial performance budgets:
 - Selection hit testing below 8 ms p95
 - Memory below 500 MB for a representative large document
 
-The v12 Canvas compositor culls offscreen nodes, renders composite branches into bounded local surfaces, reuses them through a 64 MB/48-entry LRU cache, and redraws merged dirty regions when camera and transient state are unchanged. Camera changes and high-dirty-area frames deliberately fall back to a full redraw. A rolling profiler exposes frame time, p95, cache hits/misses, culled nodes, and dirty-region counts in the editor. A production large-scene engine still needs a spatial index, pooled surfaces/workers, better text atlases, and eventually GPU render targets if representative profiles miss the budgets.
+The v13 Canvas compositor culls offscreen nodes, renders composite branches into bounded local surfaces, reuses them through a 64 MB/48-entry LRU cache, and redraws merged dirty regions when camera and transient state are unchanged. Camera changes and high-dirty-area frames deliberately fall back to a full redraw. A rolling profiler exposes frame time, p95, cache hits/misses, culled nodes, and dirty-region counts in the editor. A production large-scene engine still needs a spatial index, pooled surfaces/workers, better text atlases, and eventually GPU render targets if representative profiles miss the budgets.
 
 ## 8. Text architecture
 
@@ -385,11 +385,11 @@ Text fidelity is one of the highest-risk areas. The browser, server exporter, an
 - Rich-text runs
 - Baseline placement
 
-The v12 browser client embeds WOFF/WOFF2 files as content-addressed assets, loads them through `FontFace`, invalidates cached metrics after load, and uses one Canvas `measureText` pipeline for rich-text wrapping, intrinsic sizing, Canvas rendering, and layout. Browser-native shaping handles the current local editor accurately. A shared shaping engine such as HarfBuzz is still required when exact cross-browser, desktop, and hosted-export fidelity becomes necessary. Fonts must be licensed for storage, editing, and server-side export.
+The v13 browser client embeds WOFF/WOFF2 files as content-addressed assets, loads them through `FontFace`, invalidates cached metrics after load, and uses one Canvas `measureText` pipeline for rich-text wrapping, intrinsic sizing, Canvas rendering, and layout. Browser-native shaping handles the current local editor accurately. A shared shaping engine such as HarfBuzz is still required when exact cross-browser, desktop, and hosted-export fidelity becomes necessary. Fonts must be licensed for storage, editing, and server-side export.
 
 ## 9. Commands, history, and collaboration
 
-The v12 client stores bounded reversible commands made from property `set`/`delete` operations and structural array splices. A pointer gesture is committed as one labeled undo entry; unchanged timestamps are excluded, and redo branches are discarded after a new edit. Commands are local document deltas today. Collaboration should promote this boundary to semantic, identity-aware transactions:
+The v13 client stores bounded reversible commands made from property `set`/`delete` operations and structural array splices. A pointer gesture is committed as one labeled undo entry; unchanged timestamps are excluded, and redo branches are discarded after a new edit. Commands are local document deltas today. Collaboration should promote this boundary to semantic, identity-aware transactions:
 
 ```json
 {
@@ -478,7 +478,7 @@ Every mutation is authorized server-side. Client UI permissions are convenience,
 
 ## 12. Auto layout and constraints
 
-The v12 client implements layout as a deterministic function of document properties. A frame with horizontal or vertical Auto Layout flows its visible direct children in sibling order; hidden and absolute children are excluded. The implemented contract includes:
+The v13 client implements layout as a deterministic function of document properties. A frame with horizontal or vertical Auto Layout flows its visible direct children in sibling order; hidden and absolute children are excluded. The implemented contract includes:
 
 - Independent top, right, bottom, and left padding
 - Optional horizontal row wrapping and vertical column wrapping
@@ -602,7 +602,7 @@ Every document schema change needs forward-migration tests and fixtures from old
 ### Milestone 0 — implemented foundation
 
 - Canvas editor and basic nodes
-- Multi-page documents, page operations, and v1–v11 schema migration into v12
+- Multi-page documents, page operations, and v1–v12 schema migration into v13
 - Hierarchical frames and groups with recursive editing and cycle-safe imports
 - Nested layers, frame clipping, and inherited visibility, locking, and opacity
 - Linear-gradient fills and explicit drop-shadow effects with Canvas/SVG parity
@@ -612,7 +612,7 @@ Every document schema change needs forward-migration tests and fixtures from old
 - Composite creation, operation switching, source-order labels, release workflows, keyboard commands, persistence, and browser pixel tests
 - Horizontal/vertical Auto Layout, Shift+A wrapping, padding, gaps, alignment, fixed/hug/fill sizing, absolute children, and Layers feedback
 - Responsive frame constraints with nested evaluation, resize snapshots, undo/redo, persistence, and Canvas/SVG geometry parity
-- Local components with source records, linked instances, visible/property-level overrides, semantic swapping, local variant matrices, reset, detach, Assets insertion/navigation, and v12 persistence
+- Local components with source records, linked instances, visible/property-level overrides, semantic swapping, local variant matrices, reset, detach, Assets insertion/navigation, and v13 persistence
 - Per-page canvas appearance and view state
 - Embedded raster image layers with cover/contain fitting
 - IndexedDB persistence and compact localStorage recovery copies
@@ -639,10 +639,11 @@ Exit criterion met for the local browser editor: a designer can complete and exp
 - Rotation-aware multi-selection edge/center alignment, equal-gap distribution, hierarchy-safe branch movement, and temporary canvas measurements (implemented)
 - Unified multi-selection bounding-box resize and shared-pivot rotation, including Shift/Alt transform modifiers, linked-instance/Auto Layout guards, and one-step history (implemented)
 - Numeric multi-selection X/Y/W/H Inspector editing, optional ratio-locked scaling, ±90° actions, and live rotation readouts (implemented)
-- Persistent adaptive rulers, draggable page guides, exact guide editing, configurable grids, grid/object/guide snapping, history, and v12 persistence (implemented)
+- Persistent adaptive rulers, draggable page guides, exact guide editing, configurable grids, grid/object/guide snapping, history, and v13 persistence (implemented)
 - Rotation-aware Alt/Option distance inspection, parent insets, and nearest-sibling gap measurements during direct transforms (implemented)
 - Smart repeated-gap snapping with live spacing labels, thresholded Alt/Option+Shift drag duplication, multi-selection branch copies, cancel-safe one-step history, and repeatable duplicate transforms (implemented)
-- More shape/path authoring tools, editable transform origins, skew, and matrix-level transforms
+- Shape flyout; Shift/Alt drawing; parametric Line/Arrow, Polygon, and Star nodes; arrowheads; shape Inspector controls; direct canvas handles; hit testing; history; masks; and Canvas/PNG/SVG parity (implemented)
+- Editable transform origins, skew, and matrix-level transforms
 - Keyboard focus, accessibility, and dense-workflow polish across Canvas, Layers, and Inspector
 
 Exit criterion: core layout and vector work feels fast and predictable enough for sustained daily design use, not only feature demonstrations.
