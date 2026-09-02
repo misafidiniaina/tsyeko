@@ -175,6 +175,8 @@ const elements = {
   createVariantSetButton: document.querySelector("#createVariantSetButton"),
   inspector: document.querySelector("#inspector"),
   zoomValue: document.querySelector("#zoomValue"),
+  inspectorZoomValue: document.querySelector("#inspectorZoomValue span"),
+  inspectorZoomButton: document.querySelector("#inspectorZoomValue"),
   mainMenuButton: document.querySelector("#mainMenuButton"),
   mainMenu: document.querySelector("#mainMenu"),
   exportButton: document.querySelector("#exportButton"),
@@ -247,6 +249,17 @@ let transformFeedbackGuides = [];
 let transformFeedbackPageId = null;
 let transformFeedbackTimer = null;
 let multiTransformAspectLocked = false;
+let singleTransformAspectLocked = false;
+let singleExportScale = 1;
+let singleExportFormat = "png";
+let singleInspectorRenamingId = null;
+let inspectorColorDrag = null;
+const singleInspectorSectionState = {
+  fill: true,
+  stroke: false,
+  effects: false,
+  export: false,
+};
 let lastDuplicateTransform = null;
 let spacePressed = false;
 let altPressed = false;
@@ -325,6 +338,10 @@ function bindToolbar() {
     zoomAt({ x: renderer.width / 2, y: renderer.height / 2 }, 1 / 1.2);
   });
   elements.zoomValue.addEventListener("click", () => {
+    if (selectedIds.length) fitToContent(selectedIds);
+    else fitToContent();
+  });
+  elements.inspectorZoomButton.addEventListener("click", () => {
     if (selectedIds.length) fitToContent(selectedIds);
     else fitToContent();
   });
@@ -471,6 +488,13 @@ function bindPanels() {
 
 function bindInspector() {
   elements.inspector.addEventListener("input", (event) => {
+    const colorPickerInput = event.target.closest("[data-color-picker-property]");
+    if (colorPickerInput) {
+      const picker = colorPickerInput.closest("[data-color-picker]");
+      if (picker) updateInspectorPaintPicker(picker, colorPickerInput.dataset.colorPickerProperty, colorPickerInput.value);
+      return;
+    }
+
     const textRunColor = event.target.closest("[data-text-run-color]");
     if (textRunColor && selectedIds.length === 1) {
       const node = getNode(currentPage(), selectedIds[0]);
@@ -693,9 +717,22 @@ function bindInspector() {
     if (["polygonSides", "starPoints"].includes(property)) value = clamp(Math.round(value), 3, 60);
     if (property === "starInnerRatio") value = clamp(value, 0.08, 0.95);
     if (property === "fontSize") value = Math.max(1, value);
+    const dimensionSource = ["width", "height"].includes(property) ? cloneNode(node) : null;
+    let linkedDimension = null;
+    let linkedDimensionValue = null;
+    if (singleTransformAspectLocked && dimensionSource && !isAutoBoundsContainer(node)) {
+      linkedDimension = property === "width" ? "height" : "width";
+      const ratio = property === "width"
+        ? dimensionSource.height / Math.max(1, dimensionSource.width)
+        : dimensionSource.width / Math.max(1, dimensionSource.height);
+      linkedDimensionValue = value * ratio;
+      linkedDimensionValue = linkedDimension === "width"
+        ? clamp(linkedDimensionValue, node.minWidth, node.maxWidth)
+        : clamp(linkedDimensionValue, node.minHeight, node.maxHeight);
+    }
     const previousValue = node[property];
-    const frameResizeOriginal = node.type === NODE_TYPES.FRAME && ["width", "height"].includes(property)
-      ? cloneNode(node)
+    const frameResizeOriginal = node.type === NODE_TYPES.FRAME && dimensionSource
+      ? dimensionSource
       : null;
     const frameResizeSnapshots = frameResizeOriginal
       ? getNodesWithDescendants(currentPage(), [node.id]).map(cloneNode)
@@ -706,17 +743,22 @@ function bindInspector() {
       liveDocumentChange();
       return;
     }
-    if (node.type === NODE_TYPES.VECTOR && ["width", "height"].includes(property)) {
-      const scale = value / previousValue;
-      scaleVectorGeometry(node, cloneNode(node),
-        property === "width" ? scale : 1,
-        property === "height" ? scale : 1);
+    if (node.type === NODE_TYPES.VECTOR && dimensionSource) {
+      const targetWidth = property === "width" ? value : linkedDimensionValue ?? dimensionSource.width;
+      const targetHeight = property === "height" ? value : linkedDimensionValue ?? dimensionSource.height;
+      scaleVectorGeometry(
+        node,
+        dimensionSource,
+        targetWidth / dimensionSource.width,
+        targetHeight / dimensionSource.height,
+      );
     }
     if (property === "text" && node.type === NODE_TYPES.TEXT) {
       node.textRuns = rebaseTextRuns(node.textRuns, node.text, value);
       recordComponentOverride(designDocument, currentPage(), node, "textRuns");
     }
     node[property] = value;
+    if (linkedDimension) node[linkedDimension] = linkedDimensionValue;
     if (property === "fontFamily" && node.type === NODE_TYPES.TEXT) {
       node.fontRef = designDocument.assets?.find((asset) =>
         asset.kind === "font" && asset.fontFamily === value)?.id ?? null;
@@ -730,6 +772,8 @@ function bindInspector() {
     if (frameResizeOriginal) {
       if (property === "width") node.layoutSizingHorizontal = LAYOUT_SIZING.FIXED;
       if (property === "height") node.layoutSizingVertical = LAYOUT_SIZING.FIXED;
+      if (linkedDimension === "width") node.layoutSizingHorizontal = LAYOUT_SIZING.FIXED;
+      if (linkedDimension === "height") node.layoutSizingVertical = LAYOUT_SIZING.FIXED;
       resizeFrameChildren(
         currentPage(),
         frameResizeOriginal,
@@ -760,12 +804,31 @@ function bindInspector() {
       }
     }
     recordComponentOverride(designDocument, currentPage(), node, property);
+    if (linkedDimension) recordComponentOverride(designDocument, currentPage(), node, linkedDimension);
     liveDocumentChange();
 
     if (property === "name") renderLayers();
   });
 
   elements.inspector.addEventListener("change", (event) => {
+    if (event.target.closest("[data-color-picker]")) {
+      commitLiveInspectorEdit("Change paint");
+      return;
+    }
+    if (event.target.matches("[data-single-name-editor]")) singleInspectorRenamingId = null;
+    const exportScale = event.target.closest("[data-single-export-scale]");
+    if (exportScale) {
+      const value = Number.parseFloat(exportScale.value);
+      if ([0.5, 1, 2, 3, 4].includes(value)) singleExportScale = value;
+      renderInspector();
+      return;
+    }
+    const exportFormat = event.target.closest("[data-single-export-format]");
+    if (exportFormat) {
+      if (["png", "svg"].includes(exportFormat.value)) singleExportFormat = exportFormat.value;
+      renderInspector();
+      return;
+    }
     const variantSelect = event.target.closest("[data-component-variant]");
     if (variantSelect) {
       changeSelectedComponentVariant(variantSelect.dataset.variantProperty, variantSelect.value);
@@ -785,6 +848,101 @@ function bindInspector() {
     const node = getNode(currentPage(), selectedIds[0]);
     if (!node) return;
     const action = button.dataset.inspectorAction;
+
+    if (action === "toggle-single-section") {
+      const section = button.dataset.section;
+      if (Object.hasOwn(singleInspectorSectionState, section)) {
+        singleInspectorSectionState[section] = !singleInspectorSectionState[section];
+        renderInspector();
+      }
+      return;
+    }
+    if (action === "toggle-inspector-popover") {
+      event.stopPropagation();
+      toggleSingleInspectorPopover(button.dataset.popover, button);
+      return;
+    }
+    if (action === "close-inspector-popover") {
+      closeSingleInspectorPopovers();
+      return;
+    }
+    if (action === "set-picker-color") {
+      const picker = button.closest("[data-color-picker]");
+      if (picker && updateInspectorPaintPicker(picker, "hex", button.dataset.color)) {
+        commitLiveInspectorEdit("Change paint");
+      }
+      return;
+    }
+    closeSingleInspectorPopovers();
+    if (action === "toggle-single-aspect") {
+      singleTransformAspectLocked = !singleTransformAspectLocked;
+      renderInspector();
+      return;
+    }
+    if (action === "toggle-paint-settings") {
+      singleInspectorSectionState.fill = true;
+      const settings = elements.inspector.querySelector("[data-paint-settings]");
+      if (settings) settings.open = !settings.open;
+      return;
+    }
+    if (action === "open-export-settings") {
+      singleInspectorSectionState.export = true;
+      renderInspector();
+      return;
+    }
+    if (action === "remove-export-settings") {
+      singleInspectorSectionState.export = false;
+      renderInspector();
+      return;
+    }
+    if (action === "focus-fill") {
+      singleInspectorSectionState.fill = true;
+      renderInspector();
+      requestAnimationFrame(() => elements.inspector.querySelector('[data-single-section="fill"]')?.scrollIntoView({ block: "nearest" }));
+      return;
+    }
+    if (action === "rename-layer") {
+      singleInspectorRenamingId = node.id;
+      renderInspector();
+      requestAnimationFrame(() => {
+        const input = elements.inspector.querySelector("[data-single-name-editor]");
+        input?.focus();
+        input?.select();
+      });
+      return;
+    }
+    if (action === "create-component") {
+      createComponentFromSelection();
+      return;
+    }
+    if (action === "duplicate-selection") {
+      duplicateSelection();
+      return;
+    }
+    if (action === "mask-selection") {
+      maskSelection();
+      return;
+    }
+    if (action === "apply-boolean") {
+      booleanSelection(button.dataset.value);
+      return;
+    }
+    if (action === "align-to-parent") {
+      alignSingleLayerToParent(node, button.dataset.value);
+      return;
+    }
+    if (action === "rotate-by") {
+      rotateSingleLayerBy(node, Number.parseFloat(button.dataset.value));
+      return;
+    }
+    if (action === "reset-rotation") {
+      rotateSingleLayerBy(node, -node.rotation);
+      return;
+    }
+    if (action === "export-selection") {
+      void exportSelectedLayer(singleExportFormat, singleExportScale);
+      return;
+    }
 
     if (action === "dissolve-component-set") {
       const component = getComponentDefinition(designDocument, node.componentId);
@@ -938,6 +1096,7 @@ function bindInspector() {
       if (node.fills[0]) node.fills[0].type = node.fillType;
     }
     if (action === "add-fill") {
+      singleInspectorSectionState.fill = true;
       node.fills.push({
         id: `paint_${Date.now()}`,
         type: PAINT_TYPES.SOLID,
@@ -951,6 +1110,7 @@ function bindInspector() {
     if (action === "remove-fill") {
       const index = Number.parseInt(button.dataset.fillIndex, 10);
       if (node.fills.length > 1 && node.fills[index]) node.fills.splice(index, 1);
+      else if (node.fills[index]) node.fills[index].visible = false;
       syncLegacyFill(node);
     }
     if (action === "toggle-fill") {
@@ -958,6 +1118,7 @@ function bindInspector() {
       if (paint) paint.visible = !paint.visible;
     }
     if (action === "add-stroke") {
+      singleInspectorSectionState.stroke = true;
       node.strokes.push({
         id: `paint_${Date.now()}`,
         type: PAINT_TYPES.SOLID,
@@ -973,6 +1134,7 @@ function bindInspector() {
     if (action === "remove-stroke") {
       const index = Number.parseInt(button.dataset.strokeIndex, 10);
       if (node.strokes.length > 1 && node.strokes[index]) node.strokes.splice(index, 1);
+      else if (node.strokes[index]) node.strokes[index].visible = false;
       syncLegacyStroke(node);
     }
     if (action === "toggle-stroke") {
@@ -980,8 +1142,33 @@ function bindInspector() {
       if (paint) paint.visible = !paint.visible;
     }
     if (action === "toggle-shadow") {
+      singleInspectorSectionState.effects = true;
       node.shadow.enabled = !node.shadow.enabled;
       syncLegacyEffects(node);
+    }
+    if (action === "add-layer-blur") {
+      singleInspectorSectionState.effects = true;
+      let effect = node.effects.find((item) => item.type === "layer-blur");
+      if (!effect) {
+        effect = { id: `effect_${Date.now()}`, type: "layer-blur", visible: true, radius: 8 };
+        node.effects.push(effect);
+      } else {
+        effect.visible = true;
+        if (effect.radius <= 0) effect.radius = 8;
+      }
+      node.layerBlur = effect.radius;
+    }
+    if (action === "toggle-layer-blur") {
+      const effect = node.effects.find((item) => item.type === "layer-blur");
+      if (effect) {
+        effect.visible = !effect.visible;
+        node.layerBlur = effect.visible ? effect.radius : 0;
+      }
+    }
+    if (action === "remove-layer-blur") {
+      const effect = node.effects.find((item) => item.type === "layer-blur");
+      if (effect) effect.visible = false;
+      node.layerBlur = 0;
     }
     if (action === "image-fit") node.imageFit = button.dataset.value;
     if (action === "layout-mode" && node.type === NODE_TYPES.FRAME) {
@@ -1081,6 +1268,87 @@ function bindInspector() {
     const overrideProperty = componentOverridePropertyForAction(action);
     if (overrideProperty) recordComponentOverride(designDocument, currentPage(), node, overrideProperty);
     commitDocument();
+  });
+
+  elements.inspector.addEventListener("dblclick", (event) => {
+    const label = event.target.closest("[data-single-selection-kind]");
+    if (!label || selectedIds.length !== 1) return;
+    const node = getNode(currentPage(), selectedIds[0]);
+    if (!node) return;
+    singleInspectorRenamingId = node.id;
+    renderInspector();
+    requestAnimationFrame(() => {
+      const input = elements.inspector.querySelector("[data-single-name-editor]");
+      input?.focus();
+      input?.select();
+    });
+  });
+
+  elements.inspector.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && elements.inspector.querySelector("[data-inspector-popover]:not([hidden])")) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeSingleInspectorPopovers();
+      return;
+    }
+    const colorPlane = event.target.closest("[data-color-plane]");
+    if (colorPlane && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
+      event.preventDefault();
+      const picker = colorPlane.closest("[data-color-picker]");
+      if (!picker) return;
+      const paint = inspectorPickerPaint(picker);
+      if (!paint) return;
+      const hsv = hexToHsv(toHexColor(paint.color));
+      const step = event.shiftKey ? 0.1 : 0.01;
+      if (event.key === "ArrowLeft") hsv.s = clamp(hsv.s - step, 0, 1);
+      if (event.key === "ArrowRight") hsv.s = clamp(hsv.s + step, 0, 1);
+      if (event.key === "ArrowUp") hsv.v = clamp(hsv.v + step, 0, 1);
+      if (event.key === "ArrowDown") hsv.v = clamp(hsv.v - step, 0, 1);
+      updateInspectorPaintPicker(picker, "hsv", hsv);
+      commitLiveInspectorEdit("Change paint");
+      return;
+    }
+    const input = event.target.closest("[data-single-name-editor]");
+    if (!input || !["Enter", "Escape"].includes(event.key)) return;
+    event.preventDefault();
+    input.blur();
+  });
+
+  elements.inspector.addEventListener("focusout", (event) => {
+    if (!event.target.matches("[data-single-name-editor]") || singleInspectorRenamingId === null) return;
+    singleInspectorRenamingId = null;
+    renderInspector();
+  });
+
+  elements.inspector.addEventListener("pointerdown", (event) => {
+    const colorPlane = event.target.closest("[data-color-plane]");
+    if (!colorPlane || event.button !== 0) return;
+    event.preventDefault();
+    inspectorColorDrag = { plane: colorPlane, pointerId: event.pointerId };
+    colorPlane.setPointerCapture?.(event.pointerId);
+    updateInspectorColorPlane(colorPlane, event);
+  });
+
+  elements.inspector.addEventListener("pointermove", (event) => {
+    if (!inspectorColorDrag || inspectorColorDrag.pointerId !== event.pointerId) return;
+    updateInspectorColorPlane(inspectorColorDrag.plane, event);
+  });
+
+  const finishInspectorColorDrag = (event) => {
+    if (!inspectorColorDrag || inspectorColorDrag.pointerId !== event.pointerId) return;
+    if (inspectorColorDrag.plane.hasPointerCapture?.(event.pointerId)) {
+      inspectorColorDrag.plane.releasePointerCapture(event.pointerId);
+    }
+    inspectorColorDrag = null;
+    commitLiveInspectorEdit("Change paint");
+  };
+  elements.inspector.addEventListener("pointerup", finishInspectorColorDrag);
+  elements.inspector.addEventListener("pointercancel", finishInspectorColorDrag);
+
+  document.addEventListener("pointerdown", (event) => {
+    if (!event.target.closest("[data-inspector-popover], [data-inspector-action='toggle-inspector-popover']")) {
+      closeSingleInspectorPopovers();
+    }
   });
 
   document.querySelectorAll(".inspector-tab").forEach((tab) => {
@@ -3255,6 +3523,78 @@ function alignSelectedLayers(alignment) {
   showTransformFeedback(guide ? [guide] : []);
 }
 
+function alignSingleLayerToParent(node, alignment) {
+  const page = currentPage();
+  const parent = node.parentId ? getNode(page, node.parentId) : null;
+  if (!parent) {
+    showToast("Place this layer inside a frame or group to align it to a parent.");
+    return;
+  }
+  if (isNodeEffectivelyLocked(page, node) || !canMoveComponentNode(node)) {
+    showToast("Unlock the layer or select its instance root before aligning it.");
+    return;
+  }
+  if (isAutoLayoutChild(page, node)) {
+    showToast("Auto Layout controls this layer's position.");
+    return;
+  }
+  const bounds = getNodeAABB(node);
+  const parentBounds = getNodeAABB(parent);
+  let dx = 0;
+  let dy = 0;
+  if (alignment === ALIGNMENTS.LEFT) dx = parentBounds.x - bounds.x;
+  if (alignment === ALIGNMENTS.HORIZONTAL_CENTER) {
+    dx = parentBounds.x + parentBounds.width / 2 - (bounds.x + bounds.width / 2);
+  }
+  if (alignment === ALIGNMENTS.RIGHT) dx = parentBounds.x + parentBounds.width - (bounds.x + bounds.width);
+  if (alignment === ALIGNMENTS.TOP) dy = parentBounds.y - bounds.y;
+  if (alignment === ALIGNMENTS.VERTICAL_CENTER) {
+    dy = parentBounds.y + parentBounds.height / 2 - (bounds.y + bounds.height / 2);
+  }
+  if (alignment === ALIGNMENTS.BOTTOM) dy = parentBounds.y + parentBounds.height - (bounds.y + bounds.height);
+  if (Math.abs(dx) < 0.0001 && Math.abs(dy) < 0.0001) return;
+  for (const descendant of getNodesWithDescendants(page, [node.id])) {
+    descendant.x += dx;
+    descendant.y += dy;
+  }
+  syncGroupBounds(page);
+  recordComponentOverride(designDocument, page, node, "x");
+  recordComponentOverride(designDocument, page, node, "y");
+  commitDocument(`Align ${alignment.replaceAll("-", " ")} to parent`);
+}
+
+function rotateSingleLayerBy(node, delta) {
+  if (!Number.isFinite(delta)) return;
+  if (isComponentGeometryLocked(node, "rotation")) {
+    showToast("Rotate the main component, or detach this instance for a free transform.");
+    return;
+  }
+  if (isAutoLayoutFrame(node)) {
+    showToast("Remove Auto Layout before rotating this frame.");
+    return;
+  }
+  const previousRotation = node.rotation;
+  const nextRotation = normalizeDegrees(previousRotation + delta);
+  node.rotation = nextRotation;
+  if (isContainerNode(node)) {
+    const radians = (delta * Math.PI) / 180;
+    const cosine = Math.cos(radians);
+    const sine = Math.sin(radians);
+    const center = { x: node.x + node.width / 2, y: node.y + node.height / 2 };
+    for (const child of getNodesWithDescendants(currentPage(), [node.id])) {
+      if (child.id === node.id || isAutoBoundsContainer(child)) continue;
+      const childCenter = { x: child.x + child.width / 2, y: child.y + child.height / 2 };
+      const offsetX = childCenter.x - center.x;
+      const offsetY = childCenter.y - center.y;
+      child.x = center.x + offsetX * cosine - offsetY * sine - child.width / 2;
+      child.y = center.y + offsetX * sine + offsetY * cosine - child.height / 2;
+      child.rotation = normalizeDegrees(child.rotation + delta);
+    }
+  }
+  recordComponentOverride(designDocument, currentPage(), node, "rotation");
+  commitDocument(delta < 0 ? "Rotate layer left" : "Rotate layer right");
+}
+
 function distributeSelectedLayers(axis) {
   const selection = arrangementSelection(3);
   if (!selection.valid) {
@@ -3503,6 +3843,9 @@ function componentOverridePropertyForAction(action) {
     "remove-stroke": "strokes",
     "toggle-stroke": "strokes",
     "toggle-shadow": "shadow",
+    "add-layer-blur": "effects",
+    "toggle-layer-blur": "effects",
+    "remove-layer-blur": "effects",
     "image-fit": "imageFit",
     "layout-mode": "layoutMode",
     "primary-axis-align": "primaryAxisAlign",
@@ -3731,6 +4074,16 @@ function liveDocumentChange() {
   synchronizeDocumentGeometry();
   designDocument.updatedAt = new Date().toISOString();
   elements.saveState.textContent = "Saving…";
+  scheduleSave();
+  requestRender();
+}
+
+function commitLiveInspectorEdit(label = "Edit document") {
+  clearTransformFeedback(false);
+  clearDistanceMeasurements(false);
+  synchronizeDocumentGeometry();
+  designDocument.updatedAt = new Date().toISOString();
+  history.commit(designDocument, label);
   scheduleSave();
   requestRender();
 }
@@ -4142,6 +4495,38 @@ function addPageGuideAtViewportCenter(page, axis) {
   commitDocument(axis === GUIDE_AXES.VERTICAL ? "Add vertical guide" : "Add horizontal guide");
 }
 
+function closeSingleInspectorPopovers() {
+  for (const popover of elements.inspector.querySelectorAll("[data-inspector-popover]")) {
+    popover.hidden = true;
+  }
+  for (const trigger of elements.inspector.querySelectorAll("[data-inspector-action='toggle-inspector-popover']")) {
+    trigger.setAttribute("aria-expanded", "false");
+  }
+}
+
+function toggleSingleInspectorPopover(name, trigger) {
+  const popover = [...elements.inspector.querySelectorAll("[data-inspector-popover]")]
+    .find((candidate) => candidate.dataset.inspectorPopover === name);
+  if (!popover) return;
+  const shouldOpen = popover.hidden;
+  closeSingleInspectorPopovers();
+  popover.hidden = !shouldOpen;
+  if (shouldOpen && popover.matches(".paint-picker-popover")) {
+    const triggerBounds = trigger.getBoundingClientRect();
+    const pickerBounds = popover.getBoundingClientRect();
+    const gap = 10;
+    const left = Math.max(8, triggerBounds.left - pickerBounds.width - gap);
+    const top = clamp(
+      triggerBounds.top - Math.min(52, pickerBounds.height / 5),
+      8,
+      Math.max(8, window.innerHeight - pickerBounds.height - 8),
+    );
+    popover.style.left = `${Math.round(left)}px`;
+    popover.style.top = `${Math.round(top)}px`;
+  }
+  trigger.setAttribute("aria-expanded", String(shouldOpen));
+}
+
 function renderInspector() {
   if (!selectedIds.length) {
     const page = currentPage();
@@ -4149,7 +4534,7 @@ function renderInspector() {
       <div class="page-guide-row" data-page-guide-id="${escapeAttribute(guide.id)}">
         <span class="page-guide-axis" title="${guide.axis === GUIDE_AXES.VERTICAL ? "Vertical" : "Horizontal"} guide">${guide.axis === GUIDE_AXES.VERTICAL ? "V" : "H"}</span>
         <label class="field"><span class="field-label">${guide.axis.toUpperCase()}</span><input type="number" step="0.1" data-page-guide-position="${escapeAttribute(guide.id)}" value="${formatNumber(guide.position)}" aria-label="${guide.axis === GUIDE_AXES.VERTICAL ? "Vertical" : "Horizontal"} guide position" /></label>
-        <button class="icon-button small" data-canvas-aid-action="remove-guide" data-guide-id="${escapeAttribute(guide.id)}" title="Remove guide" aria-label="Remove guide">×</button>
+        ${inspectorIconButton("trash", "Remove guide", `data-canvas-aid-action="remove-guide" data-guide-id="${escapeAttribute(guide.id)}"`, { danger: true })}
       </div>`).join("");
     elements.inspector.innerHTML = `
       <div class="inspector-section">
@@ -4162,28 +4547,27 @@ function renderInspector() {
       </div>
       <div class="inspector-section">
         <p class="inspector-section-title">Canvas aids <span class="section-shortcut">Shift+R</span></p>
-        <div class="canvas-aid-toggle-grid">
-          <button class="icon-toggle ${page.rulersVisible ? "active" : ""}" data-canvas-aid-action="toggle-rulers" aria-pressed="${page.rulersVisible}">Rulers</button>
-          <button class="icon-toggle ${page.guidesVisible ? "active" : ""}" data-canvas-aid-action="toggle-guides" aria-pressed="${page.guidesVisible}">Guides</button>
-          <button class="icon-toggle ${page.gridVisible ? "active" : ""}" data-canvas-aid-action="toggle-grid" aria-pressed="${page.gridVisible}">Grid</button>
+        <div class="inspector-action-strip">
+          ${inspectorIconButton("ruler", "Toggle rulers", 'data-canvas-aid-action="toggle-rulers"', { selected: page.rulersVisible })}
+          ${inspectorIconButton("guides", "Toggle guides", 'data-canvas-aid-action="toggle-guides"', { selected: page.guidesVisible })}
+          ${inspectorIconButton("grid", "Toggle grid", 'data-canvas-aid-action="toggle-grid"', { selected: page.gridVisible })}
         </div>
         <div class="canvas-grid-controls">
           <label class="field"><span class="field-label">Grid</span><input type="number" min="1" max="10000" step="1" data-page-grid-size value="${formatNumber(page.gridSize)}" aria-label="Grid size" /></label>
-          <button class="icon-toggle ${page.snapToGrid ? "active" : ""}" data-canvas-aid-action="toggle-grid-snap" aria-pressed="${page.snapToGrid}">Snap to grid</button>
+          <div class="inspector-action-strip">${inspectorIconButton("snap", "Snap to grid", 'data-canvas-aid-action="toggle-grid-snap"', { selected: page.snapToGrid })}</div>
         </div>
         <p class="inspector-hint">Drag from either ruler to create a guide. Hold Alt while dragging for free positioning.</p>
       </div>
       <div class="inspector-section">
-        <p class="inspector-section-title">Guides <span class="section-shortcut">${page.guides.length}</span></p>
-        <div class="guide-action-grid">
-          <button class="button button-quiet" data-canvas-aid-action="add-vertical-guide">+ Vertical</button>
-          <button class="button button-quiet" data-canvas-aid-action="add-horizontal-guide">+ Horizontal</button>
-        </div>
+        <p class="inspector-section-title"><span>Guides <span class="section-shortcut">${page.guides.length}</span></span><span class="inspector-section-tools">
+          ${inspectorIconButton("guide-vertical", "Add vertical guide", 'data-canvas-aid-action="add-vertical-guide"')}
+          ${inspectorIconButton("guide-horizontal", "Add horizontal guide", 'data-canvas-aid-action="add-horizontal-guide"')}
+          ${inspectorIconButton("trash", "Clear all guides", 'data-canvas-aid-action="clear-guides"', { danger: true, disabled: !page.guides.length })}
+        </span></p>
         <div class="page-guide-list">
           ${visibleGuideRows || '<p class="inspector-hint guide-empty-hint">No page guides yet.</p>'}
         </div>
         ${page.guides.length > 24 ? `<p class="inspector-hint">Showing the first 24 of ${page.guides.length} guides.</p>` : ""}
-        <button class="button button-quiet clear-guides-button" data-canvas-aid-action="clear-guides" ${page.guides.length ? "" : "disabled"}>Clear all guides</button>
       </div>
       <div class="no-selection">
         <strong>Nothing selected</strong>
@@ -4238,23 +4622,23 @@ function renderInspector() {
           ${multiTransformField("W", "width", transformBounds?.width, resizeDisabled)}
           ${multiTransformField("H", "height", transformBounds?.height, resizeDisabled)}
         </div>
-        <div class="precision-action-grid">
-          <button class="icon-toggle" data-multi-transform-action="rotate" data-degrees="-90" title="Rotate selection left 90 degrees" aria-label="Rotate selection left 90 degrees" ${rotationDisabled}><span aria-hidden="true">↶</span> −90°</button>
-          <button class="icon-toggle" data-multi-transform-action="rotate" data-degrees="90" title="Rotate selection right 90 degrees" aria-label="Rotate selection right 90 degrees" ${rotationDisabled}><span aria-hidden="true">↷</span> +90°</button>
+        <div class="inspector-action-strip precision-action-grid">
+          ${inspectorIconButton("rotate-left", "Rotate selection left 90 degrees", 'data-multi-transform-action="rotate" data-degrees="-90"', { disabled: Boolean(rotationDisabled) })}
+          ${inspectorIconButton("rotate-right", "Rotate selection right 90 degrees", 'data-multi-transform-action="rotate" data-degrees="90"', { disabled: Boolean(rotationDisabled) })}
         </div>
         <p class="inspector-hint">${escapeHTML(transformHint)}</p>
       </div>
       <div class="inspector-section">
         <p class="inspector-section-title">Selection</p>
-        <div class="field-grid one-column">
-          <button class="button button-quiet" data-multi-action="group">Group selection</button>
-          <button class="button button-quiet" data-multi-action="duplicate">Duplicate selection</button>
+        <div class="inspector-action-row">
+          ${inspectorIconButton("group", "Group selection", 'data-multi-action="group"')}
+          ${inspectorIconButton("duplicate", "Duplicate selection", 'data-multi-action="duplicate"')}
         </div>
         <p class="inspector-hint">Canvas handles resize and rotate the whole selection. Shift constrains; Alt resizes from the center.</p>
       </div>
       ${canCreateVariants ? `<div class="inspector-section component-inspector">
         <p class="inspector-section-title">${variantSetIcon()} Component variants</p>
-        <button class="button button-primary" data-multi-action="create-variants" style="width: 100%">Combine as variant set</button>
+        <div class="inspector-action-row">${inspectorIconButton("variant", "Combine as variant set", 'data-multi-action="create-variants"', { primary: true })}</div>
         <p class="inspector-hint">Names like “Button / State=Hover, Size=Large” create matching variant controls automatically.</p>
       </div>` : ""}
       <div class="inspector-section">
@@ -4272,30 +4656,26 @@ function renderInspector() {
               ${arrangementIcon(alignment)}
             </button>`).join("")}
         </div>
-        <div class="distribution-control-grid">
-          <button class="icon-toggle" data-multi-action="distribute" data-axis="${DISTRIBUTION_AXES.HORIZONTAL}" title="Distribute horizontal spacing" ${distributionDisabled}>
-            ${arrangementIcon("distribute-horizontal")}<span>Horizontal</span>
-          </button>
-          <button class="icon-toggle" data-multi-action="distribute" data-axis="${DISTRIBUTION_AXES.VERTICAL}" title="Distribute vertical spacing" ${distributionDisabled}>
-            ${arrangementIcon("distribute-vertical")}<span>Vertical</span>
-          </button>
+        <div class="inspector-action-strip distribution-control-grid">
+          ${inspectorIconButton(arrangementIcon("distribute-horizontal"), "Distribute horizontal spacing", `data-multi-action="distribute" data-axis="${DISTRIBUTION_AXES.HORIZONTAL}"`, { disabled: Boolean(distributionDisabled) })}
+          ${inspectorIconButton(arrangementIcon("distribute-vertical"), "Distribute vertical spacing", `data-multi-action="distribute" data-axis="${DISTRIBUTION_AXES.VERTICAL}"`, { disabled: Boolean(distributionDisabled) })}
         </div>
         <p class="inspector-hint">${escapeHTML(arrangementHint)}</p>
       </div>
       <div class="inspector-section">
         <p class="inspector-section-title">Auto Layout</p>
-        <div class="icon-toggle-row">
-          <button class="icon-toggle" data-multi-action="auto-layout" data-mode="horizontal">Horizontal</button>
-          <button class="icon-toggle" data-multi-action="auto-layout" data-mode="vertical">Vertical</button>
+        <div class="inspector-action-strip">
+          ${inspectorIconButton("horizontal", "Horizontal Auto Layout", 'data-multi-action="auto-layout" data-mode="horizontal"')}
+          ${inspectorIconButton("vertical", "Vertical Auto Layout", 'data-multi-action="auto-layout" data-mode="vertical"')}
         </div>
         <p class="inspector-hint">Wraps the selection in a responsive frame. Shift+A infers the direction.</p>
       </div>
       <div class="inspector-section">
         <p class="inspector-section-title">Combine shapes</p>
-        <div class="boolean-operation-grid">
-          ${Object.values(BOOLEAN_OPERATIONS).map((operation) => `<button class="icon-toggle" data-multi-action="boolean" data-operation="${operation}">${capitalize(operation)}</button>`).join("")}
+        <div class="inspector-action-strip">
+          ${Object.values(BOOLEAN_OPERATIONS).map((operation) => inspectorIconButton(operation, `${capitalize(operation)} selection`, `data-multi-action="boolean" data-operation="${operation}"`)).join("")}
+          ${inspectorIconButton("mask", "Use bottom layer as mask", 'data-multi-action="mask"')}
         </div>
-        <button class="button button-quiet" data-multi-action="mask" style="width: 100%; margin-top: 8px">Use bottom layer as mask</button>
         <p class="inspector-hint">Operations preserve every source layer. The bottom layer is the Boolean base or mask source.</p>
       </div>`;
     elements.inspector.querySelector("[data-multi-action='group']")?.addEventListener("click", groupSelection);
@@ -4347,33 +4727,17 @@ function renderInspector() {
   const managedHeight = (managedPosition && node.layoutSizingVertical === LAYOUT_SIZING.FILL) ||
     (isAutoLayoutFrame(node) && node.layoutSizingVertical === LAYOUT_SIZING.HUG);
   elements.inspector.innerHTML = `
-    <div class="selection-summary">
-      <span class="selection-summary-icon">${componentLayerIcon(node)}</span>
-      <input data-property="name" value="${escapeAttribute(node.name)}" aria-label="Layer name" />
-    </div>
+    ${singleSelectionHeader(node)}
 
     ${componentInspector(node)}
 
-    ${node.type !== NODE_TYPES.GROUP ? `<section class="inspector-section">
-      <p class="inspector-section-title">Position</p>
-      <div class="field-grid">
-        ${numberField("X", "x", node.x, managedPosition || instancePositionLocked)}
-        ${numberField("Y", "y", node.y, managedPosition || instancePositionLocked)}
-        ${numberField("W", "width", node.width, managedWidth || isLinkedInstance)}
-        ${numberField("H", "height", node.height, managedHeight || isLinkedInstance)}
-        ${numberField("↻", "rotation", node.rotation, isAutoLayoutFrame(node) || isLinkedInstance)}
-        ${numberField("R", "cornerRadius", node.cornerRadius, [NODE_TYPES.ELLIPSE, NODE_TYPES.LINE, NODE_TYPES.TEXT, NODE_TYPES.VECTOR, NODE_TYPES.BOOLEAN, NODE_TYPES.MASK].includes(node.type))}
-      </div>
-      ${!isAutoBoundsContainer(node) ? `<div class="layout-control-block">
-        <span class="layout-control-label">Size limits</span>
-        <div class="field-grid">
-          ${numberField("Min W", "minWidth", node.minWidth, isLinkedInstance)}
-          ${numberField("Max W", "maxWidth", node.maxWidth, isLinkedInstance)}
-          ${numberField("Min H", "minHeight", node.minHeight, isLinkedInstance)}
-          ${numberField("Max H", "maxHeight", node.maxHeight, isLinkedInstance)}
-        </div>
-      </div>` : ""}
-    </section>` : ""}
+    ${singleTransformInspector(node, {
+      isLinkedInstance,
+      instancePositionLocked,
+      managedPosition,
+      managedWidth,
+      managedHeight,
+    })}
 
     ${node.type === NODE_TYPES.FRAME ? autoLayoutInspector(node) : ""}
     ${layoutRelationshipInspector(node)}
@@ -4384,36 +4748,252 @@ function renderInspector() {
     ${node.type === NODE_TYPES.VECTOR ? vectorInspector(node) : ""}
     ${node.type === NODE_TYPES.BOOLEAN ? booleanInspector(node) : ""}
 
+    ${![NODE_TYPES.GROUP, NODE_TYPES.MASK].includes(node.type) ? singleAppearanceInspector(node, isLinkedInstance) : ""}
+
     ${node.type === NODE_TYPES.GROUP ? `
       <section class="inspector-section">
         <p class="inspector-section-title">Group</p>
         <label class="field"><span class="field-label">%</span><input type="number" data-property="opacity" data-value-type="number" data-scale="0.01" min="0" max="100" value="${Math.round(node.opacity * 100)}" aria-label="Group opacity" /></label>
-        <button class="button button-quiet" data-inspector-action="ungroup" style="width: 100%; margin-top: 8px">Ungroup layers</button>
-      </section>` : node.type === NODE_TYPES.MASK ? maskInspector(node) : node.type === NODE_TYPES.LINE || node.type === NODE_TYPES.VECTOR && !node.vectorClosed ? "" : `<section class="inspector-section">
-      <p class="inspector-section-title">Fill</p>
-      ${fillInspector(node)}
-    </section>`}
+        <div class="inspector-action-row" style="margin-top: 8px">${inspectorIconButton("release", "Ungroup layers", 'data-inspector-action="ungroup"')}</div>
+      </section>` : node.type === NODE_TYPES.MASK ? maskInspector(node) : node.type === NODE_TYPES.LINE || node.type === NODE_TYPES.VECTOR && !node.vectorClosed ? "" : singleInspectorSection(
+        "fill",
+        "Fill",
+        fillInspector(node),
+        `${inspectorIconButton("styles", "Open fill settings", 'data-inspector-action="toggle-paint-settings"')}${inspectorIconButton("add", "Add fill layer", 'data-inspector-action="add-fill"', { disabled: node.fills.length >= 8 })}`,
+      )}
 
     ${![NODE_TYPES.TEXT, NODE_TYPES.GROUP, NODE_TYPES.MASK].includes(node.type) ? `
-      <section class="inspector-section">
-        <p class="inspector-section-title">Stroke</p>
-        ${strokeInspector(node)}
-      </section>` : ""}
+      ${singleInspectorSection(
+        "stroke",
+        "Stroke",
+        strokeInspector(node),
+        inspectorIconButton("add", "Add stroke layer", 'data-inspector-action="add-stroke"', { disabled: node.strokes.length >= 8 }),
+      )}` : ""}
 
     ${![NODE_TYPES.GROUP, NODE_TYPES.MASK].includes(node.type) ? shadowInspector(node) : ""}
+    ${singleExportInspector(node)}`;
+}
 
-    <section class="inspector-section">
-      <p class="inspector-section-title">Layer</p>
-      <div class="icon-toggle-row">
-        <button class="icon-toggle ${node.visible ? "active" : ""}" data-inspector-action="toggle-visible">${node.visible ? "Visible" : "Hidden"}</button>
-        <button class="icon-toggle ${node.locked ? "active" : ""}" data-inspector-action="toggle-lock">${node.locked ? "Locked" : "Unlocked"}</button>
+function singleSelectionHeader(node) {
+  const canCreateComponent = !isMainComponent(node) && !isComponentInstanceMember(node);
+  const canFlatten = node.type === NODE_TYPES.BOOLEAN;
+  const editingName = singleInspectorRenamingId === node.id;
+  const booleanItems = [
+    [BOOLEAN_OPERATIONS.UNION, "Union", "Alt+Shift+U"],
+    [BOOLEAN_OPERATIONS.SUBTRACT, "Subtract", "Alt+Shift+S"],
+    [BOOLEAN_OPERATIONS.INTERSECT, "Intersect", "Alt+Shift+I"],
+    [BOOLEAN_OPERATIONS.EXCLUDE, "Exclude", "Alt+Shift+E"],
+  ].map(([operation, label, shortcut]) => inspectorMenuItem(
+    operation,
+    label,
+    `data-inspector-action="apply-boolean" data-value="${operation}"`,
+    shortcut,
+  )).join("");
+  return `
+    <div class="selection-summary single-selection-summary">
+      ${editingName
+        ? `<input class="single-selection-name-editor" data-single-name-editor data-property="name" value="${escapeAttribute(node.name)}" aria-label="Layer name" />`
+        : `<strong class="single-selection-kind" data-single-selection-kind title="${escapeAttribute(node.name)} · Double-click to rename">${escapeHTML(singleSelectionKindLabel(node))}</strong>
+          <input class="single-selection-name-proxy" data-property="name" value="${escapeAttribute(node.name)}" aria-hidden="true" tabindex="-1" hidden />`}
+      <div class="single-selection-actions">
+        ${inspectorIconButton(componentIcon(), "Create component", 'data-inspector-action="create-component"', { disabled: !canCreateComponent, shortcut: "Ctrl+Alt+K" })}
+        ${inspectorIconButton("mask", "Use selection as mask", 'data-inspector-action="mask-selection"', { shortcut: "Ctrl+Alt+M" })}
+        ${inspectorIconButton("duplicate", "Duplicate layer", 'data-inspector-action="duplicate-selection"', { shortcut: "Ctrl+D" })}
+        ${inspectorIconButton("union", "Boolean operations", 'data-inspector-action="toggle-inspector-popover" data-popover="boolean" aria-expanded="false"', { className: "has-menu" })}
+        ${inspectorIconButton("more", "Layer actions", 'data-inspector-action="toggle-inspector-popover" data-popover="layer" aria-expanded="false"')}
       </div>
-      <div class="icon-toggle-row" style="margin-top: 6px">
-        <button class="icon-toggle" data-inspector-action="send-backward">Send backward</button>
-        <button class="icon-toggle" data-inspector-action="bring-forward">Bring forward</button>
+      <div class="single-inspector-popover header-inspector-popover" data-inspector-popover="boolean" role="menu" hidden>
+        ${booleanItems}
+        <div class="inspector-menu-separator"></div>
+        ${inspectorMenuItem("flatten", "Flatten", 'data-inspector-action="flatten-boolean"', "Alt+Shift+F", { disabled: !canFlatten })}
       </div>
-      <button class="button button-quiet" data-inspector-action="delete" style="width: 100%; margin-top: 8px; color: #fca5a5">Delete layer</button>
+      <div class="single-inspector-popover header-inspector-popover" data-inspector-popover="layer" role="menu" hidden>
+        ${inspectorMenuItem("edit", "Rename layer", 'data-inspector-action="rename-layer"', "F2")}
+        ${inspectorMenuItem("duplicate", "Duplicate", 'data-inspector-action="duplicate-selection"', "Ctrl+D")}
+        ${inspectorMenuItem("forward", "Bring forward", 'data-inspector-action="bring-forward"', "]")}
+        ${inspectorMenuItem("backward", "Send backward", 'data-inspector-action="send-backward"', "[")}
+        <div class="inspector-menu-separator"></div>
+        ${inspectorMenuItem(node.visible ? "eye-off" : "eye", node.visible ? "Hide layer" : "Show layer", 'data-inspector-action="toggle-visible"')}
+        ${inspectorMenuItem(node.locked ? "unlock" : "lock", node.locked ? "Unlock layer" : "Lock layer", 'data-inspector-action="toggle-lock"')}
+        ${inspectorMenuItem("trash", "Delete", 'data-inspector-action="delete"', "Delete", { danger: true })}
+      </div>
+    </div>`;
+}
+
+function singleSelectionKindLabel(node) {
+  if (isMainComponent(node)) return "Component";
+  if (isComponentInstanceRoot(node)) return "Instance";
+  if (node.type === NODE_TYPES.LINE && [node.arrowStart, node.arrowEnd].some((value) => value && value !== ARROWHEADS.NONE)) {
+    return "Arrow";
+  }
+  return {
+    [NODE_TYPES.FRAME]: "Frame",
+    [NODE_TYPES.GROUP]: "Group",
+    [NODE_TYPES.BOOLEAN]: "Boolean",
+    [NODE_TYPES.MASK]: "Mask",
+    [NODE_TYPES.RECTANGLE]: "Rectangle",
+    [NODE_TYPES.ELLIPSE]: "Ellipse",
+    [NODE_TYPES.LINE]: "Line",
+    [NODE_TYPES.POLYGON]: "Polygon",
+    [NODE_TYPES.STAR]: "Star",
+    [NODE_TYPES.VECTOR]: "Vector",
+    [NODE_TYPES.TEXT]: "Text",
+    [NODE_TYPES.IMAGE]: "Image",
+  }[node.type] ?? capitalize(node.type);
+}
+
+function singleTransformInspector(node, state) {
+  if (node.type === NODE_TYPES.GROUP) return "";
+  const parent = node.parentId ? getNode(currentPage(), node.parentId) : null;
+  const geometryLocked = isNodeEffectivelyLocked(currentPage(), node) || state.isLinkedInstance;
+  const positionDisabled = state.managedPosition || state.instancePositionLocked || geometryLocked;
+  const rotationDisabled = isAutoLayoutFrame(node) || geometryLocked;
+  const alignmentDisabled = !parent || positionDisabled;
+  const dimensionLockDisabled = state.managedWidth || state.managedHeight || state.isLinkedInstance || isAutoBoundsContainer(node);
+  const alignments = [
+    [ALIGNMENTS.LEFT, "Align left to parent"],
+    [ALIGNMENTS.HORIZONTAL_CENTER, "Align horizontal centers to parent"],
+    [ALIGNMENTS.RIGHT, "Align right to parent"],
+    [ALIGNMENTS.TOP, "Align top to parent"],
+    [ALIGNMENTS.VERTICAL_CENTER, "Align vertical centers to parent"],
+    [ALIGNMENTS.BOTTOM, "Align bottom to parent"],
+  ];
+  return `
+    <section class="inspector-section single-property-section" data-single-panel="position">
+      <p class="inspector-section-title">Position</p>
+      <span class="single-property-label">Alignment</span>
+      <div class="single-alignment-trigger">
+        ${inspectorIconButton(
+          arrangementIcon(ALIGNMENTS.LEFT),
+          parent ? "Align within parent" : "Place inside a frame to align",
+          'data-inspector-action="toggle-inspector-popover" data-popover="alignment" aria-expanded="false"',
+          { disabled: alignmentDisabled, className: "has-menu" },
+        )}
+      </div>
+      <div class="single-inspector-popover alignment-inspector-popover" data-inspector-popover="alignment" hidden>
+        <span class="inspector-popover-label">Align to parent</span>
+        <div class="single-alignment-grid">
+          ${alignments.map(([alignment, label]) => inspectorIconButton(
+            arrangementIcon(alignment),
+            label,
+            `data-inspector-action="align-to-parent" data-value="${alignment}"`,
+          )).join("")}
+        </div>
+      </div>
+      <span class="single-property-label">Position</span>
+      <div class="field-grid">
+        ${numberField("X", "x", node.x, positionDisabled)}
+        ${numberField("Y", "y", node.y, positionDisabled)}
+      </div>
+      <span class="single-property-label single-property-label-spaced">Rotation</span>
+      <div class="rotation-control-row">
+        ${numberField("°", "rotation", node.rotation, rotationDisabled)}
+        <div class="inspector-action-strip compact-action-strip">
+          ${inspectorIconButton("reset", "Reset rotation", 'data-inspector-action="reset-rotation"', { disabled: rotationDisabled })}
+          ${inspectorIconButton("rotate-left", "Rotate 90° left", 'data-inspector-action="rotate-by" data-value="-90"', { disabled: rotationDisabled })}
+          ${inspectorIconButton("rotate-right", "Rotate 90° right", 'data-inspector-action="rotate-by" data-value="90"', { disabled: rotationDisabled })}
+        </div>
+      </div>
+    </section>
+    <section class="inspector-section single-property-section" data-single-panel="layout">
+      <p class="inspector-section-title">Layout</p>
+      <span class="single-property-label">Dimensions</span>
+      <div class="dimensions-control-row">
+        <div class="field-grid">
+          ${numberField("W", "width", node.width, state.managedWidth || state.isLinkedInstance)}
+          ${numberField("H", "height", node.height, state.managedHeight || state.isLinkedInstance)}
+        </div>
+        ${inspectorIconButton(
+          aspectRatioIcon(singleTransformAspectLocked),
+          singleTransformAspectLocked ? "Unlock aspect ratio" : "Lock aspect ratio",
+          'data-inspector-action="toggle-single-aspect"',
+          { selected: singleTransformAspectLocked, disabled: dimensionLockDisabled },
+        )}
+      </div>
+      ${node.type === NODE_TYPES.FRAME && !isAutoBoundsContainer(node) ? `<details class="size-limits-disclosure">
+        <summary>Size limits</summary>
+        <div class="field-grid">
+          ${numberField("Min W", "minWidth", node.minWidth, state.isLinkedInstance)}
+          ${numberField("Max W", "maxWidth", node.maxWidth, state.isLinkedInstance)}
+          ${numberField("Min H", "minHeight", node.minHeight, state.isLinkedInstance)}
+          ${numberField("Max H", "maxHeight", node.maxHeight, state.isLinkedInstance)}
+        </div>
+      </details>` : ""}
     </section>`;
+}
+
+function singleAppearanceInspector(node, isLinkedInstance) {
+  const cornerDisabled = [
+    NODE_TYPES.ELLIPSE,
+    NODE_TYPES.LINE,
+    NODE_TYPES.TEXT,
+    NODE_TYPES.VECTOR,
+    NODE_TYPES.BOOLEAN,
+    NODE_TYPES.MASK,
+  ].includes(node.type);
+  return `
+    <section class="inspector-section single-property-section" data-single-panel="appearance">
+      <p class="inspector-section-title"><span>Appearance</span><span class="inspector-section-tools">
+        ${inspectorIconButton(node.visible ? "eye" : "eye-off", node.visible ? "Hide layer" : "Show layer", 'data-inspector-action="toggle-visible"')}
+        ${inspectorIconButton("droplet", "Open paint controls", 'data-inspector-action="focus-fill"')}
+      </span></p>
+      <div class="single-field-captions"><span>Opacity</span><span>Corner radius</span></div>
+      <div class="field-grid">
+        <label class="field icon-field"><span class="field-icon" title="Opacity">${inspectorActionIcon("checker")}</span><input type="number" data-property="opacity" data-value-type="number" data-scale="0.01" min="0" max="100" value="${Math.round(node.opacity * 100)}" aria-label="Layer opacity" /><span class="field-suffix">%</span></label>
+        <label class="field icon-field ${cornerDisabled || isLinkedInstance ? "disabled" : ""}"><span class="field-icon" title="Corner radius">${inspectorActionIcon("corner-radius")}</span><input type="number" data-property="cornerRadius" data-value-type="number" step="1" min="0" value="${formatNumber(node.cornerRadius)}" aria-label="Corner radius" ${cornerDisabled || isLinkedInstance ? "disabled" : ""} /></label>
+      </div>
+    </section>`;
+}
+
+function singleInspectorSection(name, title, body, tools = "", popover = "") {
+  const open = Boolean(singleInspectorSectionState[name]);
+  return `
+    <section class="inspector-section single-inspector-section ${open ? "open" : ""}" data-single-section="${escapeAttribute(name)}">
+      <div class="inspector-section-title">
+        <button class="inspector-section-disclosure" data-inspector-action="toggle-single-section" data-section="${escapeAttribute(name)}" data-icon-audit="ignore" aria-expanded="${open}" aria-label="${open ? "Collapse" : "Expand"} ${escapeAttribute(title)}">
+          ${inspectorActionIcon("chevron")}<span>${escapeHTML(title)}</span>
+        </button>
+        <span class="inspector-section-tools">${tools}</span>
+      </div>
+      ${popover}
+      <div class="single-inspector-section-content" ${open ? "" : "hidden"}>${body}</div>
+    </section>`;
+}
+
+function singleExportInspector(node) {
+  const scaleDisabled = singleExportFormat === "svg";
+  const dimensions = `${formatNumber(node.width)} × ${formatNumber(node.height)}`;
+  return singleInspectorSection(
+    "export",
+    "Export",
+    `<div class="single-export-controls">
+      <label class="field export-scale-field"><select data-single-export-scale aria-label="Export scale" ${scaleDisabled ? "disabled" : ""}>
+        ${[0.5, 1, 2, 3, 4].map((scale) => `<option value="${scale}" ${singleExportScale === scale ? "selected" : ""}>${scale}x</option>`).join("")}
+      </select></label>
+      <label class="field"><select data-single-export-format aria-label="Export format">
+        <option value="png" ${singleExportFormat === "png" ? "selected" : ""}>PNG</option>
+        <option value="svg" ${singleExportFormat === "svg" ? "selected" : ""}>SVG</option>
+      </select></label>
+      ${inspectorIconButton("more", "More export options", 'data-inspector-action="toggle-inspector-popover" data-popover="export" aria-expanded="false"')}
+      ${inspectorIconButton("minus", "Remove export setting", 'data-inspector-action="remove-export-settings"')}
+    </div>
+    <button class="inspector-export-button" data-inspector-action="export-selection" data-icon-audit="ignore" aria-label="Export ${escapeAttribute(node.name)}">
+      ${inspectorActionIcon("export")}<span>Export ${escapeHTML(node.name)}</span>
+    </button>
+    <details class="export-preview-disclosure"><summary>Preview</summary><span>${escapeHTML(dimensions)} · ${singleExportFormat.toUpperCase()}</span></details>`,
+    inspectorIconButton("add", "Show export settings", 'data-inspector-action="open-export-settings"'),
+    `<div class="single-inspector-popover section-inspector-popover" data-inspector-popover="export" role="menu" hidden>
+      <p class="inspector-popover-note">PNG exports respect the selected scale. SVG remains resolution independent.</p>
+    </div>`,
+  );
+}
+
+function inspectorMenuItem(icon, label, attributes, shortcut = "", options = {}) {
+  const classes = ["inspector-menu-item"];
+  if (options.danger) classes.push("danger");
+  return `<button class="${classes.join(" ")}" ${attributes} data-icon-audit="ignore" title="${escapeAttribute(label)}" aria-label="${escapeAttribute(label)}" ${options.disabled ? "disabled" : ""}>
+    ${inspectorActionIcon(icon)}<span>${escapeHTML(label)}</span>${shortcut ? `<kbd>${escapeHTML(shortcut)}</kbd>` : ""}
+  </button>`;
 }
 
 function componentInspector(node) {
@@ -4429,7 +5009,7 @@ function componentInspector(node) {
       <p class="inspector-section-title">${componentSet ? variantSetIcon() : componentIcon()} ${componentSet ? "Variant component" : "Main component"}</p>
       <div class="component-inspector-summary"><strong>${escapeHTML(componentSet?.name ?? component.name)}</strong><span>${count} linked instance${count === 1 ? "" : "s"}</span></div>
       ${componentSet ? `<div class="component-variant-summary"><span>${escapeHTML(component.name)}</span><small>${escapeHTML(variantLabel)}</small></div>
-        <button class="button button-quiet" data-inspector-action="dissolve-component-set" style="width: 100%; margin-top: 8px">Dissolve variant set</button>` : ""}
+        <div class="inspector-action-row" style="margin-top: 8px">${inspectorIconButton("release", "Dissolve variant set", 'data-inspector-action="dissolve-component-set"')}</div>` : ""}
       <p class="inspector-hint">Changes to this source update every linked instance.</p>
     </section>`;
   }
@@ -4437,7 +5017,7 @@ function componentInspector(node) {
     return `<section class="inspector-section component-inspector">
       <p class="inspector-section-title">${componentIcon()} Main component source</p>
       <div class="component-inspector-summary"><strong>${escapeHTML(component.name)}</strong><span>Shared layer</span></div>
-      <button class="button button-quiet" data-inspector-action="reveal-main-component" style="width: 100%; margin-top: 8px">Select main component</button>
+      <div class="inspector-action-row" style="margin-top: 8px">${inspectorIconButton("reveal", "Select main component", 'data-inspector-action="reveal-main-component"')}</div>
     </section>`;
   }
   const root = getComponentInstanceRoot(currentPage(), node);
@@ -4460,14 +5040,14 @@ function componentInspector(node) {
       <div class="component-overrides-heading"><span>Overrides</span><small>${overrides.length}</small></div>
       ${overrides.map((entry) => `<div class="component-override-row">
         <span class="component-override-copy"><strong title="${escapeAttribute(entry.nodeName)}">${escapeHTML(entry.nodeName)}</strong><small title="${escapeAttribute(formatComponentOverrideValue(entry.value))}">${escapeHTML(componentPropertyLabel(entry.property))} · ${escapeHTML(formatComponentOverrideValue(entry.value))}</small></span>
-        <button class="component-override-reset" data-inspector-action="reset-component-override" data-source-node-id="${escapeAttribute(entry.sourceNodeId)}" data-component-property="${escapeAttribute(entry.property)}" title="Reset ${escapeAttribute(componentPropertyLabel(entry.property))} override" aria-label="Reset ${escapeAttribute(componentPropertyLabel(entry.property))} override on ${escapeAttribute(entry.nodeName)}">↶</button>
+        ${inspectorIconButton("reset", `Reset ${componentPropertyLabel(entry.property)} override on ${entry.nodeName}`, `data-inspector-action="reset-component-override" data-source-node-id="${escapeAttribute(entry.sourceNodeId)}" data-component-property="${escapeAttribute(entry.property)}"`, { className: "component-override-reset" })}
       </div>`).join("")}
     </div>` : ""}
-    <div class="field-grid one-column" style="margin-top: 8px">
-      ${root.id === node.id ? "" : '<button class="button button-quiet" data-inspector-action="select-component-instance">Select instance</button>'}
-      <button class="button button-quiet" data-inspector-action="reveal-main-component">Go to main component</button>
-      <button class="button button-quiet" data-inspector-action="reset-component-overrides" ${overridden ? "" : "disabled"}>Reset all overrides</button>
-      <button class="button button-quiet" data-inspector-action="detach-component-instance">Detach instance</button>
+    <div class="inspector-action-row" style="margin-top: 8px">
+      ${root.id === node.id ? "" : inspectorIconButton("reveal", "Select component instance", 'data-inspector-action="select-component-instance"')}
+      ${inspectorIconButton("reveal", "Go to main component", 'data-inspector-action="reveal-main-component"')}
+      ${inspectorIconButton("reset", "Reset all overrides", 'data-inspector-action="reset-component-overrides"', { disabled: !overridden })}
+      ${inspectorIconButton("detach", "Detach instance", 'data-inspector-action="detach-component-instance"')}
     </div>
     <p class="inspector-hint">Visual and content edits become local overrides. Geometry stays linked until you detach.</p>
   </section>`;
@@ -4527,7 +5107,7 @@ function autoLayoutInspector(frame) {
   return `
     <section class="inspector-section" data-auto-layout-controls>
       <p class="inspector-section-title">Auto Layout <span class="section-shortcut">Shift+A</span></p>
-      <div class="icon-toggle-row">
+      <div class="inspector-action-strip">
         ${layoutModeButton(frame, LAYOUT_MODES.NONE, "Off")}
         ${layoutModeButton(frame, LAYOUT_MODES.HORIZONTAL, "Horizontal")}
         ${layoutModeButton(frame, LAYOUT_MODES.VERTICAL, "Vertical")}
@@ -4544,7 +5124,7 @@ function autoLayoutInspector(frame) {
         </div>
         <div class="layout-control-block">
           <span class="layout-control-label">Flow behavior</span>
-          <button class="icon-toggle ${frame.layoutWrap ? "active" : ""}" data-inspector-action="layout-wrap">${frame.layoutWrap ? "Wrap enabled" : "No wrap"}</button>
+          <div class="inspector-action-row">${inspectorIconButton("wrap", frame.layoutWrap ? "Disable wrapping" : "Enable wrapping", 'data-inspector-action="layout-wrap"', { selected: frame.layoutWrap })}</div>
         </div>
         <div class="layout-control-block">
           <span class="layout-control-label">Padding · top, right, bottom, left</span>
@@ -4557,17 +5137,25 @@ function autoLayoutInspector(frame) {
         </div>
         <div class="layout-control-block">
           <span class="layout-control-label">Primary axis</span>
-          <div class="icon-toggle-row compact-toggle-row">
-            ${Object.values(PRIMARY_AXIS_ALIGNS).map((align) => `
-              <button class="icon-toggle ${frame.primaryAxisAlign === align ? "active" : ""}" data-inspector-action="primary-axis-align" data-value="${align}">${align === PRIMARY_AXIS_ALIGNS.SPACE_BETWEEN ? "Space" : capitalize(align)}</button>`).join("")}
+          <div class="inspector-action-strip compact-toggle-row">
+            ${Object.values(PRIMARY_AXIS_ALIGNS).map((align) => inspectorIconButton(
+              align === PRIMARY_AXIS_ALIGNS.SPACE_BETWEEN ? "align-space" : `align-${align}`,
+              align === PRIMARY_AXIS_ALIGNS.SPACE_BETWEEN ? "Space between" : `${capitalize(align)} primary-axis alignment`,
+              `data-inspector-action="primary-axis-align" data-value="${align}"`,
+              { selected: frame.primaryAxisAlign === align },
+            )).join("")}
           </div>
         </div>
         <div class="layout-control-block">
           <span class="layout-control-label">Counter axis</span>
-          <div class="icon-toggle-row compact-toggle-row">
+          <div class="inspector-action-strip compact-toggle-row">
             ${Object.values(COUNTER_AXIS_ALIGNS).filter((align) =>
-              align !== COUNTER_AXIS_ALIGNS.BASELINE || frame.layoutMode === LAYOUT_MODES.HORIZONTAL).map((align) => `
-              <button class="icon-toggle ${frame.counterAxisAlign === align ? "active" : ""}" data-inspector-action="counter-axis-align" data-value="${align}">${capitalize(align)}</button>`).join("")}
+              align !== COUNTER_AXIS_ALIGNS.BASELINE || frame.layoutMode === LAYOUT_MODES.HORIZONTAL).map((align) => inspectorIconButton(
+              align === COUNTER_AXIS_ALIGNS.BASELINE ? "baseline" : `align-${align}`,
+              `${capitalize(align)} counter-axis alignment`,
+              `data-inspector-action="counter-axis-align" data-value="${align}"`,
+              { selected: frame.counterAxisAlign === align },
+            )).join("")}
           </div>
         </div>
         <p class="inspector-hint">Visible flow children follow their Layers order. Wrapping creates rows or columns within the frame bounds; hidden and absolute children stay outside the flow.</p>` : `
@@ -4586,9 +5174,9 @@ function layoutRelationshipInspector(node) {
   return `
     <section class="inspector-section" data-layout-child-controls>
       <p class="inspector-section-title">Auto Layout child</p>
-      <div class="icon-toggle-row">
-        <button class="icon-toggle ${absolute ? "" : "active"}" data-inspector-action="layout-positioning" data-value="auto">Flow</button>
-        <button class="icon-toggle ${absolute ? "active" : ""}" data-inspector-action="layout-positioning" data-value="absolute">Absolute</button>
+      <div class="inspector-action-strip">
+        ${inspectorIconButton("flow", "Auto Layout flow position", 'data-inspector-action="layout-positioning" data-value="auto"', { selected: !absolute })}
+        ${inspectorIconButton("absolute", "Absolute position", 'data-inspector-action="layout-positioning" data-value="absolute"', { selected: absolute })}
       </div>
       ${!absolute && !autoBounds && !sizingAlreadyShown ? `
         <div class="layout-control-block">
@@ -4628,7 +5216,10 @@ function constraintOptions(values, selected) {
 }
 
 function layoutModeButton(frame, mode, label) {
-  return `<button class="icon-toggle ${frame.layoutMode === mode ? "active" : ""}" data-inspector-action="layout-mode" data-value="${mode}">${label}</button>`;
+  const icon = mode === LAYOUT_MODES.NONE ? "off" : mode === LAYOUT_MODES.HORIZONTAL ? "horizontal" : "vertical";
+  return inspectorIconButton(icon, `${label} Auto Layout`, `data-inspector-action="layout-mode" data-value="${mode}"`, {
+    selected: frame.layoutMode === mode,
+  });
 }
 
 function layoutSizingControl(node, axis, allowHug, allowFill) {
@@ -4641,8 +5232,13 @@ function layoutSizingControl(node, axis, allowHug, allowFill) {
   return `
     <div class="layout-axis-row">
       <span>${axis === "horizontal" ? "Width" : "Height"}</span>
-      <div class="icon-toggle-row">
-        ${options.map((sizing) => `<button class="icon-toggle ${node[property] === sizing ? "active" : ""}" data-inspector-action="${action}" data-value="${sizing}">${capitalize(sizing)}</button>`).join("")}
+      <div class="inspector-action-strip">
+        ${options.map((sizing) => inspectorIconButton(
+          sizing === LAYOUT_SIZING.FIXED ? "fixed" : sizing === LAYOUT_SIZING.HUG ? "hug" : "fill-size",
+          `${capitalize(sizing)} ${axis} sizing`,
+          `data-inspector-action="${action}" data-value="${sizing}"`,
+          { selected: node[property] === sizing },
+        )).join("")}
       </div>
     </div>`;
 }
@@ -4656,13 +5252,19 @@ function booleanInspector(node) {
   return `
     <section class="inspector-section">
       <p class="inspector-section-title">Boolean operation</p>
-      <div class="boolean-operation-grid" data-boolean-controls>
-        ${Object.values(BOOLEAN_OPERATIONS).map((operation) => `
-          <button class="icon-toggle ${node.booleanOperation === operation ? "active" : ""}" data-inspector-action="boolean-operation" data-value="${operation}">${capitalize(operation)}</button>`).join("")}
+      <div class="inspector-action-strip" data-boolean-controls>
+        ${Object.values(BOOLEAN_OPERATIONS).map((operation) => inspectorIconButton(
+          operation,
+          `${capitalize(operation)} Boolean operation`,
+          `data-inspector-action="boolean-operation" data-value="${operation}"`,
+          { selected: node.booleanOperation === operation },
+        )).join("")}
       </div>
       <div class="composite-summary"><span>${sourceCount} editable source${sourceCount === 1 ? "" : "s"}</span><span>Non-destructive</span></div>
-      <button class="button button-primary" data-inspector-action="flatten-boolean" style="width: 100%; margin-top: 8px">Flatten to vector</button>
-      <button class="button button-quiet" data-inspector-action="ungroup" style="width: 100%; margin-top: 8px">Release Boolean sources</button>
+      <div class="inspector-action-row" style="margin-top: 8px">
+        ${inspectorIconButton("flatten", "Flatten Boolean to vector", 'data-inspector-action="flatten-boolean"', { primary: true })}
+        ${inspectorIconButton("release", "Release Boolean sources", 'data-inspector-action="ungroup"')}
+      </div>
     </section>`;
 }
 
@@ -4679,7 +5281,7 @@ function maskInspector(node) {
       </div>
       <div class="composite-summary"><span>Clipped content</span><span>${contentCount} layer${contentCount === 1 ? "" : "s"}</span></div>
       <label class="field" style="margin-top: 8px"><span class="field-label">%</span><input type="number" data-property="opacity" data-value-type="number" data-scale="0.01" min="0" max="100" value="${Math.round(node.opacity * 100)}" aria-label="Mask group opacity" /></label>
-      <button class="button button-quiet" data-inspector-action="ungroup" style="width: 100%; margin-top: 8px">Release mask layers</button>
+      <div class="inspector-action-row" style="margin-top: 8px">${inspectorIconButton("release", "Release mask layers", 'data-inspector-action="ungroup"')}</div>
       <p class="inspector-hint">The bottom child is always the mask source. Reorder children in Layers to choose a different source.</p>
     </section>`;
 }
@@ -4743,18 +5345,23 @@ function textInspector(node) {
           ${[400, 500, 600, 700, 800].map((weight) => `<option value="${weight}" ${node.fontWeight === weight ? "selected" : ""}>${weight}</option>`).join("")}
         </select></label>
       </div>
-      <div class="icon-toggle-row" style="margin-top: 6px">
-        ${["left", "center", "right"].map((align) => `<button class="icon-toggle ${node.textAlign === align ? "active" : ""}" data-inspector-action="align" data-value="${align}">${capitalize(align)}</button>`).join("")}
+      <div class="inspector-action-strip" style="margin-top: 6px">
+        ${["left", "center", "right"].map((align) => inspectorIconButton(
+          `text-${align}`,
+          `Align text ${align}`,
+          `data-inspector-action="align" data-value="${align}"`,
+          { selected: node.textAlign === align },
+        )).join("")}
       </div>
       <div class="layout-control-block">
         <span class="layout-control-label">Rich text selection · ${node.textRuns.length} run${node.textRuns.length === 1 ? "" : "s"}</span>
-        <div class="icon-toggle-row">
-          <button class="icon-toggle" data-inspector-action="text-run-bold" title="Bold selected text">Bold</button>
-          <button class="icon-toggle" data-inspector-action="text-run-italic" title="Italicize selected text">Italic</button>
-          <button class="icon-toggle" data-inspector-action="text-run-underline" title="Underline selected text">Underline</button>
+        <div class="inspector-action-row">
+          ${inspectorIconButton("bold", "Bold selected text", 'data-inspector-action="text-run-bold"')}
+          ${inspectorIconButton("italic", "Italicize selected text", 'data-inspector-action="text-run-italic"')}
+          ${inspectorIconButton("underline", "Underline selected text", 'data-inspector-action="text-run-underline"')}
           <span class="color-swatch"><input type="color" data-text-run-color value="${toHexColor(node.fill)}" aria-label="Selected text color" /></span>
         </div>
-        <button class="button button-quiet" data-inspector-action="clear-text-runs" style="width:100%; margin-top:6px" ${node.textRuns.length ? "" : "disabled"}>Clear rich text formatting</button>
+        <div class="inspector-action-row" style="margin-top: 6px">${inspectorIconButton("clear-format", "Clear rich text formatting", 'data-inspector-action="clear-text-runs"', { disabled: !node.textRuns.length })}</div>
         <p class="inspector-hint">While editing text, select a range in the canvas editor and apply formatting here. Without a range, formatting applies to the full layer.</p>
       </div>
     </section>`;
@@ -4786,11 +5393,16 @@ function imageInspector(node) {
   return `
     <section class="inspector-section">
       <p class="inspector-section-title">Image</p>
-      <div class="icon-toggle-row">
-        ${["cover", "contain"].map((fit) => `<button class="icon-toggle ${node.imageFit === fit ? "active" : ""}" data-inspector-action="image-fit" data-value="${fit}">${capitalize(fit)}</button>`).join("")}
+      <div class="inspector-action-strip">
+        ${["cover", "contain"].map((fit) => inspectorIconButton(
+          fit,
+          `${capitalize(fit)} image fit`,
+          `data-inspector-action="image-fit" data-value="${fit}"`,
+          { selected: node.imageFit === fit },
+        )).join("")}
       </div>
       <label class="field" style="margin-top: 6px"><span class="field-label">A</span><input data-property="altText" value="${escapeAttribute(node.altText)}" placeholder="Alt text" aria-label="Image alt text" /></label>
-      <button class="button button-quiet" data-inspector-action="replace-image" style="width: 100%; margin-top: 8px">Replace image…</button>
+      <div class="inspector-action-row" style="margin-top: 8px">${inspectorIconButton("image", "Replace image", 'data-inspector-action="replace-image"')}</div>
     </section>`;
 }
 
@@ -4814,25 +5426,25 @@ function vectorInspector(node) {
         <span class="layout-control-label">Contours · ${node.vectorContours?.length ?? 1}</span>
         ${(node.vectorContours ?? []).slice(1).map((contour, offset) => `<div class="layout-axis-row">
           <span>Contour ${offset + 2} · ${contour.points.length} points</span>
-          <div class="icon-toggle-row">
-            <button class="icon-toggle" data-inspector-action="edit-vector-contour" data-contour-index="${offset + 1}">Edit</button>
-            <button class="icon-toggle" data-inspector-action="remove-vector-contour" data-contour-index="${offset + 1}">×</button>
+          <div class="inspector-action-row">
+            ${inspectorIconButton("edit", `Edit contour ${offset + 2}`, `data-inspector-action="edit-vector-contour" data-contour-index="${offset + 1}"`)}
+            ${inspectorIconButton("trash", `Remove contour ${offset + 2}`, `data-inspector-action="remove-vector-contour" data-contour-index="${offset + 1}"`, { danger: true })}
           </div>
         </div>`).join("")}
-        <button class="button button-quiet" data-inspector-action="add-vector-contour" style="width:100%; margin-top:6px" ${(node.vectorContours?.length ?? 1) >= 128 ? "disabled" : ""}>Add inset contour</button>
+        <div class="inspector-action-row" style="margin-top: 6px">${inspectorIconButton("add", "Add inset contour", 'data-inspector-action="add-vector-contour"', { disabled: (node.vectorContours?.length ?? 1) >= 128 })}</div>
       </div>
-      <div class="icon-toggle-row" style="margin-top: 6px">
-        <button class="icon-toggle ${node.vectorClosed ? "" : "active"}" data-inspector-action="vector-closed" data-value="false">Open</button>
-        <button class="icon-toggle ${node.vectorClosed ? "active" : ""}" data-inspector-action="vector-closed" data-value="true" ${node.vectorPoints.length < 3 ? "disabled" : ""}>Closed</button>
+      <div class="inspector-action-strip" style="margin-top: 6px">
+        ${inspectorIconButton("open", "Open vector path", 'data-inspector-action="vector-closed" data-value="false"', { selected: !node.vectorClosed })}
+        ${inspectorIconButton("closed", "Close vector path", 'data-inspector-action="vector-closed" data-value="true"', { selected: node.vectorClosed, disabled: node.vectorPoints.length < 3 })}
       </div>
-      ${node.vectorClosed ? `<div class="icon-toggle-row" style="margin-top: 6px">
-        <button class="icon-toggle ${node.vectorFillRule === "nonzero" ? "active" : ""}" data-inspector-action="vector-fill-rule" data-value="nonzero">Non-zero</button>
-        <button class="icon-toggle ${node.vectorFillRule === "evenodd" ? "active" : ""}" data-inspector-action="vector-fill-rule" data-value="evenodd">Even-odd</button>
+      ${node.vectorClosed ? `<div class="inspector-action-strip" style="margin-top: 6px">
+        ${inspectorIconButton("nonzero", "Non-zero fill rule", 'data-inspector-action="vector-fill-rule" data-value="nonzero"', { selected: node.vectorFillRule === "nonzero" })}
+        ${inspectorIconButton("evenodd", "Even-odd fill rule", 'data-inspector-action="vector-fill-rule" data-value="evenodd"', { selected: node.vectorFillRule === "evenodd" })}
       </div>` : `<label class="field" style="margin-top: 6px"><span class="field-label">%</span><input type="number" data-property="opacity" data-value-type="number" data-scale="0.01" min="0" max="100" value="${Math.round(node.opacity * 100)}" aria-label="Path opacity" /></label>`}
-      <div class="field-grid one-column" style="margin-top: 8px">
-        <button class="button ${editing ? "button-primary" : "button-quiet"}" data-inspector-action="edit-vector">${editing ? "Done editing points" : "Edit points"}</button>
-        <button class="button button-quiet" data-inspector-action="reverse-vector">Reverse path direction</button>
-        <button class="button button-quiet" data-inspector-action="outline-vector-stroke" ${node.strokeWidth > 0 ? "" : "disabled"}>Outline stroke</button>
+      <div class="inspector-action-row" style="margin-top: 8px">
+        ${inspectorIconButton("edit", editing ? "Finish editing vector points" : "Edit vector points", 'data-inspector-action="edit-vector"', { selected: editing, primary: editing })}
+        ${inspectorIconButton("reverse", "Reverse path direction", 'data-inspector-action="reverse-vector"')}
+        ${inspectorIconButton("outline", "Outline vector stroke", 'data-inspector-action="outline-vector-stroke"', { disabled: node.strokeWidth <= 0 })}
       </div>
       ${selectedPoint ? `
         <div class="vector-point-editor">
@@ -4840,9 +5452,9 @@ function vectorInspector(node) {
             <span>Selected anchor</span>
             <span data-vector-handle-mode>${capitalize(selectedPoint.handleMode)}</span>
           </div>
-          <div class="icon-toggle-row">
-            <button class="icon-toggle ${selectedPoint.handleMode === VECTOR_HANDLE_MODES.CORNER ? "active" : ""}" data-inspector-action="vector-point-corner">Corner</button>
-            <button class="icon-toggle ${selectedPoint.handleMode !== VECTOR_HANDLE_MODES.CORNER ? "active" : ""}" data-inspector-action="vector-point-smooth">Smooth</button>
+          <div class="inspector-action-strip">
+            ${inspectorIconButton("corner", "Corner anchor", 'data-inspector-action="vector-point-corner"', { selected: selectedPoint.handleMode === VECTOR_HANDLE_MODES.CORNER })}
+            ${inspectorIconButton("smooth", "Smooth anchor", 'data-inspector-action="vector-point-smooth"', { selected: selectedPoint.handleMode !== VECTOR_HANDLE_MODES.CORNER })}
           </div>
         </div>` : ""}
       <p class="inspector-hint">Drag while placing an anchor to create a curve. Double-click a segment to split it without changing its shape. Double-click an anchor to toggle corner/smooth; Alt-drag a handle to disconnect it.</p>
@@ -4920,90 +5532,311 @@ function fillInspector(node) {
   const lastStop = node.gradient.stops[node.gradient.stops.length - 1];
   const previewAngle = (node.gradient.angle + 90) % 360;
   return `
-    <div class="icon-toggle-row paint-mode-row">
-      <button class="icon-toggle ${isGradient ? "" : "active"}" data-inspector-action="fill-mode" data-value="solid">Solid</button>
-      <button class="icon-toggle ${node.fillType === PAINT_TYPES.LINEAR ? "active" : ""}" data-inspector-action="fill-mode" data-value="linear-gradient">Linear</button>
-      <button class="icon-toggle ${node.fillType === PAINT_TYPES.RADIAL ? "active" : ""}" data-inspector-action="fill-mode" data-value="radial-gradient">Radial</button>
-      <button class="icon-toggle ${node.fillType === PAINT_TYPES.ANGULAR ? "active" : ""}" data-inspector-action="fill-mode" data-value="angular-gradient">Angular</button>
+    <div class="paint-layer-stack">
+      ${node.fills.map((paint, index) => paintLayerRow("fill", paint, index)).join("")}
     </div>
-    ${isGradient ? `
-      <div class="gradient-preview" style="background: linear-gradient(${formatNumber(previewAngle)}deg, ${escapeAttribute(firstStop.color)}, ${escapeAttribute(lastStop.color)})"></div>
-      <div class="gradient-color-row">
-        <span class="color-swatch"><input type="color" data-gradient-stop="0" value="${toHexColor(firstStop.color)}" aria-label="Gradient start color" /></span>
-        <label class="field"><span class="field-label">A</span><input data-gradient-stop="0" value="${escapeAttribute(stripHash(firstStop.color))}" aria-label="Gradient start hex color" /></label>
+    <details class="paint-advanced" data-paint-settings ${isGradient ? "open" : ""}>
+      <summary><span>Paint settings</span><span>${capitalize(node.fillType.replace("-gradient", ""))}</span></summary>
+      <div class="inspector-action-strip paint-mode-row">
+        ${inspectorIconButton("solid", "Solid fill", 'data-inspector-action="fill-mode" data-value="solid"', { selected: !isGradient })}
+        ${inspectorIconButton("linear", "Linear gradient", 'data-inspector-action="fill-mode" data-value="linear-gradient"', { selected: node.fillType === PAINT_TYPES.LINEAR })}
+        ${inspectorIconButton("radial", "Radial gradient", 'data-inspector-action="fill-mode" data-value="radial-gradient"', { selected: node.fillType === PAINT_TYPES.RADIAL })}
+        ${inspectorIconButton("angular", "Angular gradient", 'data-inspector-action="fill-mode" data-value="angular-gradient"', { selected: node.fillType === PAINT_TYPES.ANGULAR })}
       </div>
-      <div class="gradient-color-row">
-        <span class="color-swatch"><input type="color" data-gradient-stop="last" value="${toHexColor(lastStop.color)}" aria-label="Gradient end color" /></span>
-        <label class="field"><span class="field-label">B</span><input data-gradient-stop="last" value="${escapeAttribute(stripHash(lastStop.color))}" aria-label="Gradient end hex color" /></label>
-      </div>
-      <div class="field-grid paint-settings-grid">
-        <label class="field"><span class="field-label">°</span><input type="number" data-gradient-property="angle" step="1" value="${formatNumber(node.gradient.angle)}" aria-label="Gradient angle" /></label>
-        <label class="field"><span class="field-label">%</span><input type="number" data-property="opacity" data-value-type="number" data-scale="0.01" min="0" max="100" value="${Math.round(node.opacity * 100)}" aria-label="Opacity" /></label>
-        ${node.fillType !== PAINT_TYPES.LINEAR ? `
-          <label class="field"><span class="field-label">X</span><input type="number" data-gradient-property="centerX" min="0" max="1" step="0.05" value="${formatNumber(node.gradient.centerX)}" aria-label="Gradient center X" /></label>
-          <label class="field"><span class="field-label">Y</span><input type="number" data-gradient-property="centerY" min="0" max="1" step="0.05" value="${formatNumber(node.gradient.centerY)}" aria-label="Gradient center Y" /></label>
-          ${node.fillType === PAINT_TYPES.RADIAL ? `<label class="field"><span class="field-label">R</span><input type="number" data-gradient-property="radius" min="0.001" max="4" step="0.05" value="${formatNumber(node.gradient.radius)}" aria-label="Gradient radius" /></label>` : ""}
-        ` : ""}
-      </div>` : colorField("fill", node.fill, node.opacity)}
-    <div class="fill-stack" style="margin-top: 8px">
+      ${isGradient ? `
+        <div class="gradient-preview" style="background: linear-gradient(${formatNumber(previewAngle)}deg, ${escapeAttribute(firstStop.color)}, ${escapeAttribute(lastStop.color)})"></div>
+        <div class="gradient-color-row">
+          <span class="color-swatch"><input type="color" data-gradient-stop="0" value="${toHexColor(firstStop.color)}" aria-label="Gradient start color" /></span>
+          <label class="field"><span class="field-label">A</span><input data-gradient-stop="0" value="${escapeAttribute(stripHash(firstStop.color))}" aria-label="Gradient start hex color" /></label>
+        </div>
+        <div class="gradient-color-row">
+          <span class="color-swatch"><input type="color" data-gradient-stop="last" value="${toHexColor(lastStop.color)}" aria-label="Gradient end color" /></span>
+          <label class="field"><span class="field-label">B</span><input data-gradient-stop="last" value="${escapeAttribute(stripHash(lastStop.color))}" aria-label="Gradient end hex color" /></label>
+        </div>
+        <div class="field-grid paint-settings-grid">
+          <label class="field"><span class="field-label">°</span><input type="number" data-gradient-property="angle" step="1" value="${formatNumber(node.gradient.angle)}" aria-label="Gradient angle" /></label>
+          ${node.fillType !== PAINT_TYPES.LINEAR ? `
+            <label class="field"><span class="field-label">X</span><input type="number" data-gradient-property="centerX" min="0" max="1" step="0.05" value="${formatNumber(node.gradient.centerX)}" aria-label="Gradient center X" /></label>
+            <label class="field"><span class="field-label">Y</span><input type="number" data-gradient-property="centerY" min="0" max="1" step="0.05" value="${formatNumber(node.gradient.centerY)}" aria-label="Gradient center Y" /></label>
+            ${node.fillType === PAINT_TYPES.RADIAL ? `<label class="field"><span class="field-label">R</span><input type="number" data-gradient-property="radius" min="0.001" max="4" step="0.05" value="${formatNumber(node.gradient.radius)}" aria-label="Gradient radius" /></label>` : ""}
+          ` : ""}
+        </div>` : ""}
       ${node.fills.slice(1).map((paint, offset) => {
         const index = offset + 1;
-        return `<div class="gradient-color-row" data-fill-layer="${index}">
-          <button class="icon-toggle ${paint.visible ? "active" : ""}" data-inspector-action="toggle-fill" data-fill-index="${index}" title="Toggle fill">${paint.visible ? "●" : "○"}</button>
-          <label class="field"><span class="field-label">${index + 1}</span><select data-fill-property="type" data-fill-index="${index}" aria-label="Fill ${index + 1} type">
-            ${Object.values(PAINT_TYPES).map((type) => `<option value="${type}" ${paint.type === type ? "selected" : ""}>${capitalize(type.replace("-gradient", ""))}</option>`).join("")}
-          </select></label>
-          <span class="color-swatch"><input type="color" data-fill-property="color" data-fill-index="${index}" value="${toHexColor(paint.color)}" aria-label="Fill ${index + 1} color" /></span>
-          <label class="field"><span class="field-label">%</span><input type="number" data-fill-property="opacity" data-fill-index="${index}" min="0" max="100" value="${Math.round(paint.opacity * 100)}" aria-label="Fill ${index + 1} opacity" /></label>
-          <button class="icon-toggle" data-inspector-action="remove-fill" data-fill-index="${index}" title="Remove fill">×</button>
-        </div>`;
+        return `<label class="field paint-layer-type"><span class="field-label">${index + 1}</span><select data-fill-property="type" data-fill-index="${index}" aria-label="Fill ${index + 1} type">
+          ${Object.values(PAINT_TYPES).map((type) => `<option value="${type}" ${paint.type === type ? "selected" : ""}>${capitalize(type.replace("-gradient", ""))}</option>`).join("")}
+        </select></label>`;
       }).join("")}
-      <button class="button button-quiet" data-inspector-action="add-fill" style="width: 100%; margin-top: 6px" ${node.fills.length >= 8 ? "disabled" : ""}>Add fill layer</button>
-    </div>
+    </details>
   `;
 }
 
 function strokeInspector(node) {
   return `
-    <label class="field" style="margin-bottom: 6px"><span class="field-label">W</span><input type="number" data-property="strokeWidth" data-value-type="number" min="0" step="1" value="${formatNumber(node.strokeWidth)}" aria-label="Stroke width" /></label>
-    <div class="fill-stack">
-      ${node.strokes.map((paint, index) => `<div class="gradient-color-row" data-stroke-layer="${index}">
-        <button class="icon-toggle ${paint.visible ? "active" : ""}" data-inspector-action="toggle-stroke" data-stroke-index="${index}" title="Toggle stroke">${paint.visible ? "●" : "○"}</button>
-        <label class="field"><span class="field-label">${index + 1}</span><select data-stroke-property="type" data-stroke-index="${index}" aria-label="Stroke ${index + 1} type">
-          ${Object.values(PAINT_TYPES).map((type) => `<option value="${type}" ${paint.type === type ? "selected" : ""}>${capitalize(type.replace("-gradient", ""))}</option>`).join("")}
-        </select></label>
-        <span class="color-swatch"><input type="color" data-stroke-property="color" data-stroke-index="${index}" value="${toHexColor(paint.color)}" aria-label="Stroke ${index + 1} color" /></span>
-        <label class="field"><span class="field-label">%</span><input type="number" data-stroke-property="opacity" data-stroke-index="${index}" min="0" max="100" value="${Math.round(paint.opacity * 100)}" aria-label="Stroke ${index + 1} opacity" /></label>
-        <button class="icon-toggle" data-inspector-action="remove-stroke" data-stroke-index="${index}" title="Remove stroke" ${node.strokes.length === 1 ? "disabled" : ""}>×</button>
-      </div>`).join("")}
-      <button class="button button-quiet" data-inspector-action="add-stroke" style="width: 100%; margin-top: 6px" ${node.strokes.length >= 8 ? "disabled" : ""}>Add stroke layer</button>
+    <div class="paint-layer-stack">
+      ${node.strokes.map((paint, index) => paintLayerRow("stroke", paint, index)).join("")}
+    </div>
+    <div class="stroke-properties">
+      <div class="stroke-property">
+        <span class="single-property-label">Position</span>
+        <span class="field static-field" title="Strokes are centered on the path">Center</span>
+      </div>
+      <div class="stroke-property">
+        <span class="single-property-label">Weight</span>
+        ${numberField("W", "strokeWidth", node.strokeWidth)}
+      </div>
     </div>`;
 }
 
 function shadowInspector(node) {
   const shadow = node.shadow;
-  return `
-    <section class="inspector-section">
-      <p class="inspector-section-title">Effects</p>
-      <button class="effect-toggle ${shadow.enabled ? "active" : ""}" data-inspector-action="toggle-shadow" aria-pressed="${shadow.enabled}">
-        <span>Drop shadow</span><span>${shadow.enabled ? "On" : "Off"}</span>
-      </button>
-      ${shadow.enabled ? `
-        <div class="gradient-color-row effect-color-row">
-          <span class="color-swatch"><input type="color" data-shadow-property="color" value="${toHexColor(shadow.color)}" aria-label="Shadow color" /></span>
-          <label class="field"><span class="field-label">#</span><input data-shadow-property="color" value="${escapeAttribute(stripHash(shadow.color))}" aria-label="Shadow hex color" /></label>
-        </div>
-        <div class="field-grid paint-settings-grid">
-          <label class="field"><span class="field-label">X</span><input type="number" data-shadow-property="offsetX" step="1" value="${formatNumber(shadow.offsetX)}" aria-label="Shadow horizontal offset" /></label>
-          <label class="field"><span class="field-label">Y</span><input type="number" data-shadow-property="offsetY" step="1" value="${formatNumber(shadow.offsetY)}" aria-label="Shadow vertical offset" /></label>
-          <label class="field"><span class="field-label">B</span><input type="number" data-shadow-property="blur" min="0" step="1" value="${formatNumber(shadow.blur)}" aria-label="Shadow blur" /></label>
-          <label class="field"><span class="field-label">%</span><input type="number" data-shadow-property="opacity" data-scale="0.01" min="0" max="100" value="${Math.round(shadow.opacity * 100)}" aria-label="Shadow opacity" /></label>
-        </div>` : ""}
-      <div class="layout-control-block">
-        <span class="layout-control-label">Layer blur</span>
-        <label class="field"><span class="field-label">B</span><input type="number" data-effect-property="layerBlur" min="0" max="500" step="1" value="${formatNumber(node.layerBlur ?? 0)}" aria-label="Layer blur radius" /></label>
+  const blurEffect = node.effects.find((effect) => effect.type === "layer-blur");
+  const blurVisible = Boolean(blurEffect?.visible && blurEffect.radius > 0);
+  const effectRows = `${shadow.enabled ? `
+    <div class="effect-layer">
+      <div class="effect-layer-row">
+        <span class="effect-layer-icon">${inspectorActionIcon("shadow")}</span><span>Drop shadow</span>
+        ${inspectorIconButton("eye", "Hide drop shadow", 'data-inspector-action="toggle-shadow"')}
+        ${inspectorIconButton("minus", "Remove drop shadow", 'data-inspector-action="toggle-shadow"')}
       </div>
-    </section>`;
+      <div class="gradient-color-row effect-color-row">
+        <span class="color-swatch"><input type="color" data-shadow-property="color" value="${toHexColor(shadow.color)}" aria-label="Shadow color" /></span>
+        <label class="field"><span class="field-label">#</span><input data-shadow-property="color" value="${escapeAttribute(stripHash(shadow.color))}" aria-label="Shadow hex color" /></label>
+      </div>
+      <div class="field-grid paint-settings-grid">
+        <label class="field"><span class="field-label">X</span><input type="number" data-shadow-property="offsetX" step="1" value="${formatNumber(shadow.offsetX)}" aria-label="Shadow horizontal offset" /></label>
+        <label class="field"><span class="field-label">Y</span><input type="number" data-shadow-property="offsetY" step="1" value="${formatNumber(shadow.offsetY)}" aria-label="Shadow vertical offset" /></label>
+        <label class="field"><span class="field-label">B</span><input type="number" data-shadow-property="blur" min="0" step="1" value="${formatNumber(shadow.blur)}" aria-label="Shadow blur" /></label>
+        <label class="field"><span class="field-label">%</span><input type="number" data-shadow-property="opacity" data-scale="0.01" min="0" max="100" value="${Math.round(shadow.opacity * 100)}" aria-label="Shadow opacity" /></label>
+      </div>
+    </div>` : ""}${blurVisible ? `
+    <div class="effect-layer">
+      <div class="effect-layer-row">
+        <span class="effect-layer-icon">${inspectorActionIcon("blur")}</span><span>Layer blur</span>
+        ${inspectorIconButton("eye", "Hide layer blur", 'data-inspector-action="toggle-layer-blur"')}
+        ${inspectorIconButton("minus", "Remove layer blur", 'data-inspector-action="remove-layer-blur"')}
+      </div>
+      <label class="field"><span class="field-label">B</span><input type="number" data-effect-property="layerBlur" min="0" max="500" step="1" value="${formatNumber(blurEffect.radius)}" aria-label="Layer blur radius" /></label>
+    </div>` : ""}`;
+  const popover = `<div class="single-inspector-popover section-inspector-popover effects-popover" data-inspector-popover="effects" role="menu" hidden>
+    ${inspectorMenuItem("shadow", "Drop shadow", 'data-inspector-action="toggle-shadow"', "", { disabled: shadow.enabled })}
+    ${inspectorMenuItem("blur", "Layer blur", 'data-inspector-action="add-layer-blur"', "", { disabled: blurVisible })}
+  </div>`;
+  return singleInspectorSection(
+    "effects",
+    "Effects",
+    effectRows || '<p class="inspector-empty-row">No effects applied.</p>',
+    inspectorIconButton("add", "Add effect", 'data-inspector-action="toggle-inspector-popover" data-popover="effects" aria-expanded="false"'),
+    popover,
+  );
+}
+
+function paintLayerRow(kind, paint, index) {
+  const dataPrefix = kind === "fill" ? "fill" : "stroke";
+  const label = `${capitalize(kind)} ${index + 1}`;
+  const pickerName = `paint-${kind}-${index}`;
+  const colorAttributes = kind === "fill" && index === 0
+    ? 'data-property="fill"'
+    : `data-${dataPrefix}-property="color" data-${dataPrefix}-index="${index}"`;
+  return `<div class="paint-layer-row ${paint.visible ? "" : "muted"}" data-${dataPrefix}-layer="${index}">
+    <span class="color-swatch compact-color-swatch">
+      <button class="paint-swatch-button" data-inspector-action="toggle-inspector-popover" data-popover="${pickerName}" data-icon-audit="ignore" aria-expanded="false" aria-label="Edit ${label.toLowerCase()} color" title="Edit color">
+        <span class="paint-swatch-color" style="background: ${toHexColor(paint.color)}; opacity: ${clamp(paint.opacity, 0, 1)}"></span>
+      </button>
+      <input class="color-input-proxy" type="color" ${colorAttributes} value="${toHexColor(paint.color)}" aria-hidden="true" tabindex="-1" hidden />
+    </span>
+    <label class="field paint-hex-field"><input ${colorAttributes} value="${escapeAttribute(stripHash(paint.color).toUpperCase())}" aria-label="${label} hex color" /></label>
+    <label class="field paint-opacity-field"><input type="number" data-${dataPrefix}-property="opacity" data-${dataPrefix}-index="${index}" min="0" max="100" value="${Math.round(paint.opacity * 100)}" aria-label="${label} opacity" /><span class="field-suffix">%</span></label>
+    ${inspectorIconButton(paint.visible ? "eye" : "eye-off", `${paint.visible ? "Hide" : "Show"} ${label.toLowerCase()}`, `data-inspector-action="toggle-${dataPrefix}" data-${dataPrefix}-index="${index}"`)}
+    ${inspectorIconButton("minus", `Remove ${label.toLowerCase()}`, `data-inspector-action="remove-${dataPrefix}" data-${dataPrefix}-index="${index}"`)}
+    ${paintPickerPopover(kind, paint, index, pickerName)}
+  </div>`;
+}
+
+function paintPickerPopover(kind, paint, index, pickerName) {
+  const color = toHexColor(paint.color).toUpperCase();
+  const hsv = hexToHsv(color);
+  const canChangePaintMode = kind === "fill" && index === 0;
+  const paintModes = [
+    [PAINT_TYPES.SOLID, "solid", "Solid"],
+    [PAINT_TYPES.LINEAR, "linear", "Linear gradient"],
+    [PAINT_TYPES.RADIAL, "radial", "Radial gradient"],
+    [PAINT_TYPES.ANGULAR, "angular", "Angular gradient"],
+  ];
+  const palette = ["#000000", "#FFFFFF", "#D9D9D9", "#0D99FF", "#8B5CF6", "#FF3B30", "#FFCC00", "#34C759", "#AF52DE"];
+  return `<div class="single-inspector-popover paint-picker-popover" data-inspector-popover="${pickerName}" data-color-picker data-color-picker-kind="${kind}" data-color-picker-index="${index}" data-color-picker-hue="${hsv.h}" role="dialog" aria-label="${capitalize(kind)} color picker" style="--picker-color: ${color}; --picker-hue-color: hsl(${hsv.h} 100% 50%)" hidden>
+    <div class="paint-picker-header">
+      <div class="paint-picker-tabs"><span class="active">Custom</span><span>Libraries</span></div>
+      ${inspectorIconButton("close", "Close color picker", 'data-inspector-action="close-inspector-popover"')}
+    </div>
+    <div class="paint-picker-mode-row" aria-label="Paint type">
+      ${paintModes.map(([type, icon, modeLabel]) => inspectorIconButton(
+        icon,
+        modeLabel,
+        canChangePaintMode ? `data-inspector-action="fill-mode" data-value="${type}"` : "",
+        { selected: paint.type === type, disabled: !canChangePaintMode && type !== PAINT_TYPES.SOLID },
+      )).join("")}
+    </div>
+    <div class="paint-color-plane" data-color-plane tabindex="0" role="slider" aria-label="Color saturation and brightness" aria-valuetext="${Math.round(hsv.s * 100)}% saturation, ${Math.round(hsv.v * 100)}% brightness">
+      <span class="paint-color-plane-marker" style="left: ${hsv.s * 100}%; top: ${(1 - hsv.v) * 100}%"></span>
+    </div>
+    <div class="paint-picker-slider-stack">
+      <label class="paint-picker-slider hue-slider" title="Hue">
+        <input type="range" min="0" max="360" step="1" value="${Math.round(hsv.h)}" data-color-picker-property="hue" aria-label="Hue" />
+      </label>
+      <label class="paint-picker-slider alpha-slider" title="Opacity">
+        <input type="range" min="0" max="100" step="1" value="${Math.round(paint.opacity * 100)}" data-color-picker-property="opacity" aria-label="Color opacity" />
+      </label>
+    </div>
+    <div class="paint-picker-values">
+      <label class="field paint-picker-model"><select aria-label="Color model"><option>HEX</option></select></label>
+      <label class="field paint-picker-hex"><span class="field-label">#</span><input value="${stripHash(color)}" maxlength="8" data-color-picker-property="hex" aria-label="Hex color" /></label>
+      <label class="field paint-picker-opacity"><input type="number" min="0" max="100" value="${Math.round(paint.opacity * 100)}" data-color-picker-property="opacity" aria-label="Color opacity percent" /><span class="field-suffix">%</span></label>
+    </div>
+    <div class="paint-picker-palette">
+      <span>Document colors</span>
+      <div class="paint-picker-swatches">
+        ${palette.map((paletteColor) => `<button data-inspector-action="set-picker-color" data-color="${paletteColor}" data-icon-audit="ignore" style="--palette-color: ${paletteColor}" aria-label="Use ${paletteColor}" title="${paletteColor}"></button>`).join("")}
+      </div>
+    </div>
+  </div>`;
+}
+
+function inspectorPickerPaint(picker) {
+  if (!picker || selectedIds.length !== 1) return null;
+  const node = getNode(currentPage(), selectedIds[0]);
+  const index = Number.parseInt(picker.dataset.colorPickerIndex, 10);
+  if (!node || !Number.isInteger(index)) return null;
+  return picker.dataset.colorPickerKind === "stroke" ? node.strokes?.[index] : node.fills?.[index];
+}
+
+function updateInspectorPaintPicker(picker, property, rawValue) {
+  const paint = inspectorPickerPaint(picker);
+  const node = selectedIds.length === 1 ? getNode(currentPage(), selectedIds[0]) : null;
+  if (!paint || !node) return false;
+  const kind = picker.dataset.colorPickerKind;
+  let hsv = hexToHsv(toHexColor(paint.color));
+  if (property === "hex") {
+    const color = normalizeInspectorColor(String(rawValue));
+    if (!/^#(?:[\da-f]{3}|[\da-f]{6})$/i.test(color)) return false;
+    paint.color = toHexColor(color).toUpperCase();
+    hsv = hexToHsv(paint.color);
+  } else if (property === "hue") {
+    const hue = clamp(Number.parseFloat(rawValue), 0, 360);
+    if (!Number.isFinite(hue)) return false;
+    hsv.h = hue;
+    paint.color = hsvToHex(hsv.h, hsv.s, hsv.v);
+  } else if (property === "opacity") {
+    const opacity = Number.parseFloat(rawValue);
+    if (!Number.isFinite(opacity)) return false;
+    paint.opacity = clamp(opacity / 100, 0, 1);
+  } else if (property === "hsv") {
+    if (!rawValue || !Number.isFinite(rawValue.h) || !Number.isFinite(rawValue.s) || !Number.isFinite(rawValue.v)) return false;
+    hsv = {
+      h: ((rawValue.h % 360) + 360) % 360,
+      s: clamp(rawValue.s, 0, 1),
+      v: clamp(rawValue.v, 0, 1),
+    };
+    paint.color = hsvToHex(hsv.h, hsv.s, hsv.v);
+  } else {
+    return false;
+  }
+  if (kind === "stroke") syncLegacyStroke(node);
+  else syncLegacyFill(node);
+  recordComponentOverride(designDocument, currentPage(), node, kind === "stroke" ? "strokes" : "fills");
+  const storedHue = Number.parseFloat(picker.dataset.colorPickerHue);
+  const preferredHue = property === "hex"
+    ? hsv.h
+    : property === "hue" || property === "hsv"
+      ? hsv.h
+      : Number.isFinite(storedHue) ? storedHue : hsv.h;
+  syncInspectorPaintPickerDOM(picker, paint, preferredHue);
+  liveDocumentChange();
+  return true;
+}
+
+function syncInspectorPaintPickerDOM(picker, paint, preferredHue = null) {
+  const color = toHexColor(paint.color).toUpperCase();
+  const hsv = hexToHsv(color);
+  if (Number.isFinite(preferredHue)) hsv.h = ((preferredHue % 360) + 360) % 360;
+  const opacity = Math.round(clamp(paint.opacity, 0, 1) * 100);
+  picker.dataset.colorPickerHue = String(hsv.h);
+  picker.style.setProperty("--picker-color", color);
+  picker.style.setProperty("--picker-hue-color", `hsl(${hsv.h} 100% 50%)`);
+  const marker = picker.querySelector(".paint-color-plane-marker");
+  if (marker) {
+    marker.style.left = `${hsv.s * 100}%`;
+    marker.style.top = `${(1 - hsv.v) * 100}%`;
+  }
+  const plane = picker.querySelector("[data-color-plane]");
+  plane?.setAttribute("aria-valuetext", `${Math.round(hsv.s * 100)}% saturation, ${Math.round(hsv.v * 100)}% brightness`);
+  const hueInput = picker.querySelector('[data-color-picker-property="hue"]');
+  if (hueInput) hueInput.value = String(Math.round(hsv.h));
+  const hexInput = picker.querySelector('.paint-picker-hex [data-color-picker-property="hex"]');
+  if (hexInput) hexInput.value = stripHash(color);
+  for (const opacityInput of picker.querySelectorAll('[data-color-picker-property="opacity"]')) {
+    opacityInput.value = String(opacity);
+  }
+  const row = picker.closest(".paint-layer-row");
+  const rowColor = row?.querySelector(".paint-swatch-color");
+  if (rowColor) {
+    rowColor.style.background = color;
+    rowColor.style.opacity = String(clamp(paint.opacity, 0, 1));
+  }
+  const rowHex = row?.querySelector(".paint-hex-field input");
+  if (rowHex) rowHex.value = stripHash(color);
+  const rowOpacity = row?.querySelector(".paint-opacity-field input");
+  if (rowOpacity) rowOpacity.value = String(opacity);
+  const colorProxy = row?.querySelector('.color-input-proxy[type="color"]');
+  if (colorProxy) colorProxy.value = color;
+}
+
+function updateInspectorColorPlane(plane, event) {
+  const picker = plane.closest("[data-color-picker]");
+  const paint = inspectorPickerPaint(picker);
+  if (!picker || !paint) return;
+  const bounds = plane.getBoundingClientRect();
+  const hsv = hexToHsv(toHexColor(paint.color));
+  hsv.h = Number.parseFloat(picker.dataset.colorPickerHue) || hsv.h;
+  hsv.s = clamp((event.clientX - bounds.left) / Math.max(1, bounds.width), 0, 1);
+  hsv.v = 1 - clamp((event.clientY - bounds.top) / Math.max(1, bounds.height), 0, 1);
+  updateInspectorPaintPicker(picker, "hsv", hsv);
+}
+
+function hexToHsv(value) {
+  const color = toHexColor(value).slice(1);
+  const red = Number.parseInt(color.slice(0, 2), 16) / 255;
+  const green = Number.parseInt(color.slice(2, 4), 16) / 255;
+  const blue = Number.parseInt(color.slice(4, 6), 16) / 255;
+  const maximum = Math.max(red, green, blue);
+  const minimum = Math.min(red, green, blue);
+  const delta = maximum - minimum;
+  let hue = 0;
+  if (delta > 0) {
+    if (maximum === red) hue = 60 * (((green - blue) / delta) % 6);
+    else if (maximum === green) hue = 60 * ((blue - red) / delta + 2);
+    else hue = 60 * ((red - green) / delta + 4);
+  }
+  return {
+    h: (hue + 360) % 360,
+    s: maximum === 0 ? 0 : delta / maximum,
+    v: maximum,
+  };
+}
+
+function hsvToHex(hue, saturation, value) {
+  const normalizedHue = ((hue % 360) + 360) % 360;
+  const chroma = value * saturation;
+  const x = chroma * (1 - Math.abs((normalizedHue / 60) % 2 - 1));
+  const match = value - chroma;
+  let [red, green, blue] = [0, 0, 0];
+  if (normalizedHue < 60) [red, green, blue] = [chroma, x, 0];
+  else if (normalizedHue < 120) [red, green, blue] = [x, chroma, 0];
+  else if (normalizedHue < 180) [red, green, blue] = [0, chroma, x];
+  else if (normalizedHue < 240) [red, green, blue] = [0, x, chroma];
+  else if (normalizedHue < 300) [red, green, blue] = [x, 0, chroma];
+  else [red, green, blue] = [chroma, 0, x];
+  return `#${[red, green, blue].map((channel) => Math.round((channel + match) * 255).toString(16).padStart(2, "0")).join("").toUpperCase()}`;
 }
 
 function syncLegacyFill(node) {
@@ -5082,7 +5915,9 @@ function requestRender() {
       transformReadout,
     });
     elements.canvas.dataset.fullRedraw = String(renderer.lastFrameStats.fullRedraw);
-    elements.zoomValue.textContent = `${Math.round(camera.zoom * 100)}%`;
+    const zoomLabel = `${Math.round(camera.zoom * 100)}%`;
+    elements.zoomValue.textContent = zoomLabel;
+    elements.inspectorZoomValue.textContent = zoomLabel;
   });
 }
 
@@ -5156,6 +5991,36 @@ async function exportDocument(format) {
       showToast("2× PNG exported");
     }, "image/png");
   }
+}
+
+async function exportSelectedLayer(format, scale = 1) {
+  if (selectedIds.length !== 1) return;
+  const page = currentPage();
+  const node = getNode(page, selectedIds[0]);
+  if (!node || !isNodeEffectivelyVisible(page, node)) {
+    showToast("Show the selected layer before exporting it.");
+    return;
+  }
+  const ids = getTopLevelNodeIds(page, [node.id]);
+  const resolvedPage = resolvePageAssets(designDocument, page);
+  const name = safeFilename(node.name || capitalize(node.type), format);
+  if (format === "svg") {
+    downloadBlob(documentToSVG(resolvedPage, ids), name, "image/svg+xml");
+    showToast(`${node.name} exported as SVG`);
+    return;
+  }
+  if (format !== "png") return;
+  const requestedScale = [0.5, 1, 2, 3, 4].includes(scale) ? scale : 1;
+  await preloadDocumentImages(resolvedPage, ids);
+  const canvas = renderDocumentToCanvas(resolvedPage, ids, requestedScale);
+  canvas.toBlob((blob) => {
+    if (!blob) {
+      showToast("PNG export failed in this browser.");
+      return;
+    }
+    downloadBlob(blob, name, "image/png");
+    showToast(`${requestedScale}× ${node.name} PNG exported`);
+  }, "image/png");
 }
 
 function openImagePicker(nodeId = null) {
@@ -5750,6 +6615,109 @@ function shapeToolIcon(tool) {
     star: '<svg viewBox="0 0 24 24"><path d="m12 3 2.8 5.8 6.2.9-4.5 4.5 1.1 6.3-5.6-3-5.6 3 1.1-6.3L3 9.7l6.2-.9L12 3Z" /></svg>',
   };
   return icons[tool] ?? icons.rectangle;
+}
+
+function inspectorIconButton(icon, label, attributes = "", options = {}) {
+  const classes = ["inspector-icon-button"];
+  if (options.className) classes.push(...String(options.className).split(/\s+/).filter(Boolean));
+  if (options.selected === true) classes.push("active");
+  if (options.primary) classes.push("primary");
+  if (options.danger) classes.push("danger");
+  const selectedState = typeof options.selected === "boolean"
+    ? ` aria-pressed="${options.selected}"`
+    : "";
+  const disabled = options.disabled ? " disabled" : "";
+  const rawIconMarkup = icon.startsWith("<svg") ? icon : inspectorActionIcon(icon);
+  const iconMarkup = rawIconMarkup.includes("aria-hidden=")
+    ? rawIconMarkup
+    : rawIconMarkup.replace("<svg ", '<svg aria-hidden="true" ');
+  const tooltip = options.shortcut ? `${label} · ${options.shortcut}` : label;
+  return `<button class="${classes.join(" ")}" ${attributes} data-tooltip="${escapeAttribute(tooltip)}" title="${escapeAttribute(label)}" aria-label="${escapeAttribute(label)}"${selectedState}${disabled}>${iconMarkup}</button>`;
+}
+
+function inspectorActionIcon(name) {
+  if (name === "eye") return visibilityIcon(true);
+  if (name === "eye-off") return visibilityIcon(false);
+  if (name === "lock") return lockIcon(true);
+  if (name === "unlock") return lockIcon(false);
+  if (name === "mask") return nodeIcon(NODE_TYPES.MASK);
+  if (name === "group") return nodeIcon(NODE_TYPES.GROUP);
+  if (name === "variant") return variantSetIcon();
+
+  const icons = {
+    add: '<path d="M10 3v14M3 10h14" />',
+    minus: '<path d="M3 10h14" />',
+    close: '<path d="M4 4l12 12M16 4 4 16" />',
+    more: '<circle class="icon-fill" cx="4" cy="10" r="1.2" /><circle class="icon-fill" cx="10" cy="10" r="1.2" /><circle class="icon-fill" cx="16" cy="10" r="1.2" />',
+    chevron: '<path d="m7 4 6 6-6 6" />',
+    styles: '<circle cx="6" cy="6" r="2" /><circle cx="14" cy="6" r="2" /><circle cx="6" cy="14" r="2" /><circle cx="14" cy="14" r="2" />',
+    export: '<path d="M10 13V2M6 6l4-4 4 4M4 10v7h12v-7" />',
+    blur: '<circle cx="10" cy="10" r="6" /><circle cx="10" cy="10" r="3" /><circle class="icon-fill" cx="10" cy="10" r="1" />',
+    droplet: '<path d="M10 2.5S4.5 8.7 4.5 12.2a5.5 5.5 0 0 0 11 0C15.5 8.7 10 2.5 10 2.5Z" />',
+    checker: '<rect class="icon-fill" x="4" y="4" width="4" height="4" /><rect class="icon-fill" x="8" y="8" width="4" height="4" /><rect class="icon-fill" x="12" y="4" width="4" height="4" /><rect class="icon-fill" x="4" y="12" width="4" height="4" /><rect class="icon-fill" x="12" y="12" width="4" height="4" />',
+    "corner-radius": '<path d="M4 16V9a5 5 0 0 1 5-5h7M4 12h4v4" />',
+    trash: '<path d="M4 5h12M7 5V3h6v2M6 7l.7 10h6.6L14 7M8.5 8.5v6M11.5 8.5v6" />',
+    ruler: '<path d="M3 5h14v10H3zM6 5v4M9 5v2M12 5v4M15 5v2" />',
+    guides: '<path d="M10 2v16M2 10h16M6 4v4H2M14 12v4h4" />',
+    grid: '<path d="M3 3h14v14H3zM7.7 3v14M12.3 3v14M3 7.7h14M3 12.3h14" />',
+    snap: '<path d="M5 3v8a5 5 0 0 0 10 0V3M5 7h4M11 7h4" />',
+    "guide-vertical": '<path d="M10 2v16M5 6l5-4 5 4M5 14l5 4 5-4" />',
+    "guide-horizontal": '<path d="M2 10h16M6 5l-4 5 4 5M14 5l4 5-4 5" />',
+    "rotate-left": '<path d="M5.5 6H2V2.5M2.5 6a7 7 0 1 1-.1 7" />',
+    "rotate-right": '<path d="M14.5 6H18V2.5M17.5 6a7 7 0 1 0 .1 7" />',
+    duplicate: '<rect x="6" y="6" width="10" height="10" rx="1" /><path d="M4 13H3V3h10v1" />',
+    horizontal: '<rect x="2.5" y="5" width="4" height="10" rx="1" /><rect x="8" y="5" width="4" height="10" rx="1" /><rect x="13.5" y="5" width="4" height="10" rx="1" />',
+    vertical: '<rect x="5" y="2.5" width="10" height="4" rx="1" /><rect x="5" y="8" width="10" height="4" rx="1" /><rect x="5" y="13.5" width="10" height="4" rx="1" />',
+    off: '<rect x="3" y="3" width="14" height="14" rx="2" /><path d="M5 15 15 5" />',
+    union: '<circle cx="7.5" cy="10" r="5" /><circle cx="12.5" cy="10" r="5" />',
+    subtract: '<circle cx="7.5" cy="10" r="5" /><path d="M10 5.7a5 5 0 0 1 0 8.6" />',
+    intersect: '<circle cx="7.5" cy="10" r="5" /><circle cx="12.5" cy="10" r="5" /><path class="icon-fill" d="M10 5.7a5 5 0 0 1 0 8.6 5 5 0 0 1 0-8.6Z" />',
+    exclude: '<circle cx="7.5" cy="10" r="5" /><circle cx="12.5" cy="10" r="5" /><path d="M10 5.7a5 5 0 0 1 0 8.6" />',
+    release: '<path d="M7 3H3v4M13 3h4v4M7 17H3v-4M13 17h4v-4M7 7l6 6M13 7l-6 6" />',
+    flatten: '<path d="m3 15 4-10 10 4-5 8-9-2Z" /><circle cx="7" cy="5" r="1" /><circle cx="17" cy="9" r="1" /><circle cx="12" cy="17" r="1" />',
+    backward: '<rect x="3" y="7" width="9" height="9" rx="1" /><path d="M7 4h9v9M3 4h4M5 2 3 4l2 2" />',
+    forward: '<rect x="8" y="4" width="9" height="9" rx="1" /><path d="M13 16H4V7M17 16h-4M15 14l2 2-2 2" />',
+    reveal: '<circle cx="10" cy="10" r="6" /><circle cx="10" cy="10" r="2" /><path d="M10 1v3M10 16v3M1 10h3M16 10h3" />',
+    reset: '<path d="M4 7V3m0 0h4M4 3a7 7 0 1 1-1 10" />',
+    detach: '<path d="m7 13-1.5 1.5a3 3 0 0 1-4-4L5 7m8 0 1.5-1.5a3 3 0 0 1 4 4L15 13M7 10h6M3 3l14 14" />',
+    wrap: '<path d="M3 5h11a3 3 0 1 1 0 6H7M10 8l-3 3 3 3M3 15h5" />',
+    flow: '<path d="M3 6h10M10 3l3 3-3 3M17 14H7M10 11l-3 3 3 3" />',
+    absolute: '<rect x="4" y="4" width="12" height="12" rx="1" /><path d="M10 1v6M10 13v6M1 10h6M13 10h6" />',
+    fixed: '<rect x="4" y="4" width="12" height="12" rx="1" /><path d="M7 2v4M13 2v4M7 14v4M13 14v4" />',
+    hug: '<rect x="6" y="5" width="8" height="10" rx="1" /><path d="M2 10h4M4 8l2 2-2 2M18 10h-4M16 8l-2 2 2 2" />',
+    "fill-size": '<rect x="7" y="5" width="6" height="10" rx="1" /><path d="M7 10H2M4 8l-2 2 2 2M13 10h5M16 8l2 2-2 2" />',
+    "align-start": '<path d="M3 3v14M6 6h10M6 10h7M6 14h9" />',
+    "align-center": '<path d="M10 3v14M4 6h12M6 10h8M5 14h10" />',
+    "align-end": '<path d="M17 3v14M4 6h10M7 10h7M5 14h9" />',
+    "align-stretch": '<path d="M3 3v14M17 3v14M5 6h10M5 10h10M5 14h10" />',
+    "align-space": '<path d="M3 3v14M17 3v14M6 6h3M11 10h3M6 14h3" />',
+    baseline: '<path d="M2 15h16M5 12l3-9 3 9M6 9h4M13 5h4M15 5v7" />',
+    "text-left": '<path d="M3 4h14M3 8h10M3 12h14M3 16h8" />',
+    "text-center": '<path d="M3 4h14M5 8h10M3 12h14M6 16h8" />',
+    "text-right": '<path d="M3 4h14M7 8h10M3 12h14M9 16h8" />',
+    bold: '<path d="M6 3h5a3.5 3.5 0 0 1 0 7H6V3Zm0 7h6a3.5 3.5 0 0 1 0 7H6v-7Z" />',
+    italic: '<path d="M9 3h6M5 17h6M12 3 8 17" />',
+    underline: '<path d="M5 3v7a5 5 0 0 0 10 0V3M3 18h14" />',
+    "clear-format": '<path d="m6 4 8 8M11 3h5M4 17h12M10 8l-4 8M14 12l3 3-3 3" />',
+    cover: '<rect x="3" y="3" width="14" height="14" rx="1" /><path d="M3 8h14M8 3v14" />',
+    contain: '<rect x="3" y="3" width="14" height="14" rx="1" /><rect x="6" y="6" width="8" height="8" rx="1" />',
+    image: '<rect x="3" y="4" width="14" height="12" rx="1" /><circle cx="13.5" cy="7.5" r="1" /><path d="m5 14 3.5-3.5 2 2 1.5-1.5 3 3" />',
+    edit: '<path d="m4 14-.8 3.8L7 17l9-9-3-3-9 9ZM11.5 6.5l3 3" />',
+    open: '<path d="M4 15 7 5l9 4-4 7" /><circle cx="4" cy="15" r="1" /><circle cx="12" cy="16" r="1" />',
+    closed: '<path d="M4 15 7 5l9 4-4 7-8-1Z" /><circle cx="4" cy="15" r="1" /><circle cx="7" cy="5" r="1" /><circle cx="16" cy="9" r="1" />',
+    nonzero: '<circle cx="7.5" cy="10" r="5" /><circle cx="12.5" cy="10" r="5" />',
+    evenodd: '<circle cx="7.5" cy="10" r="5" /><circle cx="12.5" cy="10" r="5" /><path d="M10 5.7a5 5 0 0 1 0 8.6" />',
+    reverse: '<path d="M4 6h10M11 3l3 3-3 3M16 14H6M9 11l-3 3 3 3" />',
+    outline: '<path d="m4 15 3-10 9 4-4 7-8-1Z" /><path d="m7 13 2-5 4 2-2 3-4 0Z" />',
+    corner: '<path d="M4 16V4h12" /><rect x="2.5" y="14.5" width="3" height="3" /><rect x="14.5" y="2.5" width="3" height="3" />',
+    smooth: '<path d="M3 15C7 15 8 5 17 5" /><circle cx="3" cy="15" r="1.5" /><circle cx="17" cy="5" r="1.5" />',
+    solid: '<rect class="icon-fill" x="4" y="4" width="12" height="12" rx="2" />',
+    linear: '<rect x="3" y="3" width="14" height="14" rx="2" /><path d="m5 15 10-10" /><circle class="icon-fill" cx="5" cy="15" r="1.5" /><circle class="icon-fill" cx="15" cy="5" r="1.5" />',
+    radial: '<circle cx="10" cy="10" r="7" /><circle cx="10" cy="10" r="3" /><circle class="icon-fill" cx="10" cy="10" r="1" />',
+    angular: '<circle cx="10" cy="10" r="7" /><path d="M10 10V3a7 7 0 0 1 6.1 10.5L10 10Z" />',
+    shadow: '<rect x="3" y="3" width="11" height="11" rx="2" /><path d="M7 16h7a3 3 0 0 0 3-3V7" />',
+  };
+  return `<svg viewBox="0 0 20 20" aria-hidden="true">${icons[name] ?? icons.edit}</svg>`;
 }
 
 function arrangementIcon(action) {

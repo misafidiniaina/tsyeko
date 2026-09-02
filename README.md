@@ -56,7 +56,7 @@ GOCACHE=$PWD/.cache/go-build go run .
 - Persistent per-page rulers with adaptive ticks, draggable horizontal/vertical guides, exact guide positions, and undo/redo
 - Configurable per-page grids with visibility controls and optional snap-to-grid behavior
 - Collapsible nested layers panel with visibility and locking
-- Inspector for geometry, paints, effects, opacity, stroke, corners, and typography
+- Current-Figma-inspired single-layer Inspector with compact icon actions, grouped Position/Layout/Appearance controls, layered paint/effect rows, an in-app color/opacity picker, aspect locking, and selected-layer PNG/SVG export
 - Recursive layer ordering, grouping/ungrouping, duplication, copy/paste, nudging, and deletion
 - Undo and redo with bounded, labeled command deltas
 - Bounds-local composite caching, viewport culling, dirty-region redraws, and rolling render-performance diagnostics

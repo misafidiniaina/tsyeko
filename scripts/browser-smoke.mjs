@@ -402,7 +402,7 @@ try {
       return true;
     })()
   `);
-  await evaluate(`document.querySelector('[data-inspector-action="toggle-shadow"]').click(); true`);
+  await evaluate(`document.querySelector('.effects-popover [data-inspector-action="toggle-shadow"]').click(); true`);
   await evaluate(`
     (() => {
       const values = { offsetX: "6", offsetY: "14", blur: "22", opacity: "35" };
@@ -419,7 +419,7 @@ try {
   await waitFor(
     `document.querySelector('[data-inspector-action="fill-mode"][data-value="linear-gradient"]')?.classList.contains("active") &&
      document.querySelector('[data-gradient-property="angle"]')?.value === "32" &&
-     document.querySelector('[data-inspector-action="toggle-shadow"]')?.classList.contains("active") &&
+     document.querySelector('.single-inspector-section-content [data-inspector-action="toggle-shadow"]') &&
      document.querySelector('[data-shadow-property="blur"]')?.value === "22" &&
      document.querySelector("#saveState").textContent === "Saved locally"`,
     "gradient and shadow inspector editing",
@@ -466,13 +466,15 @@ try {
      document.querySelector('[data-inspector-action="vector-closed"][data-value="true"]')?.classList.contains("active")`,
     "closed Bézier path creation with pen-drag handles",
   );
+  await assertInspectorIconButtons(evaluate, "vector Inspector");
 
   await evaluate(`
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
     true;
   `);
   await waitFor(
-    `document.querySelector('[data-inspector-action="edit-vector"]')?.textContent.includes("Done editing")`,
+    `document.querySelector('[data-inspector-action="edit-vector"]')?.classList.contains("active") &&
+     document.querySelector('[data-inspector-action="edit-vector"]')?.getAttribute("aria-label")?.includes("Finish")`,
     "vector point edit mode",
   );
 
@@ -619,6 +621,7 @@ try {
      !document.querySelector('[data-multi-action="distribute"][data-axis="horizontal"]')?.disabled`,
     "multi-selection arrangement controls",
   );
+  await assertInspectorIconButtons(evaluate, "multi-selection Inspector");
   await evaluate(`document.querySelector('[data-multi-action="align"][data-alignment="top"]').click(); true`);
   await waitFor(`document.querySelector("#saveState").textContent === "Saved locally"`, "top alignment autosave");
   await evaluate(`document.querySelector('[data-multi-action="distribute"][data-axis="horizontal"]').click(); true`);
@@ -720,7 +723,7 @@ try {
   await waitFor(
     `document.querySelector('[data-inspector-action="fill-mode"][data-value="linear-gradient"]')?.classList.contains("active") &&
      document.querySelector('[data-gradient-property="angle"]')?.value === "32" &&
-     document.querySelector('[data-inspector-action="toggle-shadow"]')?.classList.contains("active") &&
+     document.querySelector('.single-inspector-section-content [data-inspector-action="toggle-shadow"]') &&
      document.querySelector('[data-shadow-property="offsetX"]')?.value === "6" &&
      document.querySelector('[data-shadow-property="offsetY"]')?.value === "14" &&
      document.querySelector('[data-shadow-property="opacity"]')?.value === "35"`,
@@ -1726,6 +1729,7 @@ try {
      document.querySelector('[data-page-grid-size]')?.value === "16"`,
     "canvas aid inspector",
   );
+  await assertInspectorIconButtons(evaluate, "canvas Inspector");
   await evaluate(`
     (() => {
       const input = document.querySelector("[data-page-grid-size]");
@@ -2182,6 +2186,175 @@ try {
      document.querySelector('[data-property="starInnerRatio"]')?.value === "40"`,
     "star drawing",
   );
+  await assertInspectorIconButtons(evaluate, "shape Inspector");
+  const singleInspectorLayout = await evaluate(`
+    (() => {
+      const children = [...document.querySelectorAll("#inspector > *")];
+      const index = (selector) => children.findIndex((item) => item.matches(selector));
+      return {
+        headerActions: document.querySelectorAll(".single-selection-actions .inspector-icon-button").length,
+        selectionKind: document.querySelector(".single-selection-kind")?.textContent.trim(),
+        alignmentTriggers: document.querySelectorAll(".single-alignment-trigger > .inspector-icon-button").length,
+        hasShapeSizeLimits: Boolean(document.querySelector('[data-single-panel="layout"] .size-limits-disclosure')),
+        zoomMatches: document.querySelector("#inspectorZoomValue span")?.textContent.trim() === document.querySelector("#zoomValue")?.textContent.trim(),
+        componentTooltip: document.querySelector('.single-selection-actions [data-inspector-action="create-component"]')?.dataset.tooltip,
+        position: index('[data-single-panel="position"]'),
+        layout: index('[data-single-panel="layout"]'),
+        appearance: index('[data-single-panel="appearance"]'),
+        fill: index('[data-single-section="fill"]'),
+        stroke: index('[data-single-section="stroke"]'),
+        effects: index('[data-single-section="effects"]'),
+        export: index('[data-single-section="export"]'),
+        paintRow: Boolean(document.querySelector('[data-single-section="fill"] .paint-layer-row')),
+      };
+    })()
+  `);
+  const inspectorOrder = [
+    singleInspectorLayout.position,
+    singleInspectorLayout.layout,
+    singleInspectorLayout.appearance,
+    singleInspectorLayout.fill,
+    singleInspectorLayout.stroke,
+    singleInspectorLayout.effects,
+    singleInspectorLayout.export,
+  ];
+  if (singleInspectorLayout.headerActions !== 5 || singleInspectorLayout.selectionKind !== "Star" ||
+      singleInspectorLayout.alignmentTriggers !== 1 || singleInspectorLayout.hasShapeSizeLimits ||
+      !singleInspectorLayout.zoomMatches || !singleInspectorLayout.componentTooltip?.includes("Ctrl+Alt+K") ||
+      !singleInspectorLayout.paintRow ||
+      inspectorOrder.some((index) => index < 0) ||
+      inspectorOrder.some((index, offset) => offset > 0 && index <= inspectorOrder[offset - 1])) {
+    throw new Error(`Single-shape Inspector layout validation failed: ${JSON.stringify(singleInspectorLayout)}`);
+  }
+  await evaluate(`
+    document.querySelector('[data-inspector-action="toggle-inspector-popover"][data-popover="boolean"]').click();
+    true
+  `);
+  await waitFor(
+    `document.querySelector('[data-inspector-popover="boolean"]')?.hidden === false &&
+     document.querySelectorAll('[data-inspector-popover="boolean"] .inspector-menu-item').length === 5`,
+    "single-shape Boolean menu",
+  );
+  const lockedAspectGeometry = await evaluate(`
+    (() => {
+      const width = document.querySelector('[data-property="width"]');
+      const beforeWidth = Number(width.value);
+      const beforeHeight = Number(document.querySelector('[data-property="height"]').value);
+      return { beforeWidth, beforeHeight };
+    })()
+  `);
+  await evaluate(`document.querySelector('[data-inspector-action="toggle-single-aspect"]').click(); true`);
+  await waitFor(
+    `document.querySelector('[data-inspector-action="toggle-single-aspect"]')?.getAttribute("aria-pressed") === "true"`,
+    "single-shape aspect lock",
+  );
+  await evaluate(`
+    (() => {
+      const width = document.querySelector('[data-property="width"]');
+      width.value = String(${lockedAspectGeometry.beforeWidth * 1.25});
+      width.dispatchEvent(new Event("input", { bubbles: true }));
+      width.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    })()
+  `);
+  await waitFor(
+    `Math.abs(Number(document.querySelector('[data-property="height"]')?.value) - ${lockedAspectGeometry.beforeHeight * 1.25}) < 0.2 &&
+     document.querySelector('[data-inspector-action="toggle-single-aspect"]')?.getAttribute("aria-pressed") === "true"`,
+    "single-shape locked aspect ratio",
+  );
+  await evaluate(`document.querySelector('[data-inspector-action="toggle-single-aspect"]').click(); true`);
+  await evaluate(`document.querySelector('[data-inspector-action="open-export-settings"]').click(); true`);
+  await waitFor(
+    `document.querySelector('[data-single-section="export"]')?.classList.contains("open") &&
+     document.querySelector('[data-single-export-scale]') &&
+     document.querySelector('[data-single-export-format]') &&
+     document.querySelector('[data-inspector-action="export-selection"]')?.textContent.includes("Star")`,
+    "single-shape export controls",
+  );
+  await evaluate(`
+    (() => {
+      const format = document.querySelector('[data-single-export-format]');
+      format.value = "svg";
+      format.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    })()
+  `);
+  await waitFor(
+    `document.querySelector('[data-single-export-format]')?.value === "svg" &&
+     document.querySelector('[data-single-export-scale]')?.disabled === true`,
+    "single-shape SVG export mode",
+  );
+  await evaluate(`document.querySelector('[data-inspector-action="export-selection"]').click(); true`);
+  await waitFor(
+    `document.querySelector("#toastRegion")?.textContent.includes("exported as SVG")`,
+    "selected-layer SVG export",
+  );
+  await evaluate(`document.querySelector('[data-inspector-action="toggle-inspector-popover"][data-popover="effects"]').click(); true`);
+  await waitFor(
+    `document.querySelector('[data-inspector-popover="effects"]')?.hidden === false &&
+     document.querySelectorAll('[data-inspector-popover="effects"] .inspector-menu-item').length === 2`,
+    "supported single-shape effects menu",
+  );
+  const originalPaint = await evaluate(`({
+    color: document.querySelector('.paint-layer-row .paint-hex-field input')?.value,
+    opacity: document.querySelector('.paint-layer-row .paint-opacity-field input')?.value,
+  })`);
+  await evaluate(`document.querySelector(".paint-swatch-button").click(); true`);
+  await waitFor(
+    `document.querySelector('[data-color-picker]:not([hidden]) [data-color-plane]') &&
+     document.querySelectorAll('[data-color-picker]:not([hidden]) .paint-picker-swatches button').length === 9`,
+    "single-shape paint picker",
+  );
+  await evaluate(`
+    (() => {
+      const hex = document.querySelector('.paint-picker-hex [data-color-picker-property="hex"]');
+      hex.value = "0D99FF";
+      hex.dispatchEvent(new Event("input", { bubbles: true }));
+      hex.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    })()
+  `);
+  await waitFor(
+    `document.querySelector('[data-color-picker]:not([hidden])') &&
+     document.querySelector('.paint-layer-row .paint-hex-field input')?.value === "0D99FF" &&
+     document.querySelector('.paint-swatch-color')?.style.background.includes("13, 153, 255")`,
+    "live paint picker color",
+  );
+  await evaluate(`
+    (() => {
+      const picker = document.querySelector('[data-color-picker]:not([hidden])');
+      const hex = picker.querySelector('.paint-picker-hex [data-color-picker-property="hex"]');
+      const opacity = picker.querySelector('.paint-picker-opacity [data-color-picker-property="opacity"]');
+      hex.value = ${JSON.stringify(originalPaint.color)};
+      hex.dispatchEvent(new Event("input", { bubbles: true }));
+      hex.dispatchEvent(new Event("change", { bubbles: true }));
+      opacity.value = ${JSON.stringify(originalPaint.opacity)};
+      opacity.dispatchEvent(new Event("input", { bubbles: true }));
+      opacity.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    })()
+  `);
+  await waitFor(
+    `document.querySelector('.paint-layer-row .paint-hex-field input')?.value === ${JSON.stringify(originalPaint.color)} &&
+     document.querySelector('.paint-layer-row .paint-opacity-field input')?.value === ${JSON.stringify(originalPaint.opacity)}`,
+    "paint picker value restoration",
+  );
+  await evaluate(`document.querySelector('[data-inspector-action="close-inspector-popover"]')?.click(); true`);
+  const inspectorOverflow = await evaluate(`({
+    inspector: document.querySelector("#inspector").scrollWidth - document.querySelector("#inspector").clientWidth,
+    fillRow: document.querySelector(".paint-layer-row")?.scrollWidth - document.querySelector(".paint-layer-row")?.clientWidth,
+  })`);
+  if (inspectorOverflow.inspector > 1 || inspectorOverflow.fillRow > 1) {
+    throw new Error(`Single-shape Inspector overflow validation failed: ${JSON.stringify(inspectorOverflow)}`);
+  }
+  await evaluate(`
+    (() => {
+      const format = document.querySelector('[data-single-export-format]');
+      format.value = "png";
+      format.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    })()
+  `);
   await evaluate(`document.querySelector("#zoomValue").click(); true`);
   await delay(150);
   const starHandleState = await evaluate(`
@@ -2243,6 +2416,8 @@ try {
     exportParity: svgPaintExport.parametricExport,
   };
   if (shapeScreenshotPath) {
+    await evaluate(`document.querySelector(".paint-swatch-button")?.click(); true`);
+    await waitFor(`document.querySelector('[data-color-picker]:not([hidden])')`, "paint picker screenshot state");
     const screenshot = await command("Page.captureScreenshot", { format: "png" });
     writeFileSync(shapeScreenshotPath, Buffer.from(screenshot.data, "base64"));
   }
@@ -2389,6 +2564,28 @@ async function connectToTarget(webSocketURL) {
   }
 
   return { socket: targetSocket, command, evaluate, waitFor };
+}
+
+async function assertInspectorIconButtons(evaluate, label) {
+  const audit = await evaluate(`
+    (() => {
+      const buttons = [...document.querySelectorAll("#inspector button:not([data-icon-audit='ignore'])")];
+      return {
+        count: buttons.length,
+        invalid: buttons.map((button) => ({
+          action: button.dataset.inspectorAction || button.dataset.multiAction ||
+            button.dataset.multiTransformAction || button.dataset.canvasAidAction || "unknown",
+          text: button.textContent.trim(),
+          icon: Boolean(button.querySelector("svg")),
+          title: button.getAttribute("title") || "",
+          label: button.getAttribute("aria-label") || "",
+        })).filter((button) => button.text || !button.icon || !button.title || !button.label),
+      };
+    })()
+  `);
+  if (!audit.count || audit.invalid.length) {
+    throw new Error(`${label} icon control audit failed: ${JSON.stringify(audit)}`);
+  }
 }
 
 async function waitForHTTP(url, label) {

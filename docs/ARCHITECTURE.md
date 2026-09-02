@@ -643,6 +643,7 @@ Exit criterion met for the local browser editor: a designer can complete and exp
 - Rotation-aware Alt/Option distance inspection, parent insets, and nearest-sibling gap measurements during direct transforms (implemented)
 - Smart repeated-gap snapping with live spacing labels, thresholded Alt/Option+Shift drag duplication, multi-selection branch copies, cancel-safe one-step history, and repeatable duplicate transforms (implemented)
 - Shape flyout; Shift/Alt drawing; parametric Line/Arrow, Polygon, and Star nodes; arrowheads; shape Inspector controls; direct canvas handles; hit testing; history; masks; and Canvas/PNG/SVG parity (implemented)
+- Current-Figma-inspired single-layer right sidebar with compact action menus; separate Position, Layout, and Appearance groups; layered Fill/Stroke/Effects controls; a live HSV/alpha paint picker; locked dimensions; and selected-layer PNG/SVG export (implemented; multi-selection visual parity remains separate)
 - Editable transform origins, skew, and matrix-level transforms
 - Keyboard focus, accessibility, and dense-workflow polish across Canvas, Layers, and Inspector
 
